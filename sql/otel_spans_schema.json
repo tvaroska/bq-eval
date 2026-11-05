@@ -1,0 +1,140 @@
+[
+  {
+    "name": "trace_id",
+    "type": "STRING",
+    "mode": "REQUIRED",
+    "description": "W3C Trace Context 32-hex-character trace identifier."
+  },
+  {
+    "name": "span_id",
+    "type": "STRING",
+    "mode": "REQUIRED",
+    "description": "W3C 16-hex-character span identifier."
+  },
+  {
+    "name": "parent_span_id",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "Parent span identifier (NULL for root agent invocation span)."
+  },
+  {
+    "name": "start_time",
+    "type": "TIMESTAMP",
+    "mode": "REQUIRED",
+    "description": "Span start timestamp in UTC (partition key)."
+  },
+  {
+    "name": "end_time",
+    "type": "TIMESTAMP",
+    "mode": "REQUIRED",
+    "description": "Span completion timestamp in UTC."
+  },
+  {
+    "name": "latency_ms",
+    "type": "FLOAT64",
+    "mode": "REQUIRED",
+    "description": "End-to-end span execution latency in milliseconds."
+  },
+  {
+    "name": "status_code",
+    "type": "STRING",
+    "mode": "REQUIRED",
+    "description": "OpenTelemetry status code: OK, ERROR, or UNSET."
+  },
+  {
+    "name": "span_kind",
+    "type": "STRING",
+    "mode": "REQUIRED",
+    "description": "GenAI operation name: invoke_agent, execute_tool, chat, embeddings, or retrieval."
+  },
+  {
+    "name": "service_name",
+    "type": "STRING",
+    "mode": "REQUIRED",
+    "description": "OTel resource service.name attribute."
+  },
+  {
+    "name": "gcp_apphub_application_id",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "Resolved Application ID via COALESCE(gcp.apphub.application.id, gcp.agent.id, NULLIF(service_name, 'agent-service'), 'unregistered_app')."
+  },
+  {
+    "name": "gcp_apphub_service_id",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "Cloud App Hub service identifier."
+  },
+  {
+    "name": "gcp_apphub_workload_id",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "Cloud App Hub workload identifier."
+  },
+  {
+    "name": "agent_name",
+    "type": "STRING",
+    "mode": "REQUIRED",
+    "description": "Logical agent persona or sub-agent identifier (gen_ai.agent.name)."
+  },
+  {
+    "name": "model_name",
+    "type": "STRING",
+    "mode": "REQUIRED",
+    "description": "Customer-facing model identifier (e.g., gemini-3.8-flash, gemini-4-argon, gemini-3.5-flash-lite)."
+  },
+  {
+    "name": "input_tokens",
+    "type": "INT64",
+    "mode": "REQUIRED",
+    "description": "Total prompt tokens (gen_ai.usage.input_tokens), inclusive of cached_input_tokens."
+  },
+  {
+    "name": "cached_input_tokens",
+    "type": "INT64",
+    "mode": "REQUIRED",
+    "description": "Cached prefix prompt tokens (gen_ai.usage.cached_input_tokens) billed at 0.1x (<=200K) or 0.2x (>200K)."
+  },
+  {
+    "name": "output_tokens",
+    "type": "INT64",
+    "mode": "REQUIRED",
+    "description": "Generated completion tokens (gen_ai.usage.output_tokens) billed at 4.0x (<=200K) or 7.5x (>200K)."
+  },
+  {
+    "name": "thinking_tokens",
+    "type": "INT64",
+    "mode": "REQUIRED",
+    "description": "Internal reasoning tokens (gen_ai.usage.thinking_tokens) billed at 4.0x (<=200K) or 7.5x (>200K)."
+  },
+  {
+    "name": "tool_name",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "Invoked tool identifier when span_kind = execute_tool."
+  },
+  {
+    "name": "tool_call_status",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "Tool execution outcome (SUCCESS, VALIDATION_ERROR, TIMEOUT, RATE_LIMITED)."
+  },
+  {
+    "name": "rule0_pass",
+    "type": "BOOL",
+    "mode": "REQUIRED",
+    "description": "Deterministic Rule 0 schema, citation-anchor, and math verification outcome."
+  },
+  {
+    "name": "finops_traffic_type",
+    "type": "STRING",
+    "mode": "REQUIRED",
+    "description": "FinOps attribution bucket: production_inference, conflict_escalation, agent_gym_eval, or autorater_judge."
+  },
+  {
+    "name": "attributes",
+    "type": "JSON",
+    "mode": "NULLABLE",
+    "description": "Full OpenTelemetry span attribute payload serialized as BigQuery JSON."
+  }
+]

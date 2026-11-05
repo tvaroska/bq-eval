@@ -1,0 +1,37 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "bq-eval"
+version = "0.1.0"
+description = "BigQuery-native enterprise agent evaluation, OpenTelemetry gen_ai.* observability, and outcome-adjusted AI FinOps showcase."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "pydantic>=2.7.0",
+]
+
+[project.scripts]
+bq-eval = "bq_eval.cli:main"
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0.0",
+  "ruff>=0.6.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["bq_eval"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501"]

@@ -1,0 +1,15 @@
+steps:
+  - name: "ghcr.io/astral-sh/uv:python3.12-bookworm-slim"
+    id: "lint-and-test"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        export PYTHONDONTWRITEBYTECODE=1
+        uv pip install --system -e ".[dev]"
+        ruff check --no-cache bq_eval tests examples
+        pytest -p no:cacheprovider -v
+        bq-eval demo --format markdown
+
+options:
+  logging: CLOUD_LOGGING_ONLY
