@@ -6,6 +6,12 @@ import argparse
 from collections.abc import Sequence
 from pathlib import Path
 
+from bq_eval.loadgen import (
+    evaluate_time_shifted_corpus,
+    export_time_shifted_jsonl,
+    generate_time_shifted_corpus,
+    render_loadgen_markdown_report,
+)
 from bq_eval.showcase import (
     render_markdown_report,
     run_showcase_pipeline,
@@ -30,6 +36,29 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help="Optional file path to write the self-contained HTML scorecard.",
+    )
+
+    loadgen_p = sub.add_parser(
+        "loadgen",
+        help="Time-shift and multiply the 4-app Golden Captured Trace Corpus into today / last 1 hour.",
+    )
+    loadgen_p.add_argument(
+        "--replicas",
+        type=int,
+        default=50,
+        help="Number of replicas per golden trace template (default: 50 -> 800 traces).",
+    )
+    loadgen_p.add_argument(
+        "--last-hour-replicas",
+        type=int,
+        default=15,
+        help="Replicas placed inside the last 1 hour for Step 2.5 queries (default: 15 -> 240 traces).",
+    )
+    loadgen_p.add_argument(
+        "--jsonl-out",
+        type=Path,
+        default=None,
+        help="Optional directory to export time-shifted otel_spans.jsonl and trace_payloads.jsonl.",
     )
 
     sql_p = sub.add_parser(
@@ -62,6 +91,28 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.html_out is not None:
             out_path = write_html_scorecard(artifacts, args.html_out)
             print(f"\nHTML scorecard written to: {out_path}")
+        return 0
+
+    if args.command == "loadgen":
+        spans, payloads, ref_time = generate_time_shifted_corpus(
+            total_replicas=args.replicas,
+            last_hour_replicas=args.last_hour_replicas,
+        )
+        report = evaluate_time_shifted_corpus(
+            spans=spans,
+            payloads=payloads,
+            reference_time=ref_time,
+            total_replicas=args.replicas,
+            last_hour_replicas=args.last_hour_replicas,
+        )
+        print(render_loadgen_markdown_report(report))
+        if args.jsonl_out is not None:
+            spans_path, payloads_path = export_time_shifted_jsonl(
+                spans=spans,
+                payloads=payloads,
+                output_dir=args.jsonl_out,
+            )
+            print(f"\nExported time-shifted JSONL files:\n- {spans_path}\n- {payloads_path}")
         return 0
 
     if args.command == "judge-sql":

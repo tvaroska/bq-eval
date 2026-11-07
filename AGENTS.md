@@ -1,7 +1,7 @@
 # Agent Instructions (`bq-eval`)
 
 ## 1. Purpose & Scope
-`bq-eval` (**BQ Eval**) is the standalone **BigQuery-Native Enterprise Agent Evaluation, Observability, and Cost Management Showcase**. It turns **Google Cloud App Hub + BigQuery** into a zero-extra-database control plane that links `100%` of standard OpenTelemetry `gen_ai.*` traces to Business Unit and risk-tier metadata to measure, govern, and optimize **USD Cost per Verified Outcome**.
+`bq-eval` (**BQ Eval**) is the standalone **BigQuery-Native Enterprise Agent Evaluation, Observability, and Cost Management Showcase**. It positions **BigQuery as a pure execution engine** over standard OpenTelemetry `gen_ai.*` traces, using a progressive **`Step 1 -> Step 2 -> Step 2.5 (Agentic Skill) -> Step 3 -> Open Extensions`** onboarding ladder centered on **USD Cost per Verified Outcome**.
 
 For regulated banking Model Risk Management (`SR 11-7`, `SR 26-2 / OCC 2026-13`) playbooks, academic literature compendiums, and cross-workspace compliance auditing, see sibling repository `agent-evals`.
 
@@ -16,19 +16,26 @@ Before editing this repository, read:
 
 | File / Module | Responsibility |
 | :--- | :--- |
-| [`README.md`](README.md) | 30-second pitch, 3 personas, 6 quantified benefits (`B1`–`B6`), 4-stage adoption ramp, 3-layer App Hub + BigQuery architecture, and 60-second runnable `bq-eval demo`. |
-| [`docs/architecture-and-sql.md`](docs/architecture-and-sql.md) | App Hub In-GCP vs. Off-GCP WIF linkage, 7-table BigQuery Single Store schema (`sql/ddl.sql`), 4 SQL views (`sql/views.sql`), and developer/platform SQL cookbook. |
-| [`docs/finops-and-cost-management.md`](docs/finops-and-cost-management.md) | **USD Cost per Verified Outcome**, 4-bucket `FinOpsTrafficType` attribution, Eval FinOps ROI (`90–95%` savings), `>200K` burndown cliffs, `NFR = 0.0%` Pareto right-sizing, and `FOCUS 1.2` Two-Pool Chargeback + Off-Peak PT Batch-Eval Water-Filling. |
-| [`docs/roadmap.md`](docs/roadmap.md) | Phased showcase delivery roadmap (`M1`–`M4`). |
-| [`sql/ddl.sql`](sql/ddl.sql) | Complete BigQuery DDL for all 7 tables (`app_registry`, `otel_spans`, `trace_payloads`, `golden_cases`, `eval_results`, `sme_labels`, `model_pricing_catalog`) and remote judge model (`gemini_4_argon_judge`). |
-| [`sql/views.sql`](sql/views.sql) | BigQuery views: `v_trace_waterfall`, `v_trace_sql_evaluation`, `v_agent_eval_and_finops_summary`, and `v_capacity_hourly_burndown_export`. |
-| [`bq_eval/otel.py`](bq_eval/otel.py) | OpenTelemetry `gen_ai.*` attributes, `<=200K` and `>200K` weighted burndown math, W3C/XCTC headers, and in-memory `RingBufferSpanExporter`. |
-| [`bq_eval/rubrics.py`](bq_eval/rubrics.py) | 7-rule `AtomicRubric` (`{2, 3, 4}` scales), `PointwiseVerdict`, XML sanitization, and pre-built rubrics. |
-| [`bq_eval/calibration.py`](bq_eval/calibration.py) | Pure-Python `krippendorff_alpha`, `gwets_ac2`, `rogan_gladen_debiased_pass_rate` (95% CIs), `human_agent_swap`, `negative_flip_rate`, `compute_rair_rsr`, `debias_system1_logprobs`, and `evaluate_release_gate`. |
-| [`bq_eval/sql_eval.py`](bq_eval/sql_eval.py) | Fail-closed in-memory & SQL evaluators (`evaluate_traces_rule0_in_memory`, `summarize_eval_and_finops_in_memory`, XML-escaped `build_ai_generate_table_judge_sql`, golden promotion, and Rogan-Gladen SQL). |
-| [`bq_eval/finops.py`](bq_eval/finops.py) | Multi-cloud `DEFAULT_MODEL_PRICING_CATALOG`, 4-bucket USD attribution, `compute_eval_roi`, `diagnose_prefix_cache_health`, `compute_pareto_frontier`, `plan_offpeak_eval_waterfill`, and `compute_focus_two_pool_chargeback`. |
-| [`bq_eval/showcase.py`](bq_eval/showcase.py) | 3-BU synthetic enterprise dataset + `<2s` local SQLite/Python verification + HTML & Markdown Executive Scorecard generator. |
-| [`bq_eval/cli.py`](bq_eval/cli.py) | `bq-eval` CLI (`demo`, `evaluate`, `calibrate`, `finops`, `sql`). |
+| [`README.md`](README.md) | 30-second pitch, progressive `Step 1 -> Step 2 -> Step 2.5 -> Step 3` onboarding guide, 3 personas, and runnable `bq-eval demo` quickstart. |
+| [`docs/architecture-and-sql.md`](docs/architecture-and-sql.md) | Step 1–3 SQL walkthrough, portable App ID resolution (`EVAL-P07`), XML injection defense (`EVAL-P08`), conditional Rogan-Gladen SQL (`EVAL-P05`), and open 7-table enterprise DDL (`sql/ddl.sql`). |
+| [`docs/finops-and-cost-management.md`](docs/finops-and-cost-management.md) | **USD Cost per Verified Outcome (`CPVO`)**, 4-bucket `FinOpsTrafficType` attribution, Eval FinOps ROI (`90–95%` savings), `>200K` burndown cliffs, `NFR = 0.0%` Pareto right-sizing, and `FOCUS 1.2` Two-Pool Chargeback + Off-Peak PT Batch-Eval Water-Filling. |
+| [`docs/roadmap.md`](docs/roadmap.md) | Phased showcase delivery roadmap (`M1`–`M5`). |
+| [`sql/demo_time_shift_loadgen.sql`](sql/demo_time_shift_loadgen.sql) | **Demo Time-Shift Load Generator**: Seeds 16 Golden Trace Templates across 4 apps (`docubridge-underwriting`, `quoting-concierge-adk`, `claims-triage-langgraph`, and unregistered `renewal-auditor-svc`) and time-shifts/multiplies them into `CURRENT_TIMESTAMP()` (240 traces in last 1h, 800 total). |
+| [`sql/step1_trace_views.sql`](sql/step1_trace_views.sql) | **Step 1 (`0` New Tables, No Skill)**: Static SQL views & queries over existing traces (`v_step1_trace_waterfall`, `v_step1_trace_eval`, `v_step1_cost_per_outcome`). |
+| [`sql/step2_rubrics.csv`](sql/step2_rubrics.csv) | **Step 2 (`1` Rubric Table/CSV)**: 4 example 4-point ordinal rubrics (`groundedness_4pt_v1`, `tool_trajectory_4pt_v1`, `completeness_4pt_v1`, `escalation_policy_4pt_v1`). |
+| [`sql/step2_stateless_eval.sql`](sql/step2_stateless_eval.sql) | **Step 2 (Stateless Eval, No Skill)**: `agent_eval.rubrics` setup (GCS CSV or native table) + static `AI.GENERATE_TABLE` queries on 100% of traces and a 10% sample without saving results. |
+| [`skills/bq-eval/SKILL.md`](skills/bq-eval/SKILL.md) | **Step 2.5 (Agentic Skill)**: Defines new 4-point rubrics from plain English and generates custom slice queries (`5%`, `last 1 hour of traces`, app/error filters) via [`skills/bq-eval/references/sql_recipes.md`](skills/bq-eval/references/sql_recipes.md). |
+| [`sql/step3_saved_results.sql`](sql/step3_saved_results.sql) | **Step 3 (Saved Eval Results)**: Persists verdicts into `agent_eval.eval_results` (`eval_run_id`) with `v_step3_eval_runs` and `v_step3_paired_run_comparison` (`0%` negative-flip gates). |
+| [`sql/ddl.sql`](sql/ddl.sql) | Complete BigQuery DDL including open enterprise extensions (`app_registry`, `otel_spans`, `trace_payloads`, `golden_cases`, `eval_results`, `sme_labels`, `model_pricing_catalog`). |
+| [`sql/views.sql`](sql/views.sql) | BigQuery views: `v_trace_waterfall`, `v_trace_sql_evaluation`, `v_step1_cost_per_outcome`, `v_agent_eval_and_finops_summary`, and `v_capacity_hourly_burndown_export`. |
+| [`bq_eval/otel.py`](bq_eval/otel.py) | `OTelGenAISpanRecord`, `GenAISpanKind`, `FinOpsTrafficType`, `<=200K` and `>200K` `compute_weighted_burndown_tokens()`, and `resolve_application_id()`. |
+| [`bq_eval/rubrics.py`](bq_eval/rubrics.py) | 4-point `RubricSpec`, `OrdinalScoreOutput` (`reasoning_trace` first), `wrap_untrusted_text()`, `build_autorater_system_prompt()`, and `CANONICAL_RUBRICS`. |
+| [`bq_eval/calibration.py`](bq_eval/calibration.py) | Pure-Python `ConfusionMatrix`, `compute_confusion_matrix()`, `rogan_gladen_calibrate()` (95% CIs + fail-closed `None` guard), and `compute_gwet_ac2()`. |
+| [`bq_eval/sql_eval.py`](bq_eval/sql_eval.py) | Fail-closed SQLite twin `evaluate_traces_in_sqlite()`, `escape_sql_xml_expr()`, and XML-escaped `build_ai_generate_table_judge_sql()`. |
+| [`bq_eval/finops.py`](bq_eval/finops.py) | `compute_eval_finops_roi()`, `diagnose_prefix_cache_dilution()`, `compute_pareto_frontier()` (`NFR = 0.0%`), `allocate_focus_two_pool_chargeback()`, and `plan_off_peak_eval_schedule()`. |
+| [`bq_eval/loadgen.py`](bq_eval/loadgen.py) | `build_golden_seed_templates()`, `generate_time_shifted_corpus()`, `evaluate_time_shifted_corpus()`, and `export_time_shifted_jsonl()`. |
+| [`bq_eval/showcase.py`](bq_eval/showcase.py) | `run_showcase_pipeline()`, `render_markdown_report()`, and `write_html_scorecard()` (with embedded SVG favicon). |
+| [`bq_eval/cli.py`](bq_eval/cli.py) | `bq-eval` CLI (`demo [--html-out PATH]`, `loadgen [--replicas ... --last-hour-replicas ...]`, and `judge-sql`). |
 
 ---
 
@@ -38,5 +45,5 @@ Run linting, unit tests, and the runnable showcase demo before committing:
 ```bash
 ruff check --no-cache bq_eval tests examples
 pytest -p no:cacheprovider -v
-python3 -m bq_eval.cli demo --format markdown
+python3 -m bq_eval.cli demo
 ```

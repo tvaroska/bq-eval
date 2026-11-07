@@ -98,6 +98,7 @@ WITH trace_agg AS (
 )
 SELECT
   t.*,
+  COALESCE(r.business_unit, 'unassigned_bu') AS business_unit,
   COALESCE(r.sla_latency_ms, 5000.0) AS sla_latency_ms,
   COALESCE(r.cost_center, 'UNASSIGNED') AS cost_center,
   SAFE_DIVIDE(t.total_cached_input_tokens, NULLIF(t.total_input_tokens, 0)) AS cache_hit_ratio,
@@ -105,6 +106,25 @@ SELECT
 FROM trace_agg AS t
 LEFT JOIN `agent_eval.app_registry` AS r
   ON t.apphub_application_id = r.apphub_application_id;
+
+-- -----------------------------------------------------------------------------
+-- View 2B: Step 1 Cost per Application, Business Unit & Outcome (0 New Tables)
+-- -----------------------------------------------------------------------------
+CREATE OR REPLACE VIEW `agent_eval.v_step1_cost_per_outcome` AS
+SELECT
+  apphub_application_id,
+  business_unit,
+  cost_center,
+  COUNT(*) AS total_traces,
+  COUNTIF(rule0_pass) AS step1_passing_traces,
+  AVG(CAST(rule0_pass AS FLOAT64)) AS step1_pass_rate,
+  AVG(CAST(tool_error_count = 0 AS FLOAT64)) AS tool_success_rate,
+  APPROX_QUANTILES(trace_latency_ms, 100)[OFFSET(95)] AS p95_latency_ms,
+  SUM(trace_span_cost_usd) AS total_cost_usd,
+  SAFE_DIVIDE(SUM(trace_span_cost_usd), COUNT(*)) AS cost_per_trace_usd,
+  SAFE_DIVIDE(SUM(trace_span_cost_usd), NULLIF(COUNTIF(rule0_pass), 0)) AS step1_cost_per_outcome_usd
+FROM `agent_eval.v_trace_sql_evaluation`
+GROUP BY apphub_application_id, business_unit, cost_center;
 
 -- -----------------------------------------------------------------------------
 -- View 3: Unified Tier 1-3 Calibrated Quality & 4-Bucket FinOps Summary
@@ -117,8 +137,8 @@ WITH trace_metrics AS (
     apphub_application_id,
     COUNT(*) AS total_traces,
     COUNTIF(primary_traffic_type IN ('production_inference', 'conflict_escalation')) AS production_traces,
-    AVG(CAST(rule0_pass AS FLOAT64)) AS rule0_pass_rate,
-    AVG(CAST(tool_error_count = 0 AS FLOAT64)) AS tool_success_rate,
+    AVG(IF(rule0_pass, 1.0, 0.0)) AS rule0_pass_rate,
+    AVG(IF(tool_error_count = 0, 1.0, 0.0)) AS tool_success_rate,
     APPROX_QUANTILES(trace_latency_ms, 100)[OFFSET(95)] AS p95_latency_ms,
     AVG(cache_hit_ratio) AS avg_cache_hit_ratio,
     SUM(weighted_burndown_tokens) AS total_weighted_burndown_tokens,
@@ -135,7 +155,7 @@ judge_metrics AS (
     e.rubric_id,
     COUNTIF(e.rule0_pass) AS judged_samples,
     COUNT(*) AS total_judge_invocations,
-    AVG(CASE WHEN e.rule0_pass THEN CAST(e.binary_pass AS FLOAT64) END) AS raw_judge_pass_rate,
+    AVG(CASE WHEN e.rule0_pass THEN IF(e.binary_pass, 1.0, 0.0) END) AS raw_judge_pass_rate,
     SUM(
       ((e.judge_input_tokens / 1e6) * COALESCE(m.input_usd_per_1m, 1.25))
       + (((e.judge_output_tokens + e.judge_thinking_tokens) / 1e6) * COALESCE(m.output_usd_per_1m, 5.00))

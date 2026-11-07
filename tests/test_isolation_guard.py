@@ -16,6 +16,7 @@ DETERMINISTIC_CORE_MODULES = (
     "calibration.py",
     "sql_eval.py",
     "finops.py",
+    "loadgen.py",
 )
 
 FORBIDDEN_IMPORT_PREFIXES = (

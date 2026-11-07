@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import re
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -22,6 +23,11 @@ from bq_eval.finops import (
     compute_pareto_frontier,
     diagnose_prefix_cache_dilution,
     plan_off_peak_eval_schedule,
+)
+from bq_eval.loadgen import (
+    build_golden_seed_templates,
+    evaluate_time_shifted_corpus,
+    generate_time_shifted_corpus,
 )
 from bq_eval.otel import (
     FinOpsTrafficType,
@@ -63,6 +69,7 @@ def test_ddl_and_views_table_parity() -> None:
     expected_views = {
         "agent_eval.v_trace_waterfall",
         "agent_eval.v_trace_sql_evaluation",
+        "agent_eval.v_step1_cost_per_outcome",
         "agent_eval.v_agent_eval_and_finops_summary",
         "agent_eval.v_capacity_hourly_burndown_export",
     }
@@ -363,3 +370,137 @@ def test_showcase_demo_and_cli_html_favicon(tmp_path: Path) -> None:
     artifacts = run_showcase_pipeline()
     out = write_html_scorecard(artifacts, tmp_path / "direct.html")
     assert out.exists()
+
+
+def test_progressive_step1_step2_step25_step3_pack() -> None:
+    """Verify the progressive Step 1 -> Step 2 -> Step 2.5 Skill -> Step 3 SQL and CSV pack."""
+    # Step 1: 0 new tables, static SQL views and queries
+    step1_sql = (REPO_ROOT / "sql" / "step1_trace_views.sql").read_text(encoding="utf-8")
+    assert "CREATE OR REPLACE VIEW `agent_eval.v_step1_trace_waterfall`" in step1_sql
+    assert "CREATE OR REPLACE VIEW `agent_eval.v_step1_trace_eval`" in step1_sql
+    assert "CREATE OR REPLACE VIEW `agent_eval.v_step1_cost_per_outcome`" in step1_sql
+    assert "step1_cost_per_outcome_usd" in step1_sql
+    assert "unassigned_bu" in step1_sql
+
+    # Step 2: 1 Rubric Table / CSV + static SQL for 100% full traces and 10% sample
+    csv_path = REPO_ROOT / "sql" / "step2_rubrics.csv"
+    with csv_path.open("r", encoding="utf-8", newline="") as f:
+        rows = list(csv.DictReader(f))
+    assert len(rows) == 4
+    rubric_ids = {r["rubric_id"] for r in rows}
+    assert rubric_ids == {
+        "groundedness_4pt_v1",
+        "tool_trajectory_4pt_v1",
+        "completeness_4pt_v1",
+        "escalation_policy_4pt_v1",
+    }
+    for r in rows:
+        assert int(r["passing_score"]) == 3
+        assert "Score 1" in r["rubric_prompt"] and "Score 4" in r["rubric_prompt"]
+
+    step2_sql = (REPO_ROOT / "sql" / "step2_stateless_eval.sql").read_text(encoding="utf-8")
+    assert "CREATE OR REPLACE EXTERNAL TABLE `agent_eval.rubrics`" in step2_sql
+    assert "CREATE OR REPLACE TABLE `agent_eval.rubrics`" in step2_sql
+    assert "CREATE OR REPLACE VIEW `agent_eval.v_step2_trace_rubric_prompts`" in step2_sql
+    assert "MOD(ABS(FARM_FINGERPRINT(trace_id)), 100) < 10" in step2_sql
+    assert "AI.GENERATE_TABLE(" in step2_sql
+
+    # Step 2.5: Agentic Skill (define new rubrics, run on 5%, run on last 1 hour of traces)
+    skill_md = (REPO_ROOT / "skills" / "bq-eval" / "SKILL.md").read_text(encoding="utf-8")
+    recipes_md = (
+        REPO_ROOT / "skills" / "bq-eval" / "references" / "sql_recipes.md"
+    ).read_text(encoding="utf-8")
+    assert "name: bq-eval" in skill_md
+    assert "MOD(ABS(FARM_FINGERPRINT(trace_id)), 100) < 5" in skill_md
+    assert "TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR)" in skill_md
+    assert "MERGE INTO agent_eval.rubrics" in skill_md
+    assert "MERGE `agent_eval.rubrics` AS target" in recipes_md
+    assert "## 3. Stateless Eval on Only the Last 1 Hour of Traces" in recipes_md
+
+    # Step 3: Saved results table (`eval_results`) and paired run comparison
+    step3_sql = (REPO_ROOT / "sql" / "step3_saved_results.sql").read_text(encoding="utf-8")
+    assert "CREATE TABLE IF NOT EXISTS `agent_eval.eval_results`" in step3_sql
+    assert "CREATE OR REPLACE VIEW `agent_eval.v_step3_eval_runs`" in step3_sql
+    assert "CREATE OR REPLACE VIEW `agent_eval.v_step3_paired_run_comparison`" in step3_sql
+    assert "is_negative_flip" in step3_sql
+
+
+def test_time_shift_loadgen_sql_and_cli_parity(tmp_path: Path) -> None:
+    """Verify the Capture-Once, Time-Shift & Multiply Demo Load Generator across all 4 apps."""
+    templates = build_golden_seed_templates()
+    assert len(templates) == 16
+
+    now = datetime(2026, 11, 6, 15, 0, 0, tzinfo=UTC)
+    spans, payloads, ref_time = generate_time_shifted_corpus(
+        reference_time=now,
+        total_replicas=50,
+        last_hour_replicas=15,
+    )
+    assert ref_time == now
+    assert len(payloads) == 50 * 16  # 800 traces
+    assert len(spans) > len(payloads)  # Multi-span waterfalls
+
+    # Verify parent-child span waterfall integrity
+    span_ids = {s.span_id for s in spans}
+    for s in spans:
+        if s.parent_span_id is not None:
+            assert s.parent_span_id in span_ids
+
+    report = evaluate_time_shifted_corpus(
+        spans=spans,
+        payloads=payloads,
+        reference_time=now,
+        total_replicas=50,
+        last_hour_replicas=15,
+    )
+    assert report.total_traces == 800
+    assert report.last_1h_traces == 15 * 16  # 240 traces inside the last 1 hour
+    assert len(report.step1_rows) == 4
+
+    by_app = {r.apphub_application_id: r for r in report.step1_rows}
+    assert set(by_app) == {
+        "docubridge-underwriting",
+        "quoting-concierge-adk",
+        "claims-triage-langgraph",
+        "renewal-auditor-svc",
+    }
+    # docubridge-underwriting must have the highest cost per trace and outcome (>10x higher)
+    docu = by_app["docubridge-underwriting"]
+    quote = by_app["quoting-concierge-adk"]
+    audit = by_app["renewal-auditor-svc"]
+    assert docu.cost_per_trace_usd > quote.cost_per_trace_usd * 10.0
+    assert docu.step1_cost_per_outcome_usd is not None
+    assert quote.step1_cost_per_outcome_usd is not None
+    assert docu.step1_cost_per_outcome_usd > quote.step1_cost_per_outcome_usd * 10.0
+    # Unregistered renewal-auditor-svc falls back to unassigned_bu
+    assert audit.business_unit == "unassigned_bu"
+
+    # Verify CLI loadgen command and JSONL export
+    jsonl_dir = tmp_path / "seed_jsonl"
+    rc_loadgen = cli_main(
+        [
+            "loadgen",
+            "--replicas",
+            "10",
+            "--last-hour-replicas",
+            "4",
+            "--jsonl-out",
+            str(jsonl_dir),
+        ]
+    )
+    assert rc_loadgen == 0
+    assert (jsonl_dir / "otel_spans.jsonl").is_file()
+    assert (jsonl_dir / "trace_payloads.jsonl").is_file()
+
+    # Verify SQL time-shift file
+    loadgen_sql = (REPO_ROOT / "sql" / "demo_time_shift_loadgen.sql").read_text(encoding="utf-8")
+    assert "CREATE OR REPLACE TABLE `agent_eval.seed_otel_spans`" in loadgen_sql
+    assert "CREATE OR REPLACE TABLE `agent_eval.seed_trace_payloads`" in loadgen_sql
+    assert "CREATE OR REPLACE TABLE `agent_eval.otel_spans`" in loadgen_sql
+    assert "CREATE OR REPLACE TABLE `agent_eval.trace_payloads`" in loadgen_sql
+    assert "docubridge-underwriting" in loadgen_sql
+    assert "quoting-concierge-adk" in loadgen_sql
+    assert "claims-triage-langgraph" in loadgen_sql
+    assert "renewal-auditor-svc" in loadgen_sql
+
+
