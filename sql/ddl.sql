@@ -272,6 +272,9 @@ OPTIONS (
   description = 'Tier 2 AI.GENERATE_TABLE evaluation results with judge token telemetry and outcome_id attribution.'
 );
 
+ALTER TABLE `agent_eval.eval_results`
+  ADD COLUMN IF NOT EXISTS outcome_id STRING OPTIONS (description = 'Business outcome identifier (EVAL-P11 outcome.id).');
+
 -- -----------------------------------------------------------------------------
 -- 6. Stratified SME Calibration Audit Labels (agent_eval.sme_labels)
 -- -----------------------------------------------------------------------------
@@ -294,6 +297,9 @@ CLUSTER BY apphub_application_id, rubric_id
 OPTIONS (
   description = 'Human SME audit labels for computing empirical TPR, TNR, Youden J, and Gwet AC2.'
 );
+
+ALTER TABLE `agent_eval.sme_labels`
+  ADD COLUMN IF NOT EXISTS outcome_id STRING OPTIONS (description = 'Business outcome identifier (EVAL-P11 outcome.id).');
 
 -- -----------------------------------------------------------------------------
 -- 7. Effective-Dated Model Pricing & Burndown Catalog (agent_eval.model_pricing_catalog)
