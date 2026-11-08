@@ -21,15 +21,15 @@
 --       - Replicas 16..50 (560 traces) spread across the LAST 24 HOURS (800 total traces)
 -- =============================================================================
 
-CREATE SCHEMA IF NOT EXISTS `agent_eval`
+CREATE SCHEMA IF NOT EXISTS `agent_eval_seed`
 OPTIONS (
-  description = 'BQ Eval: Step 1-3 progressive trace evaluation, rubric catalog, and cost management.'
+  description = 'BQ Eval: Isolated synthetic golden seed and time-shift demo corpus (never mixed with live agent_eval telemetry).'
 );
 
 -- -----------------------------------------------------------------------------
--- 1. Ensure Target Trace & Payload Tables Exist
+-- 1. Ensure Target Synthetic Trace & Payload Tables Exist in agent_eval_seed
 -- -----------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS `agent_eval.otel_spans` (
+CREATE TABLE IF NOT EXISTS `agent_eval_seed.otel_spans` (
   trace_id STRING NOT NULL,
   span_id STRING NOT NULL,
   parent_span_id STRING,
@@ -57,7 +57,7 @@ CREATE TABLE IF NOT EXISTS `agent_eval.otel_spans` (
 PARTITION BY DATE(start_time)
 CLUSTER BY gcp_apphub_application_id, trace_id, span_kind;
 
-CREATE TABLE IF NOT EXISTS `agent_eval.trace_payloads` (
+CREATE TABLE IF NOT EXISTS `agent_eval_seed.trace_payloads` (
   trace_id STRING NOT NULL,
   apphub_application_id STRING NOT NULL,
   ingested_at TIMESTAMP NOT NULL,
@@ -71,7 +71,7 @@ CLUSTER BY apphub_application_id, trace_id;
 -- -----------------------------------------------------------------------------
 -- 2. Golden Captured Seed Tables (Recorded Once, Replayed into Any Day/Hour)
 -- -----------------------------------------------------------------------------
-CREATE OR REPLACE TABLE `agent_eval.seed_otel_spans` AS
+CREATE OR REPLACE TABLE `agent_eval_seed.seed_otel_spans` AS
 SELECT * FROM UNNEST([
   STRUCT(
     -- =========================================================================
@@ -331,7 +331,7 @@ SELECT * FROM UNNEST([
   )
 ]);
 
-CREATE OR REPLACE TABLE `agent_eval.seed_trace_payloads` AS
+CREATE OR REPLACE TABLE `agent_eval_seed.seed_trace_payloads` AS
 SELECT * FROM UNNEST([
   STRUCT(
     1 AS template_idx,
@@ -441,7 +441,7 @@ SELECT * FROM UNNEST([
 --   * Uses CREATE OR REPLACE TABLE ... AS SELECT so it runs in both billed
 --     projects and BigQuery Sandbox free-tier scratchpads without DML blocks
 -- -----------------------------------------------------------------------------
-CREATE OR REPLACE TABLE `agent_eval.otel_spans`
+CREATE OR REPLACE TABLE `agent_eval_seed.otel_spans`
 PARTITION BY DATE(start_time)
 CLUSTER BY gcp_apphub_application_id, trace_id, span_kind
 AS
@@ -507,12 +507,12 @@ shifted_spans AS (
     s.rule0_pass,
     s.finops_traffic_type,
     s.attributes
-  FROM `agent_eval.seed_otel_spans` AS s
+  FROM `agent_eval_seed.seed_otel_spans` AS s
   CROSS JOIN replicas AS r
 )
 SELECT * FROM shifted_spans;
 
-CREATE OR REPLACE TABLE `agent_eval.trace_payloads`
+CREATE OR REPLACE TABLE `agent_eval_seed.trace_payloads`
 PARTITION BY DATE(ingested_at)
 CLUSTER BY apphub_application_id, trace_id
 AS
@@ -539,5 +539,5 @@ SELECT
   p.user_prompt,
   p.retrieved_context,
   p.final_response
-FROM `agent_eval.seed_trace_payloads` AS p
+FROM `agent_eval_seed.seed_trace_payloads` AS p
 CROSS JOIN replicas AS r;

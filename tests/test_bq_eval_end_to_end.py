@@ -47,14 +47,12 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 def test_ddl_and_views_table_parity() -> None:
-    """Verify all 7 physical tables referenced in `sql/views.sql` exist in `sql/ddl.sql`."""
+    """Verify physical tables and M1 compatibility views in `sql/ddl.sql` and `sql/views.sql`."""
     ddl_sql = (REPO_ROOT / "sql" / "ddl.sql").read_text(encoding="utf-8")
     views_sql = (REPO_ROOT / "sql" / "views.sql").read_text(encoding="utf-8")
 
     expected_tables = {
         "agent_eval.app_registry",
-        "agent_eval.otel_spans",
-        "agent_eval.trace_payloads",
         "agent_eval.golden_cases",
         "agent_eval.eval_results",
         "agent_eval.sme_labels",
@@ -64,12 +62,28 @@ def test_ddl_and_views_table_parity() -> None:
         re.findall(r"CREATE TABLE IF NOT EXISTS `(agent_eval\.[a-z0-9_]+)`", ddl_sql)
     )
     assert created_tables == expected_tables
+
+    expected_ddl_views = {
+        "agent_eval.otel_spans",
+        "agent_eval.trace_payloads",
+    }
+    created_ddl_views = set(
+        re.findall(r"CREATE OR REPLACE VIEW `(agent_eval\.[a-z0-9_]+)`", ddl_sql)
+    )
+    assert created_ddl_views == expected_ddl_views
+    assert "CREATE MODEL IF NOT EXISTS `agent_eval.gemini_3_8_flash_judge`" in ddl_sql
     assert "CREATE MODEL IF NOT EXISTS `agent_eval.gemini_4_argon_judge`" in ddl_sql
 
     expected_views = {
         "agent_eval.v_trace_waterfall",
         "agent_eval.v_trace_sql_evaluation",
         "agent_eval.v_step1_cost_per_outcome",
+        "agent_eval.v_outcomes",
+        "agent_eval.v_infra_cost_estimate",
+        "agent_eval.v_cost_per_verified_outcome",
+        "agent_eval.v_attribution_coverage",
+        "agent_eval.v_skill_lineage_roi",
+        "agent_eval.v_otel_spans_coverage",
         "agent_eval.v_agent_eval_and_finops_summary",
         "agent_eval.v_capacity_hourly_burndown_export",
     }
@@ -492,12 +506,12 @@ def test_time_shift_loadgen_sql_and_cli_parity(tmp_path: Path) -> None:
     assert (jsonl_dir / "otel_spans.jsonl").is_file()
     assert (jsonl_dir / "trace_payloads.jsonl").is_file()
 
-    # Verify SQL time-shift file
+    # Verify SQL time-shift file (isolated to agent_eval_seed)
     loadgen_sql = (REPO_ROOT / "sql" / "demo_time_shift_loadgen.sql").read_text(encoding="utf-8")
-    assert "CREATE OR REPLACE TABLE `agent_eval.seed_otel_spans`" in loadgen_sql
-    assert "CREATE OR REPLACE TABLE `agent_eval.seed_trace_payloads`" in loadgen_sql
-    assert "CREATE OR REPLACE TABLE `agent_eval.otel_spans`" in loadgen_sql
-    assert "CREATE OR REPLACE TABLE `agent_eval.trace_payloads`" in loadgen_sql
+    assert "CREATE OR REPLACE TABLE `agent_eval_seed.seed_otel_spans`" in loadgen_sql
+    assert "CREATE OR REPLACE TABLE `agent_eval_seed.seed_trace_payloads`" in loadgen_sql
+    assert "CREATE OR REPLACE TABLE `agent_eval_seed.otel_spans`" in loadgen_sql
+    assert "CREATE OR REPLACE TABLE `agent_eval_seed.trace_payloads`" in loadgen_sql
     assert "docubridge-underwriting" in loadgen_sql
     assert "quoting-concierge-adk" in loadgen_sql
     assert "claims-triage-langgraph" in loadgen_sql

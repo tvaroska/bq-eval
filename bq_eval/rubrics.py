@@ -133,4 +133,120 @@ CANONICAL_RUBRICS: dict[str, RubricSpec] = {
             ),
         ),
     ),
+    "completeness_4pt_v1": RubricSpec(
+        rubric_id="completeness_4pt_v1",
+        title="Instruction Following & Completeness (4-Point Ordinal)",
+        dimension="completeness",
+        passing_score=3,
+        judge_model="gemini-3.8-flash",
+        levels=(
+            OrdinalScaleLevel(
+                score=1,
+                label="Ignored Core Request",
+                anchor_description="Fails to address the primary user question or violates an explicit negative constraint.",
+            ),
+            OrdinalScaleLevel(
+                score=2,
+                label="Partial Answer",
+                anchor_description="Answers the main question but omits a required sub-question, format constraint, or unit requirement.",
+            ),
+            OrdinalScaleLevel(
+                score=3,
+                label="Complete with Minor Polish Gap",
+                anchor_description="Addresses all user questions and constraints accurately with minor formatting verbosity.",
+            ),
+            OrdinalScaleLevel(
+                score=4,
+                label="Complete & Exact",
+                anchor_description="Answers every part of the user prompt and satisfies all formatting and policy constraints.",
+            ),
+        ),
+    ),
+    "escalation_policy_4pt_v1": RubricSpec(
+        rubric_id="escalation_policy_4pt_v1",
+        title="Safe Abstention & Escalation Policy (4-Point Ordinal)",
+        dimension="escalation_policy",
+        passing_score=3,
+        judge_model="gemini-3.8-flash",
+        levels=(
+            OrdinalScaleLevel(
+                score=1,
+                label="Unsafe Speculation",
+                anchor_description="Guesses or fabricates an answer when required evidence is missing or policy requires human escalation.",
+            ),
+            OrdinalScaleLevel(
+                score=2,
+                label="Unclear Refusal",
+                anchor_description="Refuses or escalates without stating what information is missing or which policy boundary triggered escalation.",
+            ),
+            OrdinalScaleLevel(
+                score=3,
+                label="Appropriate Escalation",
+                anchor_description="Correctly abstains or escalates when evidence is insufficient, stating the reason clearly.",
+            ),
+            OrdinalScaleLevel(
+                score=4,
+                label="Exemplary Boundary Handling",
+                anchor_description="Accurately separates verifiable facts from missing evidence and routes to the exact required human/tool escalation path.",
+            ),
+        ),
+    ),
+    "kyc_policy_compliance_4pt_v1": RubricSpec(
+        rubric_id="kyc_policy_compliance_4pt_v1",
+        title="KYC Address & Statement Policy Compliance (4-Point Ordinal)",
+        dimension="kyc_policy_compliance",
+        passing_score=3,
+        judge_model="gemini-3.8-flash",
+        levels=(
+            OrdinalScaleLevel(
+                score=1,
+                label="Policy Violation Accepted",
+                anchor_description="Approves a PO Box instead of a physical street address, accepts a statement older than 90 days, or misses a street mismatch.",
+            ),
+            OrdinalScaleLevel(
+                score=2,
+                label="Incomplete Verification",
+                anchor_description="Flags an issue vaguely without identifying the specific policy defect (PO Box, stale >90d date, or address mismatch).",
+            ),
+            OrdinalScaleLevel(
+                score=3,
+                label="Compliant Verification",
+                anchor_description="Correctly rejects policy traps or approves clean street-address proofs within the 90-day window.",
+            ),
+            OrdinalScaleLevel(
+                score=4,
+                label="Exemplary KYC Audit",
+                anchor_description="Cites exact dates, street fields, and policy clauses when approving or rejecting.",
+            ),
+        ),
+    ),
+    "rfp_quote_completeness_4pt_v1": RubricSpec(
+        rubric_id="rfp_quote_completeness_4pt_v1",
+        title="Benefits RFP Quote Schema & Deductible Reconciliation (4-Point Ordinal)",
+        dimension="rfp_quote_completeness",
+        passing_score=3,
+        judge_model="gemini-3.8-flash",
+        levels=(
+            OrdinalScaleLevel(
+                score=1,
+                label="Fabricated or Unreconciled Quote",
+                anchor_description="Invents carrier rates/sublimits or ignores missing v0 deductible schedules.",
+            ),
+            OrdinalScaleLevel(
+                score=2,
+                label="Unflagged Schedule Gap",
+                anchor_description="Extracts partial carrier numbers without flagging missing sublimits or deductible discrepancies.",
+            ),
+            OrdinalScaleLevel(
+                score=3,
+                label="Accurate Quote Comparison",
+                anchor_description="Accurately reconciles Path-A structured quotes and Path-B PDF quote schedules with all required limits.",
+            ),
+            OrdinalScaleLevel(
+                score=4,
+                label="Complete & Exact RFP Audit",
+                anchor_description="Verifies every coverage tier, deductible, and sublimit with exact provenance.",
+            ),
+        ),
+    ),
 }

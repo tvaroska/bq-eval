@@ -1,4 +1,4 @@
-"""M1 compatibility-view contract tests (authored in M0; red/xfailed until M1 lands).
+"""M1 compatibility-view contract tests.
 
 Asserts the Step-5 and Step-8 BigQuery SQL contract for native Telemetry API +
 Observability Analytics linked datasets (`obs_traces._AllSpans` and
@@ -23,18 +23,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-import pytest
-
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SQL_DIR = REPO_ROOT / "sql"
-
-M1_XFAIL = pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "M1 pending: agent_eval.otel_spans / trace_payloads _AllSpans compatibility "
-        "views, outcome attribution views, and agent_eval_seed isolation land in M1"
-    ),
-)
 
 REQUIRED_OTEL_SPANS_VIEW_COLUMNS: tuple[str, ...] = (
     "trace_id",
@@ -71,7 +61,6 @@ def _all_sql_text() -> str:
     )
 
 
-@M1_XFAIL
 def test_otel_spans_and_trace_payloads_are_views_over_linked_datasets() -> None:
     """`ddl.sql` defines `otel_spans` and `trace_payloads` as views over `_AllSpans` and `_AllLogs`."""
     ddl = (SQL_DIR / "ddl.sql").read_text(encoding="utf-8")
@@ -99,7 +88,6 @@ def test_otel_spans_and_trace_payloads_are_views_over_linked_datasets() -> None:
     )
 
 
-@M1_XFAIL
 def test_otel_spans_compat_view_projects_all_m1_columns() -> None:
     """`agent_eval.otel_spans` view maps all required `_AllSpans` columns and semconv keys."""
     ddl = (SQL_DIR / "ddl.sql").read_text(encoding="utf-8")
@@ -132,7 +120,6 @@ def test_otel_spans_compat_view_projects_all_m1_columns() -> None:
         )
 
 
-@M1_XFAIL
 def test_m1_outcome_and_coverage_views_defined() -> None:
     """M1 defines `v_outcomes`, `v_cost_per_verified_outcome`, `v_attribution_coverage`, and `v_otel_spans_coverage`."""
     sql_text = _all_sql_text()
@@ -154,7 +141,6 @@ def test_m1_outcome_and_coverage_views_defined() -> None:
     )
 
 
-@M1_XFAIL
 def test_synthetic_seed_and_loadgen_isolated_to_agent_eval_seed() -> None:
     """Synthetic golden seed tables and loadgen target `agent_eval_seed`, not `agent_eval`."""
     loadgen_sql = (SQL_DIR / "demo_time_shift_loadgen.sql").read_text(encoding="utf-8")

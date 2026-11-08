@@ -100,10 +100,13 @@ class OTelGenAISpanRecord(BaseModel):
     trace_id: str = Field(..., min_length=8)
     span_id: str = Field(..., min_length=4)
     parent_span_id: str | None = None
+    span_name: str = Field(default="invoke_agent")
     start_time: datetime
     end_time: datetime
+    receive_time: datetime | None = None
     latency_ms: float = Field(..., ge=0.0)
     status_code: str = Field(default="OK")
+    otel_span_kind: str = Field(default="SPAN_KIND_INTERNAL")
     span_kind: GenAISpanKind = Field(default=GenAISpanKind.INVOKE_AGENT)
     service_name: str = Field(default="agent-service")
     gcp_apphub_application_id: str | None = None
@@ -121,6 +124,12 @@ class OTelGenAISpanRecord(BaseModel):
     finops_traffic_type: FinOpsTrafficType = Field(
         default=FinOpsTrafficType.PRODUCTION_INFERENCE
     )
+    outcome_id: str | None = None
+    outcome_owner: str | None = None
+    source_mode: str | None = None
+    skill_id: str | None = None
+    skill_version: str | None = None
+    entity_id: str | None = None
     attributes: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")

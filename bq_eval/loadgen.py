@@ -32,6 +32,8 @@ from pydantic import BaseModel, ConfigDict
 from bq_eval.otel import FinOpsTrafficType, GenAISpanKind, OTelGenAISpanRecord
 from bq_eval.sql_eval import DEFAULT_SKU_RATES
 
+DEFAULT_SEED_DATASET_ID: str = "agent_eval_seed"
+
 
 class GoldenSpanTemplate(BaseModel):
     """Single span template with relative millisecond offset from its trace root."""
@@ -1128,7 +1130,7 @@ def render_loadgen_markdown_report(report: TimeShiftLoadgenReport) -> str:
 | **Step 2.5 — Only Last `1 Hour` of Traces (Skill)** | `AND trace_start_time >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR)` | `{report.last_1h_traces:,}` |
 | **Step 2.5 — Combined (`5%` of Last `1 Hour`)** | `INTERVAL 1 HOUR AND FARM_FINGERPRINT < 5` | `{report.last_1h_and_5pct_traces:,}` |
 
-## 3. Refresh in BigQuery Before Any Demo (`< 2 Seconds`, `$0` LLM Cost)
+## 3. Refresh Synthetic Seed Dataset (`agent_eval_seed`) Before Offline Demos (`< 2 Seconds`, `$0` LLM Cost)
 
 ```bash
 bq query --project_id=YOUR_PROJECT --use_legacy_sql=false < sql/demo_time_shift_loadgen.sql

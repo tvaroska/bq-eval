@@ -12,6 +12,7 @@ CREATE TABLE IF NOT EXISTS `agent_eval.eval_results` (
   eval_id STRING NOT NULL OPTIONS (description = 'Unique evaluation record ID.'),
   eval_run_id STRING OPTIONS (description = 'Logical run identifier grouping traces evaluated in one batch or experiment.'),
   trace_id STRING NOT NULL OPTIONS (description = 'Evaluated W3C trace identifier.'),
+  outcome_id STRING OPTIONS (description = 'Business outcome identifier (EVAL-P11 outcome.id).'),
   apphub_application_id STRING NOT NULL OPTIONS (description = 'Resolved application identifier.'),
   rubric_id STRING NOT NULL OPTIONS (description = 'Rubric identifier from agent_eval.rubrics.'),
   judge_model STRING NOT NULL OPTIONS (description = 'Autorater model identifier (gemini-3.8-flash or gemini-4-argon).'),
