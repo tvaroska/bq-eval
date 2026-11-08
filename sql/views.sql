@@ -327,7 +327,7 @@ outcome_spans AS (
     apphub_application_id,
     source_mode,
     w.agent_name,
-    outcome_status,
+    o.outcome_status,
     o.outcome_owner,
     w.outcome_owner,
     w.apphub_application_id,
