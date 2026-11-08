@@ -494,6 +494,7 @@ SELECT
 FROM `agent_eval.otel_spans` AS s
 WHERE s.model_name IS NOT NULL
   AND s.model_name != 'none'
+  AND (s.input_tokens > 0 OR s.output_tokens > 0 OR s.thinking_tokens > 0)
 GROUP BY s.service_name;
 
 -- =============================================================================
