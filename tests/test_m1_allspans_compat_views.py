@@ -7,9 +7,9 @@ Observability Analytics linked datasets (`obs_traces._AllSpans` and
 1. `agent_eval.otel_spans` and `agent_eval.trace_payloads` are defined in
    `sql/ddl.sql` as `CREATE OR REPLACE VIEW` over the linked datasets rather than
    custom-ingested physical tables.
-2. `agent_eval.otel_spans` projects all 24 mapped columns required by Step-1/Step-2
+2. `agent_eval.otel_spans` projects all 25 mapped columns required by Step-1/Step-2
    views plus M1 outcome attribution (`span_name` <- `name`, `outcome_id` <-
-   `outcome.id` baggage, `finops_traffic_type`, `thinking_tokens`, `gcp_apphub_*`).
+   `outcome.id` baggage, `rule0_pass`, `finops_traffic_type`, `thinking_tokens`, `gcp_apphub_*`).
 3. Outcome and attribution views (`v_outcomes` reading `span_name = 'outcome.closed'`,
    `v_cost_per_verified_outcome`, `v_attribution_coverage`, and
    `v_otel_spans_coverage`) are defined in `sql/`.
@@ -58,6 +58,7 @@ REQUIRED_OTEL_SPANS_VIEW_COLUMNS: tuple[str, ...] = (
     "thinking_tokens",
     "tool_name",
     "tool_call_status",
+    "rule0_pass",
     "finops_traffic_type",
     "outcome_id",
     "attributes",

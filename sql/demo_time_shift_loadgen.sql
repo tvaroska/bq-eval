@@ -14,7 +14,7 @@
 --          escalation, E&O backdate trap (`escalation_policy_4pt_v1`), and MCP 503 error.
 --       4. `NULL` `gcp_apphub_application_id` (`service_name = 'renewal-auditor-svc'`):
 --          Unregistered Cloud Run service proving Step 1 `COALESCE` fallback
---          (`unassigned_bu`) and `>8` tool-call retry loop detection.
+--          (`unregistered_app` / `unassigned_bu`) and `>8` tool-call retry loop detection.
 --   * Time-shifts & multiplies those templates into `CURRENT_TIMESTAMP()` in <2s
 --     at $0 LLM cost:
 --       - Replicas 1..15 (240 traces) land inside the LAST 1 HOUR (for Step 2.5)
@@ -408,25 +408,25 @@ SELECT * FROM UNNEST([
     'The carrier portal timed out with HTTP 503 while submitting the claim; queued for retry.'
   ),
   STRUCT(
-    13, 'seed-audit-001', 'renewal-auditor-svc',
+    13, 'seed-audit-001', 'unregistered_app',
     'Audit TX auto policy POL-TX-112 against Texas state minimum liability limits (30/60/25).',
     '[Policy POL-TX-112]: State=TX, BI=50/100, PD=50. State minimum is 30/60/25.',
     'Policy POL-TX-112 carries 50/100/50 liability limits, which meets and exceeds Texas 30/60/25 statutory minimums.'
   ),
   STRUCT(
-    14, 'seed-audit-002', 'renewal-auditor-svc',
+    14, 'seed-audit-002', 'unregistered_app',
     'Audit NY auto policy POL-NY-204 against New York state minimum liability limits (25/50/10).',
     '[Policy POL-NY-204]: State=NY, BI=100/300, PD=50. State minimum is 25/50/10.',
     'Policy POL-NY-204 carries 100/300/50 limits, compliant with New York 25/50/10 statutory minimums.'
   ),
   STRUCT(
-    15, 'seed-audit-003', 'renewal-auditor-svc',
+    15, 'seed-audit-003', 'unregistered_app',
     'Check unsigned UM/UIM selection form status on FL policy POL-FL-309.',
     '[Policy POL-FL-309]: State=FL, UM/UIM Rejection Form status = UNSIGNED (blocker).',
     'Flagged Policy POL-FL-309: Florida UM/UIM selection form is unsigned and requires insured e-signature prior to renewal.'
   ),
   STRUCT(
-    16, 'seed-audit-004', 'renewal-auditor-svc',
+    16, 'seed-audit-004', 'unregistered_app',
     'Reconcile duplicate household records across paginated agency book.',
     '[Audit Loop]: Exceeded maximum pagination retries across CRM and AMS endpoints.',
     'Completed partial reconciliation after hitting tool retry threshold.'

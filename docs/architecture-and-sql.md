@@ -17,7 +17,7 @@ To eliminate day-1 setup friction while supporting full enterprise governance wh
 ## 2. Step-by-Step SQL Walkthrough (`sql/step1_*.sql` → `sql/step3_*.sql`)
 
 ### 2.1 Step 1: Static SQL Views Over Existing Traces (`sql/step1_trace_views.sql`)
-- **`agent_eval.v_step1_trace_waterfall`**: Normalizes `apphub_application_id`, `business_unit`, and `cost_center` via `COALESCE` (so workloads without App Hub tags still group cleanly by `gcp.agent.id` or `service_name`), and calculates span-level burndown and USD spend using built-in default Gemini rates (`<=200K` and `>200K` cliffs).
+- **`agent_eval.v_step1_trace_waterfall`**: Normalizes `apphub_application_id`, `business_unit`, and `cost_center` via `COALESCE` (so workloads missing App Hub registration fall back directly to `'unregistered_app'` and `'unassigned_bu'`), and calculates span-level burndown and USD spend using built-in default Gemini rates (`<=200K` and `>200K` cliffs).
 - **`agent_eval.v_step1_trace_eval`**: Rolls up each `trace_id` to compute `trace_latency_ms`, `tool_call_count`, `tool_error_count`, `step1_pass` (`$0` deterministic check), and `trace_cost_usd`.
 - **`agent_eval.v_step1_cost_per_outcome`**: Aggregates by `(apphub_application_id, business_unit, cost_center)` to report `step1_pass_rate`, `p95_latency_ms`, `total_cost_usd`, and **`step1_cost_per_outcome_usd`**.
 
@@ -54,14 +54,13 @@ When teams expand beyond Step 3 into multi-BU chargeback and calibrated Model Ri
 
 ## 4. Portable Application & Agent Identity Resolution (`EVAL-P07`)
 
-Workloads running on GKE, Cloud Run, or Agent Engine emit `gcp.apphub.application.id`, whereas local development, multi-cloud, or OSS frameworks emit `gcp.agent.id` or `service.name`. Both `sql/step1_trace_views.sql`, `sql/views.sql`, and `bq_eval.otel.resolve_application_id()` normalize application identity via the same deterministic precedence chain:
+Workloads registered in App Hub (on GKE, Cloud Run, Agent Runtime, or via WIF collector resource stamping) carry `gcp_apphub_application_id` or `apphub.application.id`, whereas unregistered workloads have `NULL` App Hub attributes and must be flagged rather than masked by self-reported service names. Both `sql/step1_trace_views.sql`, `sql/views.sql`, and `bq_eval.otel.resolve_application_id()` normalize application identity via the same deterministic precedence chain:
 
 ```sql
 COALESCE(
   gcp_apphub_application_id,
   JSON_VALUE(attributes, '$."gcp.apphub.application.id"'),
-  JSON_VALUE(attributes, '$."gcp.agent.id"'),
-  NULLIF(service_name, 'agent-service'),
+  JSON_VALUE(attributes, '$."apphub.application.id"'),
   'unregistered_app'
 ) AS apphub_application_id
 ```

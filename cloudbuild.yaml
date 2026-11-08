@@ -9,7 +9,7 @@ steps:
         uv pip install --system -e ".[dev]"
         ruff check --no-cache bq_eval tests examples
         pytest -p no:cacheprovider -v
-        bq-eval demo --format markdown
+        bq-eval demo --html-out /tmp/scorecard.html
 
 options:
   logging: CLOUD_LOGGING_ONLY

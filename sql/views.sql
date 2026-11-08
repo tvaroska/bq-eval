@@ -14,8 +14,7 @@ SELECT
   COALESCE(
     s.gcp_apphub_application_id,
     JSON_VALUE(s.attributes, '$."gcp.apphub.application.id"'),
-    JSON_VALUE(s.attributes, '$."gcp.agent.id"'),
-    NULLIF(s.service_name, 'agent-service'),
+    JSON_VALUE(s.attributes, '$."apphub.application.id"'),
     'unregistered_app'
   ) AS apphub_application_id,
   s.service_name,

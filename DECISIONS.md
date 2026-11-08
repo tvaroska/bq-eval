@@ -19,7 +19,7 @@
 - **Context**: In-GCP workloads (`Agent Engine`, `Cloud Run`, `GKE`) receive automatic `gcp.apphub.application.id` resource attributes via `telemetry.googleapis.com`, whereas external workloads (`AWS EKS`, `Azure AKS`, on-prem Kubernetes, local dev) run outside GCP metadata servers and invoke multi-provider models.
 - **Decision**:
   1. External agents emit plain local OTLP (`:4317`) to a cluster OpenTelemetry Collector authenticating keylessly via **Workload Identity Federation** (`sts.googleapis.com`).
-  2. Both BigQuery SQL (`sql/step1_trace_views.sql`, `sql/views.sql`) and Python (`bq_eval/otel.py`) resolve application identity via `COALESCE(gcp.apphub.application.id, gcp.agent.id, NULLIF(service_name, 'agent-service'), 'unregistered_app')`.
+  2. Both BigQuery SQL (`sql/step1_trace_views.sql`, `sql/views.sql`) and Python (`bq_eval/otel.py`) resolve application identity via `COALESCE(gcp_apphub_application_id, JSON_VALUE(attributes, '$."gcp.apphub.application.id"'), JSON_VALUE(attributes, '$."apphub.application.id"'), 'unregistered_app')`, so any workload without App Hub registration surfaces directly under `'unregistered_app'`.
 
 ## ADR-004: Fail-Closed Rogan-Gladen Calibration, Conditional `Rule 0` Conditioning & Dual IRR
 - **Context**: Because `100%` of `Rule 0` failures and only `5–10%` of `Rule 0` passes are routed to the LLM judge, pooling failed and passed traces in the judge pass rate $\hat{p}_{\text{judge}}$ overweights deterministic errors by `10x–20x`. Furthermore, defaulting `judged_samples == 0` to `calibrated_pass_rate = 1.0` makes unjudged apps appear `100%` accurate.

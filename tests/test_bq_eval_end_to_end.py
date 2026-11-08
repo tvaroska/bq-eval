@@ -103,11 +103,11 @@ def test_weighted_burndown_standard_and_long_context_cliff() -> None:
 
 
 def test_portable_application_id_coalesce_precedence() -> None:
-    """Verify EVAL-P07 COALESCE fallback precedence across GCP and off-GCP workloads."""
+    """Verify EVAL-P07 COALESCE fallback precedence to unregistered_app."""
     assert (
         resolve_application_id(
             gcp_apphub_application_id="apphub-Explicit",
-            attributes={"gcp.agent.id": "attr-agent"},
+            attributes={"gcp.apphub.application.id": "attr-app"},
             service_name="custom-svc",
         )
         == "apphub-Explicit"
@@ -115,26 +115,26 @@ def test_portable_application_id_coalesce_precedence() -> None:
     assert (
         resolve_application_id(
             gcp_apphub_application_id=None,
-            attributes={"gcp.apphub.application.id": "apphub-from-json"},
+            attributes={"gcp.apphub.application.id": "apphub-from-gcp-attr"},
             service_name="custom-svc",
         )
-        == "apphub-from-json"
+        == "apphub-from-gcp-attr"
+    )
+    assert (
+        resolve_application_id(
+            gcp_apphub_application_id=None,
+            attributes={"apphub.application.id": "apphub-from-otel-attr"},
+            service_name="agent-service",
+        )
+        == "apphub-from-otel-attr"
     )
     assert (
         resolve_application_id(
             gcp_apphub_application_id=None,
             attributes={"gcp.agent.id": "langgraph-agent-01"},
-            service_name="agent-service",
-        )
-        == "langgraph-agent-01"
-    )
-    assert (
-        resolve_application_id(
-            gcp_apphub_application_id=None,
-            attributes={},
             service_name="checkout-concierge-svc",
         )
-        == "checkout-concierge-svc"
+        == "unregistered_app"
     )
     assert (
         resolve_application_id(
@@ -462,17 +462,17 @@ def test_time_shift_loadgen_sql_and_cli_parity(tmp_path: Path) -> None:
         "docubridge-underwriting",
         "quoting-concierge-adk",
         "claims-triage-langgraph",
-        "renewal-auditor-svc",
+        "unregistered_app",
     }
     # docubridge-underwriting must have the highest cost per trace and outcome (>10x higher)
     docu = by_app["docubridge-underwriting"]
     quote = by_app["quoting-concierge-adk"]
-    audit = by_app["renewal-auditor-svc"]
+    audit = by_app["unregistered_app"]
     assert docu.cost_per_trace_usd > quote.cost_per_trace_usd * 10.0
     assert docu.step1_cost_per_outcome_usd is not None
     assert quote.step1_cost_per_outcome_usd is not None
     assert docu.step1_cost_per_outcome_usd > quote.step1_cost_per_outcome_usd * 10.0
-    # Unregistered renewal-auditor-svc falls back to unassigned_bu
+    # Unregistered renewal-auditor-svc falls back to unregistered_app and unassigned_bu
     assert audit.business_unit == "unassigned_bu"
 
     # Verify CLI loadgen command and JSONL export

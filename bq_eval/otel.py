@@ -47,19 +47,17 @@ def resolve_application_id(
     Order of precedence:
     1. Explicit `gcp_apphub_application_id` column
     2. `attributes["gcp.apphub.application.id"]`
-    3. `attributes["gcp.agent.id"]`
-    4. `service_name` if non-empty and not equal to the generic `'agent-service'`
-    5. `'unregistered_app'`
+    3. `attributes["apphub.application.id"]`
+    4. `'unregistered_app'`
     """
+    del service_name
     if gcp_apphub_application_id and gcp_apphub_application_id.strip():
         return gcp_apphub_application_id.strip()
     attrs = attributes or {}
-    for key in ("gcp.apphub.application.id", "gcp.agent.id"):
+    for key in ("gcp.apphub.application.id", "apphub.application.id"):
         val = attrs.get(key)
         if isinstance(val, str) and val.strip():
             return val.strip()
-    if service_name and service_name.strip() and service_name.strip() != "agent-service":
-        return service_name.strip()
     return "unregistered_app"
 
 

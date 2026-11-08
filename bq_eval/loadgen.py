@@ -723,12 +723,12 @@ def build_golden_seed_templates() -> tuple[GoldenTraceTemplate, ...]:
             ),
         ),
         # =====================================================================
-        # App 4: renewal-auditor-svc (Unregistered Cloud Run Agent — NULL app.id)
+        # App 4: renewal-auditor-svc (Unregistered Cloud Run Agent — NULL app.id -> unregistered_app)
         # =====================================================================
         GoldenTraceTemplate(
             template_idx=13,
             base_trace_id="seed-audit-001",
-            apphub_application_id="renewal-auditor-svc",
+            apphub_application_id="unregistered_app",
             user_prompt=(
                 "Audit TX auto policy POL-TX-112 against Texas state minimum liability "
                 "limits (30/60/25)."
@@ -762,7 +762,7 @@ def build_golden_seed_templates() -> tuple[GoldenTraceTemplate, ...]:
         GoldenTraceTemplate(
             template_idx=14,
             base_trace_id="seed-audit-002",
-            apphub_application_id="renewal-auditor-svc",
+            apphub_application_id="unregistered_app",
             user_prompt=(
                 "Audit NY auto policy POL-NY-204 against New York state minimum liability "
                 "limits (25/50/10)."
@@ -796,7 +796,7 @@ def build_golden_seed_templates() -> tuple[GoldenTraceTemplate, ...]:
         GoldenTraceTemplate(
             template_idx=15,
             base_trace_id="seed-audit-003",
-            apphub_application_id="renewal-auditor-svc",
+            apphub_application_id="unregistered_app",
             user_prompt="Check unsigned UM/UIM selection form status on FL policy POL-FL-309.",
             retrieved_context=(
                 "[Policy POL-FL-309]: State=FL, UM/UIM Rejection Form status = UNSIGNED (blocker)."
@@ -827,7 +827,7 @@ def build_golden_seed_templates() -> tuple[GoldenTraceTemplate, ...]:
         GoldenTraceTemplate(
             template_idx=16,
             base_trace_id="seed-audit-004",
-            apphub_application_id="renewal-auditor-svc",
+            apphub_application_id="unregistered_app",
             user_prompt="Reconcile duplicate household records across paginated agency book.",
             retrieved_context=(
                 "[Audit Loop]: Exceeded maximum pagination retries across CRM and AMS endpoints."

@@ -114,7 +114,7 @@ def build_showcase_dataset() -> tuple[
         elif is_error_tail:
             judge_outcomes[trace_id] = False
 
-    # App 2: catalog-enrichment-agent (Off-GCP agent resolved via attributes["gcp.agent.id"], unjudged)
+    # App 2: catalog-enrichment-agent (Off-GCP agent resolved via attributes["gcp.apphub.application.id"], unjudged)
     for j in range(10):
         trace_id = f"trace-catalog-{j:04d}"
         spans.append(
@@ -137,7 +137,7 @@ def build_showcase_dataset() -> tuple[
                 thinking_tokens=0,
                 rule0_pass=True,
                 finops_traffic_type=FinOpsTrafficType.PRODUCTION_INFERENCE,
-                attributes={"gcp.agent.id": "catalog-enrichment-agent"},
+                attributes={"gcp.apphub.application.id": "catalog-enrichment-agent"},
             )
         )
 
