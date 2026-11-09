@@ -1,5 +1,7 @@
 # BQ Eval (`bq-eval`) — BigQuery Agent Evaluation, Observability & FinOps Showcase
 
+![BQ Eval Architecture — BigQuery Agent Evaluation, Zero-Table Day-1 SQL & USD Cost per Verified Outcome](docs/assets/architecture_card.svg)
+
 **BQ Eval (`bq-eval`)** turns **BigQuery** into a **pure execution engine** for AI agent monitoring, evaluation, and cost management in one continuous cycle—centered on **USD Cost per Verified Outcome**.
 
 The source of data is **always OpenTelemetry traces**. Instead of forcing teams to set up 7 tables, custom SDKs, or human labeling panels on Day 1, `bq-eval` provides a **progressive onboarding path (`Step 1 → Step 2 → Step 2.5 Skill → Step 3`)** where you can start with **`0` new tables and static SQL** in 2 minutes and add rubrics, plain-English skills, and saved result tables only as you need them.
