@@ -6,7 +6,8 @@ steps:
       - "-c"
       - |
         export PYTHONDONTWRITEBYTECODE=1
-        uv pip install --system -e ".[dev]"
+        uv pip install --system -e ".[dev]" "ast-grep-cli>=0.35"
+        ast-grep scan --rule specs/ast.rules.yaml
         ruff check --no-cache bq_eval tests examples
         pytest -p no:cacheprovider -v
         bq-eval demo --html-out /tmp/scorecard.html

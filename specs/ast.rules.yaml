@@ -1,0 +1,91 @@
+# Declarative Structural & Security AST Contract (ast-grep)
+# Enforces library/example boundary isolation, SQLAlchemy 2.0 Core purity,
+# and static security invariants across bq-eval Python modules.
+
+id: library-never-imports-examples
+language: Python
+severity: error
+message: "Hexagonal violation: bq_eval/ library must never import examples/."
+files:
+  - "bq_eval/**/*.py"
+metadata:
+  test_path: "bq_eval/probe.py"
+  invalid_examples:
+    - "import examples"
+    - "from examples.quickstart import run"
+  valid_examples:
+    - "from bq_eval.otel import OTelGenAISpanRecord"
+rule:
+  any:
+    - kind: import_statement
+      regex: "^import\\s+examples(\\b|\\.)"
+    - kind: import_from_statement
+      regex: "^from\\s+examples(\\b|\\.)"
+---
+id: no-sqlalchemy-orm
+language: Python
+severity: error
+message: "Persistence violation: sqlalchemy.orm is banned; use SQLAlchemy 2.0 Core or parameterized SQL."
+ignores:
+  - "tests/**"
+metadata:
+  test_path: "bq_eval/sql_probe.py"
+  invalid_examples:
+    - "from sqlalchemy.orm import relationship"
+    - "import sqlalchemy.orm"
+  valid_examples:
+    - "import sqlite3"
+rule:
+  any:
+    - kind: import_statement
+      regex: "^import\\s+sqlalchemy\\.orm(\\b|\\.)"
+    - kind: import_from_statement
+      regex: "^from\\s+sqlalchemy\\.orm\\b"
+    - kind: import_from_statement
+      regex: "^from\\s+sqlalchemy\\s+import\\b.*\\borm\\b"
+---
+id: no-subprocess-shell-true
+language: Python
+severity: error
+message: "Security violation: subprocess with shell=True or os.system() is forbidden."
+ignores:
+  - "tests/**"
+metadata:
+  test_path: "bq_eval/proc_probe.py"
+  invalid_examples:
+    - "subprocess.run(cmd, shell=True)"
+    - "subprocess.Popen(cmd, shell=True, text=True)"
+    - "os.system(cmd)"
+  valid_examples:
+    - 'subprocess.run(["bq", "version"], check=True)'
+rule:
+  any:
+    - pattern: subprocess.$FN($$$, shell=True)
+    - pattern: subprocess.$FN($$$, shell=True, $$$)
+    - pattern: subprocess.$FN(shell=True)
+    - pattern: subprocess.$FN(shell=True, $$$)
+    - pattern: os.system($$$)
+---
+id: no-dynamic-sql-execute
+language: Python
+severity: error
+message: "Security violation: dynamic f-string or concatenated SQL passed to .execute(); use parameterized queries."
+ignores:
+  - "tests/**"
+metadata:
+  test_path: "bq_eval/query_probe.py"
+  invalid_examples:
+    - 'conn.execute(f"SELECT * FROM spans WHERE trace_id = {tid}")'
+    - 'conn.execute("SELECT * FROM spans WHERE trace_id = " + tid, params)'
+  valid_examples:
+    - 'conn.execute("SELECT * FROM spans WHERE trace_id = ?", (tid,))'
+constraints:
+  QUERY:
+    any:
+      - has:
+          kind: interpolation
+      - kind: binary_operator
+rule:
+  any:
+    - pattern: $DB.execute($QUERY)
+    - pattern: $DB.execute($QUERY, $$$)
