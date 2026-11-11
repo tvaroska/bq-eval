@@ -1,5 +1,11 @@
-"""BigQuery-Native Enterprise Agent Evaluation, Observability & FinOps Showcase."""
+"""BQ Eval & FinOps: Dual-Path BigQuery Agent Evaluation, Observability & FinOps Showcase."""
 
+from bq_eval.bqaa import (
+    BQAAAgentEvent,
+    bqaa_events_to_otel_spans,
+    bqaa_events_to_trace_payloads,
+    deduplicate_bqaa_events,
+)
 from bq_eval.calibration import (
     CalibrationResult,
     ConfusionMatrix,
@@ -57,15 +63,18 @@ from bq_eval.rubrics import (
     wrap_untrusted_text,
 )
 from bq_eval.sql_eval import (
+    MANAGED_EVALUATE_AGENT_METRICS,
     SQLTraceEvalSummary,
+    build_ai_evaluate_agent_sql,
     build_ai_generate_table_judge_sql,
     escape_sql_xml_expr,
     evaluate_traces_in_sqlite,
 )
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
+    "BQAAAgentEvent",
     "CACHED_INPUT_BURNDOWN_WEIGHT",
     "CANONICAL_RUBRICS",
     "CalibrationResult",
@@ -80,6 +89,7 @@ __all__ = [
     "LONG_CONTEXT_OUTPUT_BURNDOWN_WEIGHT",
     "LONG_CONTEXT_THRESHOLD_TOKENS",
     "LONG_CONTEXT_UNCACHED_BURNDOWN_WEIGHT",
+    "MANAGED_EVALUATE_AGENT_METRICS",
     "ModelOption",
     "ModelPricingSKU",
     "OTelGenAISpanRecord",
@@ -97,6 +107,9 @@ __all__ = [
     "TracePayloadRecord",
     "UNCACHED_INPUT_BURNDOWN_WEIGHT",
     "allocate_focus_two_pool_chargeback",
+    "bqaa_events_to_otel_spans",
+    "bqaa_events_to_trace_payloads",
+    "build_ai_evaluate_agent_sql",
     "build_ai_generate_table_judge_sql",
     "build_autorater_system_prompt",
     "build_golden_seed_templates",
@@ -105,6 +118,7 @@ __all__ = [
     "compute_gwet_ac2",
     "compute_pareto_frontier",
     "compute_weighted_burndown_tokens",
+    "deduplicate_bqaa_events",
     "diagnose_prefix_cache_dilution",
     "escape_sql_xml_expr",
     "evaluate_time_shifted_corpus",

@@ -133,3 +133,28 @@ NOT EXISTS (
   WHERE cited_id NOT IN UNNEST(REGEXP_EXTRACT_ALL(p.retrieved_context, r'\[DOC-[A-Z0-9-]+\]'))
 )
 ```
+
+---
+
+## 6. Engine B (`AI.EVALUATE_AGENT`) Over Light Capture (`BQAA` `agent_events`)
+
+When evaluating `BQAA` `AgentData` turns (`agent_events_eval_turn`) in a single-region dataset (`us-central1`, `us-east4`, `europe-west1`, etc.), always pre-filter through `agent_eval.v_bqaa_eval_turn_filtered` ([`../../../sql/bqaa_adapter_views.sql`](../../../sql/bqaa_adapter_views.sql)) so deterministic Step-1 failures and tool loops are caught at `$0` before invoking `AI.EVALUATE_AGENT`:
+
+```sql
+SELECT *
+FROM AI.EVALUATE_AGENT(
+  TABLE (
+    SELECT *
+    FROM `agent_eval.v_bqaa_eval_turn_filtered`
+    WHERE trace_start_time >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR)
+      AND MOD(ABS(FARM_FINGERPRINT(trace_id)), 100) < 5
+  ),
+  trace_col => 'trace',
+  managed_metrics => [
+    'tool_use_quality_v1',
+    'final_response_quality_v1',
+    'hallucination_v1',
+    'safety_v1'
+  ]
+);
+```

@@ -125,6 +125,66 @@ FROM AI.GENERATE_TABLE(
 """
 
 
+MANAGED_EVALUATE_AGENT_METRICS: tuple[str, ...] = (
+    "tool_use_quality_v1",
+    "final_response_quality_v1",
+    "hallucination_v1",
+    "safety_v1",
+    "multi_turn_task_success_v1",
+    "multi_turn_tool_use_quality_v1",
+    "multi_turn_trajectory_quality_v1",
+)
+
+
+def build_ai_evaluate_agent_sql(
+    project_id: str,
+    dataset_id: str = "agent_eval",
+    eval_view: str = "v_bqaa_eval_turn_filtered",
+    managed_metrics: Sequence[str] = (
+        "tool_use_quality_v1",
+        "final_response_quality_v1",
+        "hallucination_v1",
+        "safety_v1",
+    ),
+    canary_sample_pct: int = 10,
+) -> str:
+    """Build Step-1 pre-filtered BigQuery `AI.EVALUATE_AGENT` SQL query (Engine B, M5).
+
+    Filters `BQAA` `AgentData` turns (`v_bqaa_eval_turn_filtered`) through Step-1 `$0` SQL
+    gates (`step1_pass = TRUE` and `NOT has_tool_loop`) plus deterministic `FARM_FINGERPRINT`
+    sampling before invoking `AI.EVALUATE_AGENT`.
+    """
+    if not managed_metrics:
+        raise ValueError("At least one managed metric is required.")
+    unknown = [m for m in managed_metrics if m not in MANAGED_EVALUATE_AGENT_METRICS]
+    if unknown:
+        raise ValueError(f"Unknown AI.EVALUATE_AGENT managed metric(s): {unknown}")
+    if not (0 <= canary_sample_pct <= 100):
+        raise ValueError("canary_sample_pct must be between 0 and 100.")
+
+    metrics_sql = ",\n      ".join(f"'{m}'" for m in managed_metrics)
+    sample_clause = (
+        ""
+        if canary_sample_pct == 100
+        else f"\n    WHERE MOD(ABS(FARM_FINGERPRINT(trace_id)), 100) < {canary_sample_pct}"
+    )
+
+    return f"""-- Tier 2 Engine B: Step-1 Pre-Filtered AI.EVALUATE_AGENT Execution ({canary_sample_pct}% Sample)
+WITH candidate_turns AS (
+  SELECT *
+  FROM `{project_id}.{dataset_id}.{eval_view}`{sample_clause}
+)
+SELECT *
+FROM AI.EVALUATE_AGENT(
+  TABLE candidate_turns,
+  trace_col => 'trace',
+  managed_metrics => [
+      {metrics_sql}
+  ]
+);
+"""
+
+
 DEFAULT_SKU_RATES: dict[str, tuple[float, float, float, float, float, float]] = {
     # model_name: (in_1m, cached_1m, out_1m, long_in_1m, long_cached_1m, long_out_1m)
     "gemini-3.5-flash-lite": (0.075, 0.0075, 0.30, 0.15, 0.015, 1.125),

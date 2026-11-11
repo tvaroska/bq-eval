@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "bq-eval"
-version = "0.1.0"
-description = "BigQuery-native enterprise agent evaluation, OpenTelemetry gen_ai.* observability, and outcome-adjusted AI FinOps showcase."
+version = "0.2.0"
+description = "BQ Eval & FinOps: dual-path BigQuery agent evaluation, calibrated SQL quality gates, and USD Cost per Verified Outcome."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [

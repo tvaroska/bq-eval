@@ -1,21 +1,23 @@
 ---
 name: bq-eval
 description: >-
-  Step 2.5+ Agentic Skill for BQ Eval. Translates plain-English evaluation
-  requirements into 4-point ordinal rubrics (`step2_rubrics.csv` /
-  `agent_eval.rubrics`), custom BigQuery `AI.GENERATE_TABLE` slice queries
-  (e.g., 5% sample, last 1 hour of traces, error/latency outliers, or specific
-  applications), custom domain Step-1+ deterministic SQL checks, and Step-3
-  saved run comparisons (`eval_results`). Not needed for out-of-the-box Step 1
-  views or default Step 2 full/10% queries.
+  Step 2.5+ Agentic Skill for BQ Eval & FinOps (`bq-eval`). Works identically
+  across Light Capture (`BQAA` `agent_events` via `sql/bqaa_adapter_views.sql`)
+  and Full Capture (OpenTelemetry `_AllSpans`). Translates plain-English
+  evaluation requirements into 4-point ordinal rubrics (`step2_rubrics.csv` /
+  `agent_eval.rubrics`), custom BigQuery `AI.GENERATE_TABLE` (Engine A) or
+  `AI.EVALUATE_AGENT` (Engine B) slice queries (5% sample, last 1 hour,
+  error/latency outliers, or specific applications), custom domain Step-1+ SQL
+  checks, and Step-3 saved run comparisons (`eval_results`).
 ---
 
-# BQ Eval Agentic Skill (Step 2.5+)
+# BQ Eval & FinOps Agentic Skill (Step 2.5+)
 
 ## When to Use This Skill (And When Not To)
 
-- **Step 1 (Basic Trace Evals & Cost per Outcome — `0` Tables)**: **Do NOT need this skill.** Deploy static [`../../sql/step1_trace_views.sql`](../../sql/step1_trace_views.sql) directly on existing OpenTelemetry traces.
-- **Step 2 (Default Rubrics on 100% or 10% of Traces — `1` Rubric Table)**: **Do NOT need this skill** if running the 4 pre-built rubrics in [`../../sql/step2_rubrics.csv`](../../sql/step2_rubrics.csv) with [`../../sql/step2_stateless_eval.sql`](../../sql/step2_stateless_eval.sql).
+- **Step 0 (Choose Ingestion Mode)**: Point `agent_eval.otel_spans` and `agent_eval.trace_payloads` at **Light Capture (`BQAA` `agent_events`)** using [`../../sql/bqaa_adapter_views.sql`](../../sql/bqaa_adapter_views.sql), **Full Capture (OpenTelemetry `_AllSpans`)** using [`../../sql/ddl.sql`](../../sql/ddl.sql), or **Hybrid `UNION ALL`**.
+- **Step 1 (Basic Trace Evals & Cost per Outcome — `0` New Tables)**: **Do NOT need this skill.** Deploy static [`../../sql/step1_trace_views.sql`](../../sql/step1_trace_views.sql) directly on existing traces or `BQAA` events.
+- **Step 2 (Default Rubrics on 100% or 10% of Traces — `1` Rubric Table)**: **Do NOT need this skill** if running the pre-built rubrics in [`../../sql/step2_rubrics.csv`](../../sql/step2_rubrics.csv) with [`../../sql/step2_stateless_eval.sql`](../../sql/step2_stateless_eval.sql).
 - **Step 2.5 (Custom Rubrics & Custom Trace Slices)**: **Use this skill** whenever a user asks in plain English to:
   1. **Define a new rubric** (e.g., *"Add a rubric checking that commercial underwriting summaries explain the primary risk driver without promising coverage"*).
   2. **Run an evaluation on a custom slice of traces** (e.g., *"Run groundedness on 5% of traces"*, *"Run only on the last 1 hour of traces"*, *"Run on slow traces over 4 seconds for `claims-triage-agent`"*).

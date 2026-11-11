@@ -1,6 +1,7 @@
 -- =============================================================================
--- BigQuery Agent Evaluation, Observability & FinOps Showcase (bq-eval)
--- M1 Native Telemetry Compatibility Views (_AllSpans / _AllLogs) + Physical DDL
+-- BQ Eval & FinOps (bq-eval) — Dual-Path Compatibility Views + Physical DDL
+--   * Full Capture (default here): Native OTel `_AllSpans` + `_AllLogs` + BigLake `completions`
+--   * Light Capture (`BQAA`) & Hybrid Dual-Path: see `sql/bqaa_adapter_views.sql`
 -- Standard: EVAL-P04, EVAL-P05, EVAL-P06, EVAL-P07, EVAL-P08, EVAL-P11 (v2026.11.3)
 -- =============================================================================
 
@@ -42,7 +43,7 @@ CREATE EXTERNAL TABLE IF NOT EXISTS `agent_eval.completions` (
 WITH CONNECTION `us.vertex_ai_connection`
 OPTIONS (
   format = 'JSON',
-  uris = ['gs://btv-scratch-01-genai-payloads/*.jsonl']
+  uris = ['gs://YOUR_GENAI_PAYLOAD_BUCKET/*.jsonl']
 );
 
 -- -----------------------------------------------------------------------------

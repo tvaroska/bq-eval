@@ -17,13 +17,16 @@ from bq_eval.showcase import (
     run_showcase_pipeline,
     write_html_scorecard,
 )
-from bq_eval.sql_eval import build_ai_generate_table_judge_sql
+from bq_eval.sql_eval import (
+    build_ai_evaluate_agent_sql,
+    build_ai_generate_table_judge_sql,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="bq-eval",
-        description="BigQuery-Native Enterprise Agent Evaluation, Observability & FinOps Showcase CLI.",
+        description="BQ Eval & FinOps: Dual-Path BigQuery Agent Evaluation, Observability & FinOps CLI.",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -63,14 +66,25 @@ def build_parser() -> argparse.ArgumentParser:
 
     sql_p = sub.add_parser(
         "judge-sql",
-        help="Generate stratified BigQuery AI.GENERATE_TABLE judge SQL with XML escaping.",
+        help="Generate stratified BigQuery judge SQL (Engine A AI.GENERATE_TABLE or Engine B AI.EVALUATE_AGENT).",
+    )
+    sql_p.add_argument(
+        "--engine",
+        choices=("generate-table", "evaluate-agent"),
+        default="generate-table",
+        help="Judge SQL engine: generate-table (all regions, 4-pt rubrics) or evaluate-agent (BQAA AgentData TVF).",
     )
     sql_p.add_argument("--project-id", default="enterprise-ai-prod", help="GCP Project ID.")
     sql_p.add_argument("--dataset-id", default="agent_eval", help="BigQuery Dataset ID.")
     sql_p.add_argument(
         "--rubric-id",
         default="groundedness_4pt_v1",
-        help="Canonical 4-point ordinal rubric ID.",
+        help="Canonical 4-point ordinal rubric ID (for --engine generate-table).",
+    )
+    sql_p.add_argument(
+        "--eval-view",
+        default="v_bqaa_eval_turn_filtered",
+        help="BQAA AgentData turn/session view name (for --engine evaluate-agent).",
     )
     sql_p.add_argument(
         "--canary-pct",
@@ -116,12 +130,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     if args.command == "judge-sql":
-        sql = build_ai_generate_table_judge_sql(
-            project_id=args.project_id,
-            dataset_id=args.dataset_id,
-            rubric_id=args.rubric_id,
-            canary_sample_pct=args.canary_pct,
-        )
+        if args.engine == "evaluate-agent":
+            sql = build_ai_evaluate_agent_sql(
+                project_id=args.project_id,
+                dataset_id=args.dataset_id,
+                eval_view=args.eval_view,
+                canary_sample_pct=args.canary_pct,
+            )
+        else:
+            sql = build_ai_generate_table_judge_sql(
+                project_id=args.project_id,
+                dataset_id=args.dataset_id,
+                rubric_id=args.rubric_id,
+                canary_sample_pct=args.canary_pct,
+            )
         print(sql)
         return 0
 

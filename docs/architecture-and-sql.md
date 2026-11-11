@@ -1,6 +1,15 @@
-# BigQuery Progressive Architecture: Step 1 -> Step 2 -> Step 2.5 (Skill) -> Step 3
+# BigQuery Dual-Path Progressive Architecture: Step 1 -> Step 2 -> Step 2.5 (Skill) -> Step 3
 
-## 1. Progressive Adoption Architecture (Source = Always Traces)
+## 0. Dual-Path Capture -> Single Execution Engine (`ADR-008`)
+
+**BQ Eval & FinOps (`bq-eval`)** decouples how agent telemetry enters BigQuery from how quality, risk, and unit economics are computed:
+- **Light Capture (`BQAA` — [`sql/bqaa_adapter_views.sql`](../sql/bqaa_adapter_views.sql))**: Developers stream events from Python ADK (`BigQueryAgentAnalyticsPlugin`) or LangGraph (`BigQueryCallbackHandler`) into a single auto-created `agent_events` table. Zero-copy views (`v_bqaa_otel_spans` and `v_bqaa_trace_payloads`) deduplicate Storage Write API retries by `event_id` and map token counts and inline payloads onto the `otel_spans` / `trace_payloads` contract while preserving strict `'unregistered_app'` fallback (`ADR-003`).
+- **Full Capture (`OTel` — [`sql/ddl.sql`](../sql/ddl.sql))**: Multi-service and multi-cloud fleets emit standard OTLP to `telemetry.googleapis.com` (`obs_traces._AllSpans` + `obs_logs._AllLogs` + BigLake `completions`) with server-stamped `apphub.application.id` and W3C `baggage` (`outcome.id`).
+- **Hybrid Mode**: Combines both lanes via `UNION ALL` (`NOT EXISTS` trace deduplication in [`sql/bqaa_adapter_views.sql`](../sql/bqaa_adapter_views.sql)) so server-stamped `_AllSpans` rows take precedence while `BQAA`-only developer workloads fill in seamlessly.
+
+---
+
+## 1. Progressive Adoption Architecture (Source = Always Traces or `BQAA` Events)
 
 To eliminate day-1 setup friction while supporting full enterprise governance when needed, `bq-eval` is organized into **Steps 1, 2, 2.5, and 3**, with enterprise extensions kept open:
 
@@ -21,10 +30,11 @@ To eliminate day-1 setup friction while supporting full enterprise governance wh
 - **`agent_eval.v_step1_trace_eval`**: Rolls up each `trace_id` to compute `trace_latency_ms`, `tool_call_count`, `tool_error_count`, `step1_pass` (`$0` deterministic check), and `trace_cost_usd`.
 - **`agent_eval.v_step1_cost_per_outcome`**: Aggregates by `(apphub_application_id, business_unit, cost_center)` to report `step1_pass_rate`, `p95_latency_ms`, `total_cost_usd`, and **`step1_cost_per_outcome_usd`**.
 
-### 2.2 Step 2: `1` Rubric Table + Stateless `100%` & `10%` Eval (`sql/step2_stateless_eval.sql`)
-- **`agent_eval.rubrics`**: Can be mounted directly from [`sql/step2_rubrics.csv`](../sql/step2_rubrics.csv) in Cloud Storage (`CREATE OR REPLACE EXTERNAL TABLE`) or created as a native BigQuery table seeded via `MERGE`.
-- **`agent_eval.v_step2_trace_rubric_prompts`**: Joins `v_step1_trace_eval` with `trace_payloads` and `rubrics`, escaping `&`, `<`, and `>` inside `<untrusted_text>` blocks.
-- **Static Query 2A (`100%` Full Traces)** & **Static Query 2B (`10%` Sample)**: Run `AI.GENERATE_TABLE` statelessly and return `reasoning_trace`, `ordinal_score`, `verified_pass`, and `trace_cost_usd` directly in the query result.
+### 2.2 Step 2: `1` Rubric Table + Stateless Dual-Engine Eval (`sql/step2_stateless_eval.sql`)
+- **`agent_eval.rubrics`**: Can be mounted directly from [`sql/step2_rubrics.csv`](../sql/step2_rubrics.csv) in Cloud Storage (`CREATE OR REPLACE EXTERNAL TABLE`) or created as a native BigQuery table.
+- **`agent_eval.v_step2_trace_rubric_prompts`**: Joins `v_step1_trace_eval` (`WHERE step1_pass = TRUE`) with `trace_payloads` and `rubrics`, escaping `&`, `<`, and `>` inside `<untrusted_text>` blocks.
+- **Engine A (`AI.GENERATE_TABLE` — All Regions incl. `US`/`EU`)**: Runs 4-point ordinal rubrics statelessly on `100%` or `10%` of traces and returns `reasoning_trace`, `ordinal_score`, `verified_pass`, and `trace_cost_usd`.
+- **Engine B (`AI.EVALUATE_AGENT` — Single-Region `BQAA` `AgentData` TVF)**: Scores Step-1 passing turns (`v_bqaa_eval_turn_filtered`) against Google's 7 managed trajectory metrics (`tool_use_quality_v1`, `final_response_quality_v1`, `hallucination_v1`, `safety_v1`, etc.) with zero `CREATE MODEL` or `CREATE CONNECTION` setup.
 
 ### 2.3 Step 2.5: Agentic Skill (`skills/bq-eval/SKILL.md`)
 - Uses [`skills/bq-eval/references/sql_recipes.md`](../skills/bq-eval/references/sql_recipes.md) to author new 4-point ordinal rubrics (`MERGE INTO agent_eval.rubrics`), compose custom slice queries (`MOD(ABS(FARM_FINGERPRINT(trace_id)), 100) < 5` for `5%`, `trace_start_time >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR)` for the last 1 hour), and create custom domain SQL views (`v_step1_custom_domain_eval`).

@@ -6,11 +6,13 @@ steps:
       - "-c"
       - |
         export PYTHONDONTWRITEBYTECODE=1
-        uv pip install --system -e ".[dev]" "ast-grep-cli>=0.35"
-        ast-grep scan --rule specs/ast.rules.yaml
-        ruff check --no-cache bq_eval tests examples
-        pytest -p no:cacheprovider -v
-        bq-eval demo --html-out /tmp/scorecard.html
+        uv lock --check --offline
+        uv sync --frozen --extra dev
+        uv pip install --python .venv/bin/python "ast-grep-cli>=0.35"
+        .venv/bin/ast-grep scan --rule specs/ast.rules.yaml
+        .venv/bin/ruff check --no-cache bq_eval tests examples
+        .venv/bin/pytest -p no:cacheprovider -v
+        .venv/bin/bq-eval demo --html-out /tmp/scorecard.html
 
 options:
   logging: CLOUD_LOGGING_ONLY

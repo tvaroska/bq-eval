@@ -12,6 +12,7 @@ PACKAGE_DIR = REPO_ROOT / "bq_eval"
 
 DETERMINISTIC_CORE_MODULES = (
     "otel.py",
+    "bqaa.py",
     "rubrics.py",
     "calibration.py",
     "sql_eval.py",

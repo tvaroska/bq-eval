@@ -270,3 +270,25 @@ FROM AI.GENERATE_TABLE(
     0.0 AS temperature
   )
 );
+
+-- =============================================================================
+-- 6. Engine B (`AI.EVALUATE_AGENT` over Light Capture `BQAA` AgentData Turns)
+--   * Zero `CREATE MODEL` / `CREATE CONNECTION` required (single-region datasets)
+--   * Pre-filtered through Step-1 `$0` SQL checks (`v_bqaa_eval_turn_filtered`)
+--     and `10%` deterministic `FARM_FINGERPRINT(trace_id)` sampling to save 90%+ judge cost
+-- =============================================================================
+-- SELECT *
+-- FROM AI.EVALUATE_AGENT(
+--   TABLE (
+--     SELECT *
+--     FROM `agent_eval.v_bqaa_eval_turn_filtered`
+--     WHERE MOD(ABS(FARM_FINGERPRINT(trace_id)), 100) < 10
+--   ),
+--   trace_col => 'trace',
+--   managed_metrics => [
+--     'tool_use_quality_v1',
+--     'final_response_quality_v1',
+--     'hallucination_v1',
+--     'safety_v1'
+--   ]
+-- );

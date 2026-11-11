@@ -275,7 +275,7 @@ def render_markdown_report(artifacts: ShowcaseRunArtifacts) -> str:
         else "NULL (Fail-Closed)"
     )
 
-    return f"""# BigQuery Agent Evaluation & FinOps Executive Scorecard (`bq-eval`)
+    return f"""# BQ Eval & FinOps Executive Scorecard (`bq-eval`)
 
 ## 1. Tier 1–3 Application Quality & Cost per Verified Outcome (`CPVO`)
 
@@ -316,7 +316,7 @@ def write_html_scorecard(artifacts: ShowcaseRunArtifacts, output_path: Path) -> 
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>BigQuery Agent Evaluation &amp; FinOps Scorecard (bq-eval)</title>
+  <title>BQ Eval &amp; FinOps Scorecard (bq-eval)</title>
   <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230B57D0'/%3E%3Cpath d='M16 44V26h8v18h-8zm12 0V16h8v28h-8zm12 0V32h8v12h-8z' fill='%23FFFFFF'/%3E%3Ccircle cx='48' cy='20' r='6' fill='%2334A853'/%3E%3C/svg%3E" />
   <style>
     :root {{
@@ -415,8 +415,8 @@ def write_html_scorecard(artifacts: ShowcaseRunArtifacts, output_path: Path) -> 
 <body>
   <div class="container">
     <header>
-      <h1>BigQuery Agent Evaluation &amp; FinOps Executive Scorecard</h1>
-      <p class="subtitle">3-Tier BigQuery SQL + AI.GENERATE_TABLE Funnel · Rogan-Gladen Calibration · 4-Bucket FinOps &amp; FOCUS 1.2 Chargeback</p>
+      <h1>BQ Eval &amp; FinOps Executive Scorecard</h1>
+      <p class="subtitle">Dual-Path Capture (Light BQAA + Full OTel) · 3-Tier SQL Judge Funnel · Rogan-Gladen Calibration · FOCUS 1.2 Chargeback</p>
     </header>
 
     <div class="kpi-grid">
