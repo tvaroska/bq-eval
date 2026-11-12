@@ -179,7 +179,7 @@ bq-eval/
 │   ├── bqaa-and-dual-path-architecture.md      # Light Capture (BQAA) + Full Capture (OTel) design reference
 │   ├── architecture-and-sql.md                 # Progressive Step 1-3 walkthrough & App Hub linkage
 │   ├── finops-and-cost-management.md           # USD Cost per Verified Outcome, Eval ROI, Pareto & FOCUS 1.2
-│   └── roadmap.md                              # Showcase delivery roadmap (M1-M8)
+│   └── roadmap.md                              # Showcase delivery roadmap (M1-M9)
 ├── sql/
 │   ├── bqaa_adapter_views.sql                  # Light Capture (BQAA) zero-copy views & Hybrid switchboard
 │   ├── demo_time_shift_loadgen.sql             # Demo Loadgen: time-shift 4-app corpus into agent_eval_seed
