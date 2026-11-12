@@ -1,0 +1,19 @@
+{
+  "config": [
+    "mypy:missing",
+    "ruff:ANN",
+    "ruff:C4",
+    "ruff:C90",
+    "ruff:PLR0911",
+    "ruff:PLR0912",
+    "ruff:PLR0913",
+    "ruff:PLR0915",
+    "ruff:RUF",
+    "ruff:S",
+    "ruff:W"
+  ],
+  "oversized_files": {
+    "bq_eval/loadgen.py": 1120
+  },
+  "narration_comments": 8
+}
