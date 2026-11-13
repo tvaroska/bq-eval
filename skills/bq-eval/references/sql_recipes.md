@@ -49,7 +49,10 @@ FROM AI.GENERATE_TABLE(
     WHERE rubric_id = 'groundedness_4pt_v1'
       AND MOD(ABS(FARM_FINGERPRINT(trace_id)), 100) < 5
   ),
-  STRUCT('reasoning_trace STRING, ordinal_score INT64' AS output_schema, 0.0 AS temperature)
+  STRUCT(
+    'reasoning_trace STRING NOT NULL, ordinal_score INT64 NOT NULL' AS output_schema,
+    '{"generation_config": {"temperature": 0.0, "max_output_tokens": 2048, "thinking_config": {"thinking_level": "LOW"}}}' AS model_params
+  )
 );
 ```
 
@@ -77,7 +80,10 @@ FROM AI.GENERATE_TABLE(
     WHERE rubric_id = 'groundedness_4pt_v1'
       AND trace_start_time >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR)
   ),
-  STRUCT('reasoning_trace STRING, ordinal_score INT64' AS output_schema, 0.0 AS temperature)
+  STRUCT(
+    'reasoning_trace STRING NOT NULL, ordinal_score INT64 NOT NULL' AS output_schema,
+    '{"generation_config": {"temperature": 0.0, "max_output_tokens": 2048, "thinking_config": {"thinking_level": "LOW"}}}' AS model_params
+  )
 );
 ```
 
@@ -110,7 +116,10 @@ FROM AI.GENERATE_TABLE(
         OR MOD(ABS(FARM_FINGERPRINT(trace_id)), 100) < 5
       )
   ),
-  STRUCT('reasoning_trace STRING, ordinal_score INT64' AS output_schema, 0.0 AS temperature)
+  STRUCT(
+    'reasoning_trace STRING NOT NULL, ordinal_score INT64 NOT NULL' AS output_schema,
+    '{"generation_config": {"temperature": 0.0, "max_output_tokens": 2048, "thinking_config": {"thinking_level": "LOW"}}}' AS model_params
+  )
 );
 ```
 

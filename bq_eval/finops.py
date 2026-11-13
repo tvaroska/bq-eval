@@ -332,9 +332,7 @@ def plan_off_peak_eval_schedule(
 
     scheduled_free = total_batch_eval_tokens - remaining
     coverage_pct = (
-        (scheduled_free / total_batch_eval_tokens) * 100.0
-        if total_batch_eval_tokens > 0
-        else 100.0
+        (scheduled_free / total_batch_eval_tokens) * 100.0 if total_batch_eval_tokens > 0 else 100.0
     )
     avoided_usd = (scheduled_free / 1e6) * payg_usd_per_1m_weighted
 

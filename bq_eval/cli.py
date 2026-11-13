@@ -92,6 +92,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=5,
         help="Canary sampling percentage for healthy traces (default: 5).",
     )
+    sql_p.add_argument(
+        "--run-id",
+        default=None,
+        help="Optional fleet run_id filter against fleet_case_outcomes.",
+    )
     return parser
 
 
@@ -136,6 +141,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 dataset_id=args.dataset_id,
                 eval_view=args.eval_view,
                 canary_sample_pct=args.canary_pct,
+                run_id=args.run_id,
             )
         else:
             sql = build_ai_generate_table_judge_sql(
@@ -143,6 +149,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 dataset_id=args.dataset_id,
                 rubric_id=args.rubric_id,
                 canary_sample_pct=args.canary_pct,
+                run_id=args.run_id,
             )
         print(sql)
         return 0

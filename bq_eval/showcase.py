@@ -296,7 +296,7 @@ def render_markdown_report(artifacts: ShowcaseRunArtifacts) -> str:
 
 - **Observed Prefix-Cache Hit Ratio (`order-support-agent`):** `{dil.observed_cache_hit_ratio * 100:.1f}%` across `{dil.distinct_prompt_variants}` prompt variants (`1/N` ceiling `{dil.theoretical_dilution_ceiling * 100:.1f}%`)
 - **Action:** {dil.recommendation}
-- **Recommended Default Routing (`NFR = 0.0%` Gate):** `{rec.config_id if rec else 'none'}` (`{rec.model_name if rec else 'N/A'}`, CPVO `${rec.cost_per_verified_outcome_usd if rec else 0.0:.4f}`)
+- **Recommended Default Routing (`NFR = 0.0%` Gate):** `{rec.config_id if rec else "none"}` (`{rec.model_name if rec else "N/A"}`, CPVO `${rec.cost_per_verified_outcome_usd if rec else 0.0:.4f}`)
 
 ## 4. FOCUS 1.2 Two-Pool Chargeback & Off-Peak PT Water-Filling
 

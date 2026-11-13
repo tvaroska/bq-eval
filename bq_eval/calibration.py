@@ -115,9 +115,9 @@ def rogan_gladen_calibrate(
     var_tpr = (tpr * (1.0 - tpr)) / n_pos
     var_tnr = (tnr * (1.0 - tnr)) / n_neg
 
-    se_theta = math.sqrt(
-        var_p_obs + (theta_rg**2) * var_tpr + ((1.0 - theta_rg) ** 2) * var_tnr
-    ) / j_stat
+    se_theta = (
+        math.sqrt(var_p_obs + (theta_rg**2) * var_tpr + ((1.0 - theta_rg) ** 2) * var_tnr) / j_stat
+    )
 
     ci_lower = min(1.0, max(0.0, theta_rg - z_value * se_theta))
     ci_upper = min(1.0, max(0.0, theta_rg + z_value * se_theta))

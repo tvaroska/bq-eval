@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import re
 import sqlite3
 from collections.abc import Sequence
 from typing import Literal
@@ -50,17 +51,30 @@ def escape_sql_xml_expr(column_expr: str) -> str:
     )
 
 
+def _validate_run_id(run_id: str | None) -> str | None:
+    if run_id is None:
+        return None
+    cleaned = run_id.strip()
+    if not cleaned:
+        return None
+    if not re.fullmatch(r"[a-zA-Z0-9_.-]+", cleaned):
+        raise ValueError(f"Invalid run_id {run_id!r}: must match ^[a-zA-Z0-9_.-]+$")
+    return cleaned
+
+
 def build_ai_generate_table_judge_sql(
     project_id: str,
     dataset_id: str = "agent_eval",
     rubric_id: str = "groundedness_4pt_v1",
     canary_sample_pct: int = 5,
+    run_id: str | None = None,
 ) -> str:
     """Build production BigQuery `AI.GENERATE_TABLE` SQL query (EVAL-P08).
 
     Enforces:
     1. Stratified sampling: 100% of deterministic failures (`NOT rule0_pass`, tool errors,
-       or SLA breaches) plus `canary_sample_pct`% (`FARM_FINGERPRINT`) of healthy traces.
+       or SLA breaches) plus `canary_sample_pct`% (`FARM_FINGERPRINT`) of healthy traces,
+       optionally scoped to a specific fleet `run_id`.
     2. Nested SQL `REPLACE` XML escaping inside `<untrusted_text>` blocks so prompt payloads
        cannot break out of XML delimiters.
     3. CoT-first output struct: `reasoning_trace STRING, ordinal_score INT64, binary_pass BOOL`.
@@ -69,17 +83,35 @@ def build_ai_generate_table_judge_sql(
         raise ValueError(f"Unknown rubric_id: {rubric_id}")
     if not (0 <= canary_sample_pct <= 100):
         raise ValueError("canary_sample_pct must be between 0 and 100.")
+    valid_run_id = _validate_run_id(run_id)
 
     rubric = CANONICAL_RUBRICS[rubric_id]
+    remote_model = (
+        "gemini_3_8_flash_judge"
+        if rubric.judge_model == "gemini-3.8-flash"
+        else "gemini_4_argon_judge"
+    )
     system_prompt = build_autorater_system_prompt(rubric).replace("'", "\\'")
     escaped_prompt = escape_sql_xml_expr("p.user_prompt")
     escaped_context = escape_sql_xml_expr("p.retrieved_context")
     escaped_response = escape_sql_xml_expr("p.final_response")
 
+    run_filter = (
+        f"\n    AND t.outcome_id IN (\n"
+        f"      SELECT outcome_id\n"
+        f"      FROM `{project_id}.{dataset_id}.fleet_case_outcomes`\n"
+        f"      WHERE run_id = '{valid_run_id}' AND outcome_id IS NOT NULL\n"
+        f"    )"
+        if valid_run_id
+        else ""
+    )
+    eval_run_col = f"  '{valid_run_id}' AS eval_run_id,\n  outcome_id,\n" if valid_run_id else ""
+
     return f"""-- Tier 2 Stratified AI.GENERATE_TABLE Judge Execution ({rubric.rubric_id})
 WITH candidate_traces AS (
   SELECT
     t.trace_id,
+    t.outcome_id,
     t.apphub_application_id,
     t.rule0_pass,
     CASE
@@ -96,15 +128,16 @@ WITH candidate_traces AS (
   FROM `{project_id}.{dataset_id}.v_trace_sql_evaluation` AS t
   INNER JOIN `{project_id}.{dataset_id}.trace_payloads` AS p
     ON t.trace_id = p.trace_id
-  WHERE
+  WHERE (
     NOT t.rule0_pass
     OR t.tool_error_count > 0
     OR t.trace_latency_ms > t.sla_latency_ms
     OR MOD(ABS(FARM_FINGERPRINT(t.trace_id)), 100) < {canary_sample_pct}
+  ){run_filter}
 )
 SELECT
   GENERATE_UUID() AS eval_id,
-  trace_id,
+{eval_run_col}  trace_id,
   apphub_application_id,
   '{rubric.rubric_id}' AS rubric_id,
   '{rubric.judge_model}' AS judge_model,
@@ -115,11 +148,11 @@ SELECT
   (ordinal_score >= {rubric.passing_score}) AS binary_pass,
   CURRENT_TIMESTAMP() AS evaluated_at
 FROM AI.GENERATE_TABLE(
-  MODEL `{project_id}.{dataset_id}.gemini_4_argon_judge`,
+  MODEL `{project_id}.{dataset_id}.{remote_model}`,
   TABLE candidate_traces,
   STRUCT(
-    'reasoning_trace STRING, ordinal_score INT64, binary_pass BOOL' AS output_schema,
-    0.0 AS temperature
+    'reasoning_trace STRING NOT NULL, ordinal_score INT64 NOT NULL, binary_pass BOOL NOT NULL' AS output_schema,
+    '{{"generation_config": {{"temperature": 0.0, "max_output_tokens": 2048, "thinking_config": {{"thinking_level": "LOW"}}}}}}' AS model_params
   )
 );
 """
@@ -147,6 +180,7 @@ def build_ai_evaluate_agent_sql(
         "safety_v1",
     ),
     canary_sample_pct: int = 10,
+    run_id: str | None = None,
 ) -> str:
     """Build Step-1 pre-filtered BigQuery `AI.EVALUATE_AGENT` SQL query (Engine B, M5).
 
@@ -161,13 +195,19 @@ def build_ai_evaluate_agent_sql(
         raise ValueError(f"Unknown AI.EVALUATE_AGENT managed metric(s): {unknown}")
     if not (0 <= canary_sample_pct <= 100):
         raise ValueError("canary_sample_pct must be between 0 and 100.")
+    valid_run_id = _validate_run_id(run_id)
 
     metrics_sql = ",\n      ".join(f"'{m}'" for m in managed_metrics)
-    sample_clause = (
-        ""
-        if canary_sample_pct == 100
-        else f"\n    WHERE MOD(ABS(FARM_FINGERPRINT(trace_id)), 100) < {canary_sample_pct}"
-    )
+    predicates: list[str] = []
+    if canary_sample_pct < 100:
+        predicates.append(f"MOD(ABS(FARM_FINGERPRINT(trace_id)), 100) < {canary_sample_pct}")
+    if valid_run_id:
+        predicates.append(
+            f"trace_id IN ("
+            f"SELECT trace_id FROM `{project_id}.{dataset_id}.fleet_case_outcomes` "
+            f"WHERE run_id = '{valid_run_id}' AND trace_id IS NOT NULL)"
+        )
+    sample_clause = f"\n    WHERE {' AND '.join(predicates)}" if predicates else ""
 
     return f"""-- Tier 2 Engine B: Step-1 Pre-Filtered AI.EVALUATE_AGENT Execution ({canary_sample_pct}% Sample)
 WITH candidate_turns AS (
@@ -327,9 +367,7 @@ def evaluate_traces_in_sqlite(
             if r["primary_traffic_type"] in ("production_inference", "conflict_escalation")
         )
         rule0_pass_rate = sum(r["rule0_pass"] for r in app_rows) / total_traces
-        tool_success_rate = (
-            sum(1 for r in app_rows if r["tool_error_count"] == 0) / total_traces
-        )
+        tool_success_rate = sum(1 for r in app_rows if r["tool_error_count"] == 0) / total_traces
         latencies = sorted(float(r["trace_latency_ms"]) for r in app_rows)
         p95_idx = min(len(latencies) - 1, max(0, math.ceil(0.95 * len(latencies)) - 1))
         p95_latency = latencies[p95_idx]
@@ -345,9 +383,7 @@ def evaluate_traces_in_sqlite(
         # while all judge calls on this app contribute to autorater_judge_usd.
         all_judged_for_app = [r for r in app_rows if r["trace_id"] in judge_map]
         rule0_judged_outcomes = [
-            judge_map[r["trace_id"]]
-            for r in all_judged_for_app
-            if r["rule0_pass"] == 1
+            judge_map[r["trace_id"]] for r in all_judged_for_app if r["rule0_pass"] == 1
         ]
         judged_samples = len(rule0_judged_outcomes)
         table_judge_usd = len(all_judged_for_app) * judge_cost_per_call_usd

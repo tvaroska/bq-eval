@@ -121,9 +121,7 @@ class OTelGenAISpanRecord(BaseModel):
     tool_name: str | None = None
     tool_call_status: str | None = "SUCCESS"
     rule0_pass: bool = True
-    finops_traffic_type: FinOpsTrafficType = Field(
-        default=FinOpsTrafficType.PRODUCTION_INFERENCE
-    )
+    finops_traffic_type: FinOpsTrafficType = Field(default=FinOpsTrafficType.PRODUCTION_INFERENCE)
     outcome_id: str | None = None
     outcome_owner: str | None = None
     source_mode: str | None = None

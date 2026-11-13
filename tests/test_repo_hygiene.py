@@ -40,9 +40,7 @@ FORBIDDEN_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("Internal Buganizer ID", re.compile(r"\bb/\d{6,}\b")),
     (
         "Internal shortlink",
-        re.compile(
-            r"\bgo/(?!mod\b|sum\b|work\b|version\b|test\b|build\b|run\b)[a-zA-Z0-9_-]{3,}"
-        ),
+        re.compile(r"\bgo/(?!mod\b|sum\b|work\b|version\b|test\b|build\b|run\b)[a-zA-Z0-9_-]{3,}"),
     ),
     ("Internal monorepo path", re.compile(r"//depot/" + r"google3|\bgoogle3\b")),
     (
@@ -69,7 +67,9 @@ def _iter_tracked_text_files() -> list[Path]:
 
 def test_zero_github_workflows_and_cloudbuild_present() -> None:
     gh_workflows = REPO_ROOT / ".github" / "workflows"
-    assert not gh_workflows.exists(), "CI/CD must use cloudbuild.yaml only (zero .github/workflows/)"
+    assert not gh_workflows.exists(), (
+        "CI/CD must use cloudbuild.yaml only (zero .github/workflows/)"
+    )
     assert (REPO_ROOT / "cloudbuild.yaml").is_file()
 
 
@@ -81,9 +81,9 @@ def test_claude_md_symlink_and_spine_caps() -> None:
     gitignore = (REPO_ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
 
     assert agents_md.is_file()
-    assert (
-        agents_md.stat().st_size < 24_000
-    ), "AGENTS.md must stay strictly below 24 KB truncation cap"
+    assert agents_md.stat().st_size < 24_000, (
+        "AGENTS.md must stay strictly below 24 KB truncation cap"
+    )
     assert critical_md.is_file()
     assert critical_md.stat().st_size <= 5_000, "CRITICAL.md must stay <= 5 KB"
     assert decisions_md.is_file()
@@ -133,14 +133,10 @@ def test_declarative_ast_rules_and_positive_controls(tmp_path: Path) -> None:
     rules_path = REPO_ROOT / "specs" / "ast.rules.yaml"
     assert rules_path.is_file(), "Missing specs/ast.rules.yaml declarative AST contract"
     raw = rules_path.read_text(encoding="utf-8")
-    blocks = [
-        c for c in re.split(r"(?m)^---\s*$", raw) if re.search(r"(?m)^id:\s*\S+", c)
-    ]
+    blocks = [c for c in re.split(r"(?m)^---\s*$", raw) if re.search(r"(?m)^id:\s*\S+", c)]
     assert len(blocks) >= 4, "Expected >= 4 rules in specs/ast.rules.yaml"
 
-    ast_grep = shutil.which("ast-grep") or str(
-        Path.home() / ".local" / "bin" / "ast-grep"
-    )
+    ast_grep = shutil.which("ast-grep") or str(Path.home() / ".local" / "bin" / "ast-grep")
     if not Path(ast_grep).is_file():
         pytest.skip("ast-grep binary not installed on this runner")
 
@@ -156,9 +152,7 @@ def test_declarative_ast_rules_and_positive_controls(tmp_path: Path) -> None:
     for idx, chunk in enumerate(blocks):
         id_m = re.search(r"(?m)^id:\s*(\S+)", chunk)
         sev_m = re.search(r"(?m)^severity:\s*(\S+)", chunk)
-        path_m = re.search(
-            r'(?m)^\s+test_path:\s*["\']?([^"\'\r\n]+)["\']?\s*$', chunk
-        )
+        path_m = re.search(r'(?m)^\s+test_path:\s*["\']?([^"\'\r\n]+)["\']?\s*$', chunk)
         assert id_m is not None and sev_m is not None and path_m is not None
         rule_id = id_m.group(1)
         assert sev_m.group(1) == "error", f"{rule_id} must set severity: error"
@@ -187,4 +181,3 @@ def test_declarative_ast_rules_and_positive_controls(tmp_path: Path) -> None:
                     assert res.returncode == expected_rc, (
                         f"{rule_id} ({key}) failed on {snippet!r}:\n{res.stdout}"
                     )
-

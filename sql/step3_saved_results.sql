@@ -65,7 +65,10 @@ CLUSTER BY apphub_application_id, rubric_id, trace_id;
 --       AND MOD(ABS(FARM_FINGERPRINT(cand.trace_id)), 100) < 10
 --       AND existing.eval_id IS NULL
 --   ),
---   STRUCT('reasoning_trace STRING, ordinal_score INT64' AS output_schema, 0.0 AS temperature)
+--   STRUCT(
+--     'reasoning_trace STRING NOT NULL, ordinal_score INT64 NOT NULL' AS output_schema,
+--     '{"generation_config": {"temperature": 0.0, "max_output_tokens": 2048, "thinking_config": {"thinking_level": "LOW"}}}' AS model_params
+--   )
 -- );
 
 -- -----------------------------------------------------------------------------

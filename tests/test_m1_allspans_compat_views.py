@@ -56,9 +56,7 @@ REQUIRED_OTEL_SPANS_VIEW_COLUMNS: tuple[str, ...] = (
 
 
 def _all_sql_text() -> str:
-    return "\n".join(
-        p.read_text(encoding="utf-8") for p in sorted(SQL_DIR.glob("*.sql"))
-    )
+    return "\n".join(p.read_text(encoding="utf-8") for p in sorted(SQL_DIR.glob("*.sql")))
 
 
 def test_otel_spans_and_trace_payloads_are_views_over_linked_datasets() -> None:

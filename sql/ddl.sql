@@ -60,6 +60,7 @@ SELECT
   receive_time,
   SAFE_DIVIDE(CAST(duration_nano AS FLOAT64), 1e6) AS latency_ms,
   CASE
+    WHEN STARTS_WITH(name, 'a2a.server.events.event_queue') THEN 'OK'
     WHEN CAST(status.code AS STRING) IN ('1', 'OK', 'STATUS_CODE_OK') THEN 'OK'
     WHEN CAST(status.code AS STRING) IN ('2', 'ERROR', 'STATUS_CODE_ERROR') THEN 'ERROR'
     ELSE 'UNSET'
@@ -129,7 +130,11 @@ SELECT
   COALESCE(
     SAFE_CAST(JSON_VALUE(attributes, '$."rule0.pass"') AS BOOL),
     SAFE_CAST(JSON_VALUE(attributes, '$."docubridge.rule0_pass"') AS BOOL),
-    IF(CAST(status.code AS STRING) IN ('2', 'ERROR', 'STATUS_CODE_ERROR'), FALSE, TRUE)
+    IF(
+      STARTS_WITH(name, 'a2a.server.events.event_queue'),
+      TRUE,
+      IF(CAST(status.code AS STRING) IN ('2', 'ERROR', 'STATUS_CODE_ERROR'), FALSE, TRUE)
+    )
   ) AS rule0_pass,
   COALESCE(
     JSON_VALUE(attributes, '$."finops.traffic_type"'),
@@ -329,7 +334,63 @@ OPTIONS (
 );
 
 -- -----------------------------------------------------------------------------
--- 8. Isolated Synthetic Seed Tables in agent_eval_seed
+-- 8. M2 Multi-Agent Fleet Ground-Truth Labels, Outcomes & Run Manifests
+-- -----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `agent_eval.fleet_labels` (
+  run_id STRING NOT NULL OPTIONS (description = 'Fleet evaluation run identifier.'),
+  case_id STRING NOT NULL OPTIONS (description = 'Deterministic test case identifier within run_id.'),
+  app STRING NOT NULL OPTIONS (description = 'Expected App Hub application identifier (or unregistered_app).'),
+  case_type STRING NOT NULL OPTIONS (description = 'Cohort slice: clean, step1_reject, step2_trap, argon_cohort, day1, day2_in_policy, day2_out_of_policy, shadow.'),
+  trap_class STRING OPTIONS (description = 'Specific defect or trap class (e.g., po_box, stale_over_90d, cross_bill_street_mismatch, third_party_holder_mismatch).'),
+  held_out BOOL NOT NULL OPTIONS (description = 'TRUE when trap_class is omitted from judge rubric instructions to measure unseen defect generalization.'),
+  expected_status STRING NOT NULL OPTIONS (description = 'Expected business outcome status (succeeded, failed, escalated, denied).'),
+  doc_uris ARRAY<STRING> OPTIONS (description = 'Cloud Storage gs:// or a2a:// document URIs submitted for the case.'),
+  doc_sha256 ARRAY<STRING> OPTIONS (description = 'SHA-256 digests of the generated in-memory documents.'),
+  request_payload_json STRING OPTIONS (description = 'Serialized request payload dispatched by run_live_eval_fleet.py.'),
+  created_at TIMESTAMP NOT NULL OPTIONS (description = 'UTC corpus generation timestamp.')
+)
+CLUSTER BY run_id, app, case_type
+OPTIONS (
+  description = 'Seeded ground-truth label catalog for live multi-agent fleet evaluation runs.'
+);
+
+CREATE TABLE IF NOT EXISTS `agent_eval.fleet_case_outcomes` (
+  run_id STRING NOT NULL OPTIONS (description = 'Fleet evaluation run identifier.'),
+  case_id STRING NOT NULL OPTIONS (description = 'Test case identifier joining 1:1 to agent_eval.fleet_labels.'),
+  app STRING NOT NULL OPTIONS (description = 'Target App Hub application identifier.'),
+  case_type STRING NOT NULL OPTIONS (description = 'Cohort slice from fleet_labels.'),
+  outcome_id STRING OPTIONS (description = 'EVAL-P11 outcome.id returned via x-outcome-id header (NULL for unregistered shadow workload).'),
+  trace_id STRING OPTIONS (description = 'Root W3C trace_id returned via x-trace-id header.'),
+  observed_status STRING NOT NULL OPTIONS (description = 'Observed outcome status returned by the live service.'),
+  http_status INT64 NOT NULL OPTIONS (description = 'HTTP response status code.'),
+  recorded_at TIMESTAMP NOT NULL OPTIONS (description = 'UTC completion timestamp recorded by the fleet runner.')
+)
+CLUSTER BY run_id, app, outcome_id
+OPTIONS (
+  description = '1:1 live execution mapping between fleet_labels cases and EVAL-P11 outcome_id values.'
+);
+
+CREATE TABLE IF NOT EXISTS `agent_eval.fleet_runs` (
+  run_id STRING NOT NULL OPTIONS (description = 'Fleet evaluation run identifier.'),
+  total_cases INT64 NOT NULL OPTIONS (description = 'Total cases executed in the run.'),
+  kyc_cases INT64 NOT NULL OPTIONS (description = 'KYC cases executed.'),
+  rfp_cases INT64 NOT NULL OPTIONS (description = 'Benefits RFP cases executed.'),
+  meridian_cases INT64 NOT NULL OPTIONS (description = 'Meridian consolidation deals executed.'),
+  shadow_cases INT64 NOT NULL OPTIONS (description = 'Unregistered shadow attempts executed.'),
+  attributed_outcomes INT64 NOT NULL OPTIONS (description = 'Cases returning a non-null EVAL-P11 outcome_id.'),
+  promoted_skill_revision_id STRING OPTIONS (description = 'SkillRevision ID promoted between Day-1 and Day-2 deals.'),
+  concurrency INT64 NOT NULL OPTIONS (description = 'Max bounded HTTP concurrency used by the runner.'),
+  elapsed_seconds FLOAT64 NOT NULL OPTIONS (description = 'Total wall-clock fleet execution time in seconds.'),
+  started_at TIMESTAMP NOT NULL OPTIONS (description = 'UTC fleet start timestamp.'),
+  completed_at TIMESTAMP NOT NULL OPTIONS (description = 'UTC fleet completion timestamp.')
+)
+CLUSTER BY run_id
+OPTIONS (
+  description = 'Run-level execution manifest for live multi-agent fleet evaluation runs.'
+);
+
+-- -----------------------------------------------------------------------------
+-- 8B. Isolated Synthetic Seed Tables in agent_eval_seed
 -- -----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS `agent_eval_seed.seed_otel_spans` (
   template_idx INT64 NOT NULL,

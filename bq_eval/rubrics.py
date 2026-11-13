@@ -60,8 +60,7 @@ def wrap_untrusted_text(raw_text: str, tag: str = "untrusted_text") -> str:
 def build_autorater_system_prompt(rubric: RubricSpec) -> str:
     """Build deterministic system prompt for a 4-point ordinal autorater."""
     scale_lines = "\n".join(
-        f"  - Score {lvl.score} ({lvl.label}): {lvl.anchor_description}"
-        for lvl in rubric.levels
+        f"  - Score {lvl.score} ({lvl.label}): {lvl.anchor_description}" for lvl in rubric.levels
     )
     return (
         f"You are an objective, deterministic evaluation autorater ({rubric.judge_model}, T=0.0).\n"

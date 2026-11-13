@@ -57,6 +57,9 @@ def test_ddl_and_views_table_parity() -> None:
         "agent_eval.eval_results",
         "agent_eval.sme_labels",
         "agent_eval.model_pricing_catalog",
+        "agent_eval.fleet_labels",
+        "agent_eval.fleet_case_outcomes",
+        "agent_eval.fleet_runs",
     }
     created_tables = set(
         re.findall(r"CREATE TABLE IF NOT EXISTS `(agent_eval\.[a-z0-9_]+)`", ddl_sql)
@@ -84,12 +87,12 @@ def test_ddl_and_views_table_parity() -> None:
         "agent_eval.v_attribution_coverage",
         "agent_eval.v_skill_lineage_roi",
         "agent_eval.v_otel_spans_coverage",
+        "agent_eval.v_counterparty_spend",
+        "agent_eval.v_m2_kyc_trap_eval",
         "agent_eval.v_agent_eval_and_finops_summary",
         "agent_eval.v_capacity_hourly_burndown_export",
     }
-    created_views = set(
-        re.findall(r"CREATE OR REPLACE VIEW `(agent_eval\.[a-z0-9_]+)`", views_sql)
-    )
+    created_views = set(re.findall(r"CREATE OR REPLACE VIEW `(agent_eval\.[a-z0-9_]+)`", views_sql))
     assert created_views == expected_views
 
 
@@ -259,12 +262,8 @@ def test_rogan_gladen_and_sqlite_exact_parity_and_fail_closed_guard() -> None:
     assert cal_summary.calibrated_pass_rate == pytest.approx(
         direct_rg.calibrated_pass_rate, abs=1e-15
     )
-    assert cal_summary.calibrated_ci_95_lower == pytest.approx(
-        direct_rg.ci_95_lower, abs=1e-15
-    )
-    assert cal_summary.calibrated_ci_95_upper == pytest.approx(
-        direct_rg.ci_95_upper, abs=1e-15
-    )
+    assert cal_summary.calibrated_ci_95_lower == pytest.approx(direct_rg.ci_95_lower, abs=1e-15)
+    assert cal_summary.calibrated_ci_95_upper == pytest.approx(direct_rg.ci_95_upper, abs=1e-15)
     # All 22 judge calls (20 canary + 2 error-tail) are billed in autorater_judge_usd
     assert cal_summary.autorater_judge_usd == pytest.approx(22 * 0.0025, abs=1e-12)
 
@@ -380,6 +379,31 @@ def test_showcase_demo_and_cli_html_favicon(tmp_path: Path) -> None:
 
     rc_sql = cli_main(["judge-sql", "--project-id", "test-proj", "--canary-pct", "5"])
     assert rc_sql == 0
+    rc_m2 = cli_main(
+        [
+            "judge-sql",
+            "--project-id",
+            "test-proj",
+            "--rubric-id",
+            "kyc_policy_compliance_4pt_v1",
+            "--canary-pct",
+            "100",
+            "--run-id",
+            "m2-run-01",
+        ]
+    )
+    assert rc_m2 == 0
+    m2_sql = build_ai_generate_table_judge_sql(
+        project_id="test-proj",
+        rubric_id="kyc_policy_compliance_4pt_v1",
+        canary_sample_pct=100,
+        run_id="m2-run-01",
+    )
+    assert "fleet_case_outcomes" in m2_sql
+    assert "WHERE run_id = 'm2-run-01'" in m2_sql
+    assert "MODEL `test-proj.agent_eval.gemini_3_8_flash_judge`" in m2_sql
+    with pytest.raises(ValueError, match="Invalid run_id"):
+        build_ai_generate_table_judge_sql(project_id="test-proj", run_id="bad' OR 1=1--")
     assert "groundedness_4pt_v1" in CANONICAL_RUBRICS
     artifacts = run_showcase_pipeline()
     out = write_html_scorecard(artifacts, tmp_path / "direct.html")
@@ -421,9 +445,9 @@ def test_progressive_step1_step2_step25_step3_pack() -> None:
 
     # Step 2.5: Agentic Skill (define new rubrics, run on 5%, run on last 1 hour of traces)
     skill_md = (REPO_ROOT / "skills" / "bq-eval" / "SKILL.md").read_text(encoding="utf-8")
-    recipes_md = (
-        REPO_ROOT / "skills" / "bq-eval" / "references" / "sql_recipes.md"
-    ).read_text(encoding="utf-8")
+    recipes_md = (REPO_ROOT / "skills" / "bq-eval" / "references" / "sql_recipes.md").read_text(
+        encoding="utf-8"
+    )
     assert "name: bq-eval" in skill_md
     assert "MOD(ABS(FARM_FINGERPRINT(trace_id)), 100) < 5" in skill_md
     assert "TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR)" in skill_md
@@ -516,5 +540,3 @@ def test_time_shift_loadgen_sql_and_cli_parity(tmp_path: Path) -> None:
     assert "quoting-concierge-adk" in loadgen_sql
     assert "claims-triage-langgraph" in loadgen_sql
     assert "renewal-auditor-svc" in loadgen_sql
-
-

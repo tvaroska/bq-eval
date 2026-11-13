@@ -493,6 +493,175 @@ WHERE s.model_name IS NOT NULL
 GROUP BY s.service_name;
 
 -- -----------------------------------------------------------------------------
+-- View 2I: External Counterparty Telemetry & Spend (`v_counterparty_spend` — EVAL-P11)
+--   * Reports counterparty spans/tokens/spend separately from internal CPVO
+-- -----------------------------------------------------------------------------
+CREATE OR REPLACE VIEW `agent_eval.v_counterparty_spend` AS
+SELECT
+  w.apphub_application_id,
+  w.service_name,
+  w.agent_name,
+  COALESCE(w.source_mode, 'UNSPECIFIED') AS source_mode,
+  COUNT(DISTINCT w.trace_id) AS distinct_traces,
+  COUNT(*) AS span_count,
+  SUM(w.input_tokens) AS total_input_tokens,
+  SUM(w.output_tokens) AS total_output_tokens,
+  SUM(w.thinking_tokens) AS total_thinking_tokens,
+  SUM(w.span_cost_usd) AS external_model_cost_usd
+FROM `agent_eval.v_trace_waterfall` AS w
+WHERE w.apphub_application_id LIKE '%external%'
+   OR COALESCE(JSON_VALUE(w.attributes, '$."apphub.external"'), 'false') = 'true'
+GROUP BY
+  w.apphub_application_id,
+  w.service_name,
+  w.agent_name,
+  source_mode;
+
+-- -----------------------------------------------------------------------------
+-- View 2J: M2 KYC Step-2 Semantic Trap Catch Rate, 95% Wilson CI & Argon Agreement
+--   * Joins fleet_labels -> fleet_case_outcomes -> eval_results on outcome_id
+--   * Separates held_out = TRUE (`third_party_holder_mismatch`) from rubric-listed traps
+-- -----------------------------------------------------------------------------
+CREATE OR REPLACE VIEW `agent_eval.v_m2_kyc_trap_eval` AS
+WITH flash_verdicts AS (
+  SELECT
+    COALESCE(e.outcome_id, t.outcome_id) AS outcome_id,
+    ARRAY_AGG(e.binary_pass ORDER BY e.evaluated_at DESC LIMIT 1)[SAFE_OFFSET(0)] AS flash_pass,
+    ARRAY_AGG(e.ordinal_score ORDER BY e.evaluated_at DESC LIMIT 1)[SAFE_OFFSET(0)] AS flash_score,
+    SUM(
+      ((e.judge_input_tokens / 1e6) * COALESCE(m.input_usd_per_1m, 0.15))
+      + (((e.judge_output_tokens + e.judge_thinking_tokens) / 1e6) * COALESCE(m.output_usd_per_1m, 0.60))
+    ) AS flash_judge_cost_usd
+  FROM `agent_eval.eval_results` AS e
+  LEFT JOIN `agent_eval.v_trace_sql_evaluation` AS t
+    ON e.trace_id = t.trace_id
+  LEFT JOIN `agent_eval.model_pricing_catalog` AS m
+    ON e.judge_model = m.model_name
+    AND e.evaluated_at >= m.effective_start
+    AND e.evaluated_at < m.effective_end
+  WHERE e.rubric_id = 'kyc_policy_compliance_4pt_v1'
+    AND e.judge_model = 'gemini-3.8-flash'
+    AND COALESCE(e.outcome_id, t.outcome_id) IS NOT NULL
+  GROUP BY outcome_id
+),
+argon_verdicts AS (
+  SELECT
+    COALESCE(e.outcome_id, t.outcome_id) AS outcome_id,
+    ARRAY_AGG(e.binary_pass ORDER BY e.evaluated_at DESC LIMIT 1)[SAFE_OFFSET(0)] AS argon_pass,
+    ARRAY_AGG(e.ordinal_score ORDER BY e.evaluated_at DESC LIMIT 1)[SAFE_OFFSET(0)] AS argon_score
+  FROM `agent_eval.eval_results` AS e
+  LEFT JOIN `agent_eval.v_trace_sql_evaluation` AS t
+    ON e.trace_id = t.trace_id
+  WHERE e.rubric_id = 'kyc_policy_compliance_4pt_v1'
+    AND e.judge_model = 'gemini-4-argon'
+    AND COALESCE(e.outcome_id, t.outcome_id) IS NOT NULL
+  GROUP BY outcome_id
+),
+joined_cases AS (
+  SELECT
+    l.run_id,
+    l.case_id,
+    l.case_type,
+    COALESCE(l.trap_class, 'clean_street_proof') AS trap_class,
+    l.held_out,
+    (l.case_type = 'step2_trap') AS is_trap,
+    o.outcome_id,
+    o.observed_status,
+    fv.flash_pass,
+    fv.flash_score,
+    COALESCE(fv.flash_judge_cost_usd, 0.0) AS flash_judge_cost_usd,
+    av.argon_pass,
+    av.argon_score
+  FROM `agent_eval.fleet_labels` AS l
+  INNER JOIN `agent_eval.fleet_case_outcomes` AS o
+    ON l.run_id = o.run_id
+    AND l.case_id = o.case_id
+  LEFT JOIN flash_verdicts AS fv
+    ON o.outcome_id = fv.outcome_id
+  LEFT JOIN argon_verdicts AS av
+    ON o.outcome_id = av.outcome_id
+  WHERE l.app = 'kyc-address-verification'
+    AND l.case_type IN ('clean', 'step2_trap')
+),
+unioned_slices AS (
+  SELECT run_id, 'ALL_STEP1_ACCEPTS' AS cohort_slice, * EXCEPT(run_id) FROM joined_cases
+  UNION ALL
+  SELECT run_id, 'KNOWN_TRAPS_AND_CLEAN' AS cohort_slice, * EXCEPT(run_id) FROM joined_cases WHERE NOT held_out
+  UNION ALL
+  SELECT run_id, 'HELD_OUT_TRAP_ONLY' AS cohort_slice, * EXCEPT(run_id) FROM joined_cases WHERE held_out
+  UNION ALL
+  SELECT run_id, CONCAT('CLASS:', trap_class) AS cohort_slice, * EXCEPT(run_id) FROM joined_cases
+),
+counts AS (
+  SELECT
+    run_id,
+    cohort_slice,
+    COUNT(*) AS total_cases,
+    COUNTIF(flash_pass IS NOT NULL) AS judged_cases,
+    COUNTIF(is_trap) AS actual_traps,
+    COUNTIF(NOT is_trap) AS actual_clean,
+    COUNTIF(is_trap AND observed_status = 'failed') AS step1_caught_traps,
+    COUNTIF(is_trap AND flash_pass = FALSE) AS tp_traps_caught,
+    COUNTIF(is_trap AND (observed_status = 'failed' OR flash_pass = FALSE)) AS end_to_end_traps_caught,
+    COUNTIF(is_trap AND flash_pass = TRUE) AS fn_traps_missed,
+    COUNTIF(NOT is_trap AND flash_pass = TRUE) AS tn_clean_approved,
+    COUNTIF(NOT is_trap AND flash_pass = FALSE) AS fp_clean_flagged,
+    COUNTIF(argon_pass IS NOT NULL AND flash_pass IS NOT NULL) AS argon_calibrated_rows,
+    COUNTIF(argon_pass IS NOT NULL AND flash_pass = argon_pass) AS flash_argon_agreed_rows,
+    SUM(flash_judge_cost_usd) AS full_100pct_judge_cost_usd
+  FROM unioned_slices
+  GROUP BY run_id, cohort_slice
+)
+SELECT
+  c.*,
+  SAFE_DIVIDE(c.tp_traps_caught, NULLIF(c.tp_traps_caught + c.fn_traps_missed, 0)) AS trap_recall,
+  -- Wilson 95% CI for trap_recall (z = 1.959964, z^2 = 3.841459)
+  SAFE_DIVIDE(
+    (c.tp_traps_caught + 1.920729)
+    - 1.959964 * SQRT(
+      SAFE_DIVIDE(c.tp_traps_caught * c.fn_traps_missed, NULLIF(c.tp_traps_caught + c.fn_traps_missed, 0))
+      + 0.960365
+    ),
+    NULLIF((c.tp_traps_caught + c.fn_traps_missed) + 3.841459, 0)
+  ) AS recall_ci_95_lower,
+  LEAST(
+    1.0,
+    SAFE_DIVIDE(
+      (c.tp_traps_caught + 1.920729)
+      + 1.959964 * SQRT(
+        SAFE_DIVIDE(c.tp_traps_caught * c.fn_traps_missed, NULLIF(c.tp_traps_caught + c.fn_traps_missed, 0))
+        + 0.960365
+      ),
+      NULLIF((c.tp_traps_caught + c.fn_traps_missed) + 3.841459, 0)
+    )
+  ) AS recall_ci_95_upper,
+  SAFE_DIVIDE(c.tp_traps_caught, NULLIF(c.tp_traps_caught + c.fp_clean_flagged, 0)) AS trap_precision,
+  SAFE_DIVIDE(
+    (c.tp_traps_caught + 1.920729)
+    - 1.959964 * SQRT(
+      SAFE_DIVIDE(c.tp_traps_caught * c.fp_clean_flagged, NULLIF(c.tp_traps_caught + c.fp_clean_flagged, 0))
+      + 0.960365
+    ),
+    NULLIF((c.tp_traps_caught + c.fp_clean_flagged) + 3.841459, 0)
+  ) AS precision_ci_95_lower,
+  LEAST(
+    1.0,
+    SAFE_DIVIDE(
+      (c.tp_traps_caught + 1.920729)
+      + 1.959964 * SQRT(
+        SAFE_DIVIDE(c.tp_traps_caught * c.fp_clean_flagged, NULLIF(c.tp_traps_caught + c.fp_clean_flagged, 0))
+        + 0.960365
+      ),
+      NULLIF((c.tp_traps_caught + c.fp_clean_flagged) + 3.841459, 0)
+    )
+  ) AS precision_ci_95_upper,
+  SAFE_DIVIDE(c.fp_clean_flagged, NULLIF(c.tn_clean_approved + c.fp_clean_flagged, 0)) AS false_positive_rate,
+  100.0 * SAFE_DIVIDE(c.flash_argon_agreed_rows, NULLIF(c.argon_calibrated_rows, 0)) AS flash_argon_agreement_pct,
+  CAST(CEIL(0.10 * c.judged_cases) AS INT64) AS projected_10pct_sample_cases,
+  0.10 * c.full_100pct_judge_cost_usd AS projected_10pct_judge_cost_usd
+FROM counts AS c;
+
+-- -----------------------------------------------------------------------------
 -- View 3: Unified Tier 1-3 Calibrated Quality & 4-Bucket FinOps Summary
 --   * Conditional Rule 0 conditioning: p_hat_obs estimated strictly on rule0_pass = TRUE
 --   * Fail-closed NULL guard when judged_samples = 0 or Youden J <= 1e-6

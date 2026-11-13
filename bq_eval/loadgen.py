@@ -834,9 +834,7 @@ def build_golden_seed_templates() -> tuple[GoldenTraceTemplate, ...]:
             retrieved_context=(
                 "[Audit Loop]: Exceeded maximum pagination retries across CRM and AMS endpoints."
             ),
-            final_response=(
-                "Completed partial reconciliation after hitting tool retry threshold."
-            ),
+            final_response=("Completed partial reconciliation after hitting tool retry threshold."),
             semantic_rubric_id="tool_trajectory_4pt_v1",
             expected_ordinal_score=2,
             spans=(
@@ -911,7 +909,9 @@ def generate_time_shifted_corpus(
             )
 
             for s_tmpl in tmpl.spans:
-                span_id = f"span-{tmpl.base_trace_id}-{s_tmpl.span_suffix}-r{replica_id:03d}-{date_tag}"
+                span_id = (
+                    f"span-{tmpl.base_trace_id}-{s_tmpl.span_suffix}-r{replica_id:03d}-{date_tag}"
+                )
                 parent_id = (
                     f"span-{tmpl.base_trace_id}-{s_tmpl.parent_span_suffix}-r{replica_id:03d}-{date_tag}"
                     if s_tmpl.parent_span_suffix is not None
