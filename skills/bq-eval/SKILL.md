@@ -66,6 +66,10 @@ The source is **always traces** via `agent_eval.v_step2_trace_rubric_prompts`. C
 | **"Run on failed or slow traces (> 4s)"** | `AND (NOT step1_pass OR trace_latency_ms > 4000)` |
 | **"Run only on application `X`"** | `AND apphub_application_id = 'X'` |
 
+**Mandatory `AI.GENERATE_TABLE` `STRUCT(...)` Contract:**
+- Always mark every column `NOT NULL` in `output_schema`: `'reasoning_trace STRING NOT NULL, ordinal_score INT64 NOT NULL' AS output_schema` (omitting `NOT NULL` produces nullable OpenAPI properties and causes Gemini 3/4 judges to emit `reasoning_trace` while leaving `ordinal_score` `NULL`).
+- Pass `model_params` as a plain `STRING` literal (`'{"generation_config": {"temperature": 0.0, "max_output_tokens": 2048, "thinking_config": {"thinking_level": "LOW"}}}' AS model_params`), never `JSON '...'`. When `model_params` is set, omit top-level `temperature` / `max_output_tokens` fields and never duplicate `response_schema` inside `model_params`.
+
 ---
 
 ## Workflow 3: Promote Stateless Runs to Step 3 (`eval_results`)
