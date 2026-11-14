@@ -750,8 +750,27 @@ def build_golden_seed_templates() -> tuple[GoldenTraceTemplate, ...]:
                     input_tokens=19_000,
                     cached_input_tokens=5_000,
                     output_tokens=620,
-                    rule0_pass=False,
+                    rule0_pass=True,
                     attributes=audit_attrs,
+                ),
+                *(
+                    GoldenSpanTemplate(
+                        span_suffix=f"tool-{page}",
+                        parent_span_suffix="root",
+                        span_offset_ms=page * 250,
+                        latency_ms=200.0,
+                        status_code="OK",
+                        span_kind=GenAISpanKind.EXECUTE_TOOL,
+                        service_name="renewal-auditor-svc",
+                        gcp_apphub_application_id=None,
+                        agent_name="renewal-auditor",
+                        model_name="gemini-3.5-flash-lite",
+                        tool_name="mcp__ams__fetch_household_page",
+                        tool_call_status="SUCCESS",
+                        rule0_pass=True,
+                        attributes=audit_attrs,
+                    )
+                    for page in range(1, 10)
                 ),
             ),
         ),

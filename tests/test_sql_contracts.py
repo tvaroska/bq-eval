@@ -58,59 +58,56 @@ def _normalize_bq_ai_tvf_for_sqlglot(sql: str) -> str:
     return normalized
 
 
-def _find_unescaped_multiline_single_quoted_strings(sql: str) -> list[str]:
-    """Return snippets of invalid GoogleSQL single-quoted `'...'` literals containing raw newlines.
-
-    GoogleSQL allows raw newlines only inside triple-quoted literals (`'''...'''` or
-    `\"\"\"...\"\"\"`), never inside single-quoted `'...'` or double-quoted `\"...\"` strings.
-    """
-    violations: list[str] = []
-    i = 0
-    n = len(sql)
+def _skip_triple_quoted(sql: str, start: int, delim: str) -> int:
+    i, n = start + 3, len(sql)
     while i < n:
-        ch = sql[i]
-        if ch == "-" and i + 1 < n and sql[i + 1] == "-":
+        if sql[i] == "\\":
+            i += 2
+        elif sql[i : i + 3] == delim:
+            return i + 3
+        else:
+            i += 1
+    return n
+
+
+def _scan_single_quoted(sql: str, start: int) -> tuple[int, bool]:
+    i, n, has_newline = start + 1, len(sql), False
+    while i < n:
+        if sql[i] == "\\":
+            i += 2
+            continue
+        if sql[i] == "\n":
+            has_newline = True
+        if sql[i] == "'":
+            return i + 1, has_newline
+        i += 1
+    return n, has_newline
+
+
+def _find_unescaped_multiline_single_quoted_strings(sql: str) -> list[str]:
+    """Return snippets of invalid GoogleSQL single-quoted `'...'` literals containing raw newlines."""
+    violations: list[str] = []
+    i, n = 0, len(sql)
+    while i < n:
+        if sql[i : i + 2] == "--":
             nl = sql.find("\n", i)
             i = n if nl == -1 else nl + 1
-            continue
-        if ch == "/" and i + 1 < n and sql[i + 1] == "*":
+        elif sql[i : i + 2] == "/*":
             end = sql.find("*/", i + 2)
             i = n if end == -1 else end + 2
-            continue
-        if sql[i : i + 3] in ("'''", '"""'):
-            delim = sql[i : i + 3]
-            i += 3
-            while i < n:
-                if sql[i] == "\\":
-                    i += 2
-                    continue
-                if sql[i : i + 3] == delim:
-                    i += 3
-                    break
-                i += 1
-            continue
-        if ch == "'":
-            start = i
-            i += 1
-            has_newline = False
-            while i < n:
-                if sql[i] == "\\":
-                    i += 2
-                    continue
-                if sql[i] == "\n":
-                    has_newline = True
-                if sql[i] == "'":
-                    i += 1
-                    break
-                i += 1
+        elif sql[i : i + 3] in ("'''", '"""'):
+            i = _skip_triple_quoted(sql, i, sql[i : i + 3])
+        elif sql[i] == "'":
+            end_i, has_newline = _scan_single_quoted(sql, i)
             if has_newline:
-                violations.append(sql[start : min(i, start + 120)])
-            continue
-        i += 1
+                violations.append(sql[i : min(end_i, i + 120)])
+            i = end_i
+        else:
+            i += 1
     return violations
 
 
-def _parse_bigquery_statements(sql: str, label: str) -> list[exp.Expression]:
+def _parse_bigquery_statements(sql: str, label: str) -> list[exp.Expr]:
     """Parse BigQuery SQL into `sqlglot` AST nodes, failing on any unexpected syntax fallback."""
     cleaned = _normalize_bq_ai_tvf_for_sqlglot(sql)
     stmts = [s for s in sqlglot.parse(cleaned, read="bigquery") if s is not None]
@@ -145,7 +142,7 @@ def _extract_view_sql_text(sql_file: Path, view_name: str) -> str:
     return match.group(0)
 
 
-def _referenced_tables(stmt: exp.Expression) -> set[str]:
+def _referenced_tables(stmt: exp.Expr) -> set[str]:
     """Return qualified table/view identifiers referenced outside local CTE names."""
     cte_names = {cte.alias_or_name.lower() for cte in stmt.find_all(exp.CTE)}
     refs: set[str] = set()
@@ -169,7 +166,9 @@ def test_all_sql_files_parse_as_bigquery_ast_and_valid_googlesql_strings() -> No
     for sql_file in sql_files:
         text = sql_file.read_text(encoding="utf-8")
         bad_strings = _find_unescaped_multiline_single_quoted_strings(text)
-        assert not bad_strings, f"{sql_file.name} has raw newlines in single-quoted SQL: {bad_strings}"
+        assert not bad_strings, (
+            f"{sql_file.name} has raw newlines in single-quoted SQL: {bad_strings}"
+        )
         _parse_bigquery_statements(text, sql_file.name)
 
 
@@ -250,84 +249,73 @@ def test_zero_duplicate_view_definitions_across_sql_pack() -> None:
     assert "avg_cache_hit_ratio" in step1_cpo_sql
 
 
-def test_view_dependency_dag_is_acyclic_and_light_capture_deployable() -> None:
-    """View graph has zero cycles, Light Capture deploys in one pass, and Mode C is acyclic."""
-    views = _extract_view_definitions()
-    view_names = set(views)
-    deps: dict[str, set[str]] = {}
-    for name, defs in views.items():
-        refs: set[str] = set()
-        for _, stmt in defs:
-            refs |= _referenced_tables(stmt) & view_names
-        deps[name] = refs
-
+def _find_graph_cycles(deps: dict[str, set[str]]) -> list[str]:
     in_degree = {name: len(refs) for name, refs in deps.items()}
     ready = sorted(name for name, deg in in_degree.items() if deg == 0)
-    visited: list[str] = []
+    visited: set[str] = set()
     while ready:
         node = ready.pop(0)
-        visited.append(node)
+        visited.add(node)
         for candidate, refs in deps.items():
             if node in refs:
                 in_degree[candidate] -= 1
                 if in_degree[candidate] == 0:
                     ready.append(candidate)
                     ready.sort()
+    return sorted(set(deps) - visited)
 
-    cyclic = sorted(view_names - set(visited))
+
+def _extract_mode_c_views(bqaa_sql: str) -> dict[str, set[str]]:
+    mode_c_marker = "-- Mode C:"
+    assert mode_c_marker in bqaa_sql
+    lines: list[str] = []
+    started = False
+    for line in bqaa_sql.split(mode_c_marker, 1)[1].splitlines():
+        stripped = line.strip()
+        candidate = (
+            stripped[3:] if stripped.startswith("-- ") else ("" if stripped == "--" else stripped)
+        )
+        if not started and not candidate.strip().upper().startswith("CREATE "):
+            continue
+        started = True
+        lines.append(candidate)
+    mode_c_stmts = _parse_bigquery_statements("\n".join(lines), "bqaa_adapter_views.sql Mode C")
+    return {
+        stmt.this.sql(dialect="bigquery").replace("`", "").strip(): _referenced_tables(stmt)
+        for stmt in mode_c_stmts
+        if isinstance(stmt, exp.Create) and (stmt.args.get("kind") or "").upper() == "VIEW"
+    }
+
+
+def test_view_dependency_dag_is_acyclic_and_light_capture_deployable() -> None:
+    """View graph has zero cycles, Light Capture deploys in one pass, and Mode C is acyclic."""
+    views = _extract_view_definitions()
+    view_names = set(views)
+    deps = {
+        name: {ref for _, stmt in defs for ref in (_referenced_tables(stmt) & view_names)}
+        for name, defs in views.items()
+    }
+    cyclic = _find_graph_cycles(deps)
     assert not cyclic, f"View dependency cycle detected among: {cyclic}"
 
     bqaa_sql = (SQL_DIR / "bqaa_adapter_views.sql").read_text(encoding="utf-8")
-    bqaa_stmts = _parse_bigquery_statements(bqaa_sql, "bqaa_adapter_views.sql")
     step1_views = {
         name for name, defs in views.items() if any(f == "step1_trace_views.sql" for f, _ in defs)
     }
-    for stmt in bqaa_stmts:
-        bqaa_refs = _referenced_tables(stmt)
-        cycle_refs = bqaa_refs & step1_views
+    for stmt in _parse_bigquery_statements(bqaa_sql, "bqaa_adapter_views.sql"):
+        cycle_refs = _referenced_tables(stmt) & step1_views
         assert not cycle_refs, (
             f"bqaa_adapter_views.sql depends on step1_trace_views.sql views {cycle_refs}, "
             "creating a deployment cycle on fresh Light Capture projects"
         )
 
-    mode_c_marker = "-- Mode C:"
-    assert mode_c_marker in bqaa_sql
-    mode_c_block = bqaa_sql.split(mode_c_marker, 1)[1]
-    uncommented_lines: list[str] = []
-    started = False
-    for line in mode_c_block.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("-- "):
-            candidate = stripped[3:]
-        elif stripped == "--":
-            candidate = ""
-        else:
-            candidate = stripped
-        if not started:
-            if candidate.strip().upper().startswith("CREATE "):
-                started = True
-            else:
-                continue
-        uncommented_lines.append(candidate)
-    mode_c_sql = "\n".join(uncommented_lines)
-    mode_c_stmts = _parse_bigquery_statements(mode_c_sql, "bqaa_adapter_views.sql Mode C")
-    mode_c_views: dict[str, set[str]] = {}
-    for stmt in mode_c_stmts:
-        if isinstance(stmt, exp.Create) and (stmt.args.get("kind") or "").upper() == "VIEW":
-            vname = stmt.this.sql(dialect="bigquery").replace("`", "").strip()
-            mode_c_views[vname] = _referenced_tables(stmt)
-
+    mode_c_views = _extract_mode_c_views(bqaa_sql)
     assert "agent_eval.otel_spans" in mode_c_views
-    assert "agent_eval.trace_payloads" in mode_c_views, (
-        "Mode C Hybrid switchboard must also define a hybrid agent_eval.trace_payloads view"
-    )
+    assert "agent_eval.trace_payloads" in mode_c_views
     for vname, refs in mode_c_views.items():
         assert vname not in refs, f"Mode C view {vname} directly references itself"
-        for target in refs:
-            if target in mode_c_views:
-                assert vname not in mode_c_views[target], (
-                    f"Mode C circular view cycle: {vname} <-> {target}"
-                )
+        mutual = [t for t in refs if t in mode_c_views and vname in mode_c_views[t]]
+        assert not mutual, f"Mode C circular view cycle: {vname} <-> {mutual}"
 
 
 def test_bqaa_sql_adapter_matches_python_custom_metadata_and_outcome_closed() -> None:
@@ -474,6 +462,34 @@ def _sqlite_json_value(raw_json: str | None, path: str) -> str | None:
     return None if cur is None else str(cur)
 
 
+_SQLITE_AGG_MAP: dict[str, type[exp.Expr]] = {
+    "LOGICAL_OR": exp.Max,
+    "LOGICAL_AND": exp.Min,
+    "ANY_VALUE": exp.Max,
+}
+
+
+def _rewrite_bq_node_for_sqlite(node: exp.Expr) -> exp.Expr:
+    if isinstance(node, exp.SafeDivide):
+        num = node.this.copy().sql("sqlite")
+        den = node.expression.copy().sql("sqlite")
+        return sqlglot.parse_one(
+            f"CASE WHEN ({den}) IS NULL OR ({den}) = 0 THEN NULL ELSE CAST(({num}) AS REAL) / ({den}) END",
+            read="sqlite",
+        )
+    if isinstance(node, exp.TryCast):
+        return exp.Cast(this=node.this, to=node.to)
+    if isinstance(node, (exp.AnyValue, exp.LogicalOr)):
+        return exp.Max(this=node.this)
+    if isinstance(node, exp.LogicalAnd):
+        return exp.Min(this=node.this)
+    if isinstance(node, exp.Anonymous) and node.expressions:
+        cls = _SQLITE_AGG_MAP.get(node.name.upper())
+        if cls is not None:
+            return cls(this=node.expressions[0])
+    return node
+
+
 def _transpile_bq_view_to_sqlite(view_sql: str) -> str:
     """Transpile a BigQuery view body into executable SQLite SQL for relational fanout testing."""
     body = re.sub(
@@ -484,36 +500,7 @@ def _transpile_bq_view_to_sqlite(view_sql: str) -> str:
     ).rstrip(";")
     body = body.replace("`agent_eval.", "`").replace("agent_eval.", "")
     ast_node = sqlglot.parse_one(body, read="bigquery")
-
-    def _rewrite_node(node: exp.Expression) -> exp.Expression:
-        if isinstance(node, exp.SafeDivide):
-            num = node.this.copy()
-            den = node.expression.copy()
-            return sqlglot.parse_one(
-                f"CASE WHEN ({den.sql('sqlite')}) IS NULL OR ({den.sql('sqlite')}) = 0 "
-                f"THEN NULL ELSE CAST(({num.sql('sqlite')}) AS REAL) / ({den.sql('sqlite')}) END",
-                read="sqlite",
-            )
-        if isinstance(node, exp.TryCast):
-            return exp.Cast(this=node.this, to=node.to)
-        if isinstance(node, exp.AnyValue):
-            return exp.Max(this=node.this)
-        if isinstance(node, exp.LogicalOr):
-            return exp.Max(this=node.this)
-        if isinstance(node, exp.LogicalAnd):
-            return exp.Min(this=node.this)
-        if isinstance(node, exp.Anonymous):
-            upper = node.name.upper()
-            if upper == "LOGICAL_OR" and node.expressions:
-                return exp.Max(this=node.expressions[0])
-            if upper == "LOGICAL_AND" and node.expressions:
-                return exp.Min(this=node.expressions[0])
-            if upper == "ANY_VALUE" and node.expressions:
-                return exp.Max(this=node.expressions[0])
-        return node
-
-    transformed = ast_node.transform(_rewrite_node)
-    return transformed.sql(dialect="sqlite")
+    return ast_node.transform(_rewrite_bq_node_for_sqlite).sql(dialect="sqlite")
 
 
 def test_multi_key_outcome_fanout_exact_1x_infra_and_judge_cost() -> None:

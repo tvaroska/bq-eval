@@ -73,12 +73,19 @@ from bq_eval.sql_eval import (
     evaluate_traces_in_sqlite,
 )
 
-__version__ = "0.2.0"
+__version__ = "0.2.2"
 
 __all__ = [
-    "BQAAAgentEvent",
     "CACHED_INPUT_BURNDOWN_WEIGHT",
     "CANONICAL_RUBRICS",
+    "LONG_CONTEXT_CACHED_BURNDOWN_WEIGHT",
+    "LONG_CONTEXT_OUTPUT_BURNDOWN_WEIGHT",
+    "LONG_CONTEXT_THRESHOLD_TOKENS",
+    "LONG_CONTEXT_UNCACHED_BURNDOWN_WEIGHT",
+    "MANAGED_EVALUATE_AGENT_METRICS",
+    "OUTPUT_THINKING_BURNDOWN_WEIGHT",
+    "UNCACHED_INPUT_BURNDOWN_WEIGHT",
+    "BQAAAgentEvent",
     "CalibrationResult",
     "ConfusionMatrix",
     "EvalFinOpsROI",
@@ -87,15 +94,9 @@ __all__ = [
     "GenAISpanKind",
     "GoldenSpanTemplate",
     "GoldenTraceTemplate",
-    "LONG_CONTEXT_CACHED_BURNDOWN_WEIGHT",
-    "LONG_CONTEXT_OUTPUT_BURNDOWN_WEIGHT",
-    "LONG_CONTEXT_THRESHOLD_TOKENS",
-    "LONG_CONTEXT_UNCACHED_BURNDOWN_WEIGHT",
-    "MANAGED_EVALUATE_AGENT_METRICS",
     "ModelOption",
     "ModelPricingSKU",
     "OTelGenAISpanRecord",
-    "OUTPUT_THINKING_BURNDOWN_WEIGHT",
     "OffPeakSchedulePlan",
     "OrdinalScaleLevel",
     "OrdinalScoreOutput",
@@ -107,7 +108,6 @@ __all__ = [
     "Step1CostOutcomeRow",
     "TimeShiftLoadgenReport",
     "TracePayloadRecord",
-    "UNCACHED_INPUT_BURNDOWN_WEIGHT",
     "allocate_focus_two_pool_chargeback",
     "bqaa_events_to_otel_spans",
     "bqaa_events_to_trace_payloads",

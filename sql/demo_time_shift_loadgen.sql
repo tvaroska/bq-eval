@@ -328,14 +328,95 @@ SELECT * FROM UNNEST([
     CAST(NULL AS STRING), CAST(NULL AS STRING), TRUE, 'production_inference',
     TO_JSON(STRUCT('langgraph' AS framework, 'cloud_run' AS runtime))
   ),
-  -- Template 16: Tool-call retry loop (fails Step 1 rule0_pass = FALSE)
+  -- Template 16: Tool-call pagination loop (9 OK execute_tool spans -> fails Step 1 strictly via tool_call_count <= 8)
   STRUCT(
     16, 'seed-audit-004', 'span-audit-004-root', CAST(NULL AS STRING),
     0, 3200.0, 'OK', 'invoke_agent', 'renewal-auditor-svc',
     CAST(NULL AS STRING), CAST(NULL AS STRING), CAST(NULL AS STRING),
     'renewal-auditor', 'gemini-3.5-flash-lite',
     19000, 5000, 620, 0,
-    CAST(NULL AS STRING), CAST(NULL AS STRING), FALSE, 'production_inference',
+    CAST(NULL AS STRING), CAST(NULL AS STRING), TRUE, 'production_inference',
+    TO_JSON(STRUCT('langgraph' AS framework, 'cloud_run' AS runtime))
+  ),
+  STRUCT(
+    16, 'seed-audit-004', 'span-audit-004-tool-1', 'span-audit-004-root',
+    250, 200.0, 'OK', 'execute_tool', 'renewal-auditor-svc',
+    CAST(NULL AS STRING), CAST(NULL AS STRING), CAST(NULL AS STRING),
+    'renewal-auditor', 'gemini-3.5-flash-lite',
+    0, 0, 0, 0,
+    'mcp__ams__fetch_household_page', 'SUCCESS', TRUE, 'production_inference',
+    TO_JSON(STRUCT('langgraph' AS framework, 'cloud_run' AS runtime))
+  ),
+  STRUCT(
+    16, 'seed-audit-004', 'span-audit-004-tool-2', 'span-audit-004-root',
+    500, 200.0, 'OK', 'execute_tool', 'renewal-auditor-svc',
+    CAST(NULL AS STRING), CAST(NULL AS STRING), CAST(NULL AS STRING),
+    'renewal-auditor', 'gemini-3.5-flash-lite',
+    0, 0, 0, 0,
+    'mcp__ams__fetch_household_page', 'SUCCESS', TRUE, 'production_inference',
+    TO_JSON(STRUCT('langgraph' AS framework, 'cloud_run' AS runtime))
+  ),
+  STRUCT(
+    16, 'seed-audit-004', 'span-audit-004-tool-3', 'span-audit-004-root',
+    750, 200.0, 'OK', 'execute_tool', 'renewal-auditor-svc',
+    CAST(NULL AS STRING), CAST(NULL AS STRING), CAST(NULL AS STRING),
+    'renewal-auditor', 'gemini-3.5-flash-lite',
+    0, 0, 0, 0,
+    'mcp__ams__fetch_household_page', 'SUCCESS', TRUE, 'production_inference',
+    TO_JSON(STRUCT('langgraph' AS framework, 'cloud_run' AS runtime))
+  ),
+  STRUCT(
+    16, 'seed-audit-004', 'span-audit-004-tool-4', 'span-audit-004-root',
+    1000, 200.0, 'OK', 'execute_tool', 'renewal-auditor-svc',
+    CAST(NULL AS STRING), CAST(NULL AS STRING), CAST(NULL AS STRING),
+    'renewal-auditor', 'gemini-3.5-flash-lite',
+    0, 0, 0, 0,
+    'mcp__ams__fetch_household_page', 'SUCCESS', TRUE, 'production_inference',
+    TO_JSON(STRUCT('langgraph' AS framework, 'cloud_run' AS runtime))
+  ),
+  STRUCT(
+    16, 'seed-audit-004', 'span-audit-004-tool-5', 'span-audit-004-root',
+    1250, 200.0, 'OK', 'execute_tool', 'renewal-auditor-svc',
+    CAST(NULL AS STRING), CAST(NULL AS STRING), CAST(NULL AS STRING),
+    'renewal-auditor', 'gemini-3.5-flash-lite',
+    0, 0, 0, 0,
+    'mcp__ams__fetch_household_page', 'SUCCESS', TRUE, 'production_inference',
+    TO_JSON(STRUCT('langgraph' AS framework, 'cloud_run' AS runtime))
+  ),
+  STRUCT(
+    16, 'seed-audit-004', 'span-audit-004-tool-6', 'span-audit-004-root',
+    1500, 200.0, 'OK', 'execute_tool', 'renewal-auditor-svc',
+    CAST(NULL AS STRING), CAST(NULL AS STRING), CAST(NULL AS STRING),
+    'renewal-auditor', 'gemini-3.5-flash-lite',
+    0, 0, 0, 0,
+    'mcp__ams__fetch_household_page', 'SUCCESS', TRUE, 'production_inference',
+    TO_JSON(STRUCT('langgraph' AS framework, 'cloud_run' AS runtime))
+  ),
+  STRUCT(
+    16, 'seed-audit-004', 'span-audit-004-tool-7', 'span-audit-004-root',
+    1750, 200.0, 'OK', 'execute_tool', 'renewal-auditor-svc',
+    CAST(NULL AS STRING), CAST(NULL AS STRING), CAST(NULL AS STRING),
+    'renewal-auditor', 'gemini-3.5-flash-lite',
+    0, 0, 0, 0,
+    'mcp__ams__fetch_household_page', 'SUCCESS', TRUE, 'production_inference',
+    TO_JSON(STRUCT('langgraph' AS framework, 'cloud_run' AS runtime))
+  ),
+  STRUCT(
+    16, 'seed-audit-004', 'span-audit-004-tool-8', 'span-audit-004-root',
+    2000, 200.0, 'OK', 'execute_tool', 'renewal-auditor-svc',
+    CAST(NULL AS STRING), CAST(NULL AS STRING), CAST(NULL AS STRING),
+    'renewal-auditor', 'gemini-3.5-flash-lite',
+    0, 0, 0, 0,
+    'mcp__ams__fetch_household_page', 'SUCCESS', TRUE, 'production_inference',
+    TO_JSON(STRUCT('langgraph' AS framework, 'cloud_run' AS runtime))
+  ),
+  STRUCT(
+    16, 'seed-audit-004', 'span-audit-004-tool-9', 'span-audit-004-root',
+    2250, 200.0, 'OK', 'execute_tool', 'renewal-auditor-svc',
+    CAST(NULL AS STRING), CAST(NULL AS STRING), CAST(NULL AS STRING),
+    'renewal-auditor', 'gemini-3.5-flash-lite',
+    0, 0, 0, 0,
+    'mcp__ams__fetch_household_page', 'SUCCESS', TRUE, 'production_inference',
     TO_JSON(STRUCT('langgraph' AS framework, 'cloud_run' AS runtime))
   )
 ]);
@@ -444,7 +525,7 @@ SELECT * FROM UNNEST([
 
 -- -----------------------------------------------------------------------------
 -- 3. Time-Shift & Multiply into Today + Last 1 Hour (Idempotent CTAS)
---   * Default: 50 replicas x 16 templates = 800 traces (2,200 spans)
+--   * Default: 50 replicas x 16 templates = 800 traces (1,650 spans)
 --   * Replicas 1..15 (240 traces) are placed inside the LAST 1 HOUR
 --   * Replicas 16..50 (560 traces) are spread across the LAST 24 HOURS
 --   * Uses CREATE OR REPLACE TABLE ... AS SELECT so it runs in both billed

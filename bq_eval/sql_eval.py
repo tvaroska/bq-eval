@@ -10,7 +10,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
 
-from bq_eval.calibration import ConfusionMatrix, rogan_gladen_calibrate
+from bq_eval.calibration import ConfusionMatrix
 from bq_eval.otel import OTelGenAISpanRecord
 from bq_eval.rubrics import CANONICAL_RUBRICS, build_autorater_system_prompt
 
@@ -35,6 +35,8 @@ class SQLTraceEvalSummary(BaseModel):
     calibrated_pass_rate: float | None
     calibrated_ci_95_lower: float | None
     calibrated_ci_95_upper: float | None
+    gwet_ac2: float | None = None
+    passes_irr_gate: bool | None = None
     production_inference_usd: float
     conflict_escalation_usd: float
     agent_gym_eval_usd: float
@@ -87,7 +89,7 @@ JUDGE_MODEL_ENDPOINTS: dict[str, str] = {
 }
 
 
-def build_ai_generate_table_judge_sql(
+def build_ai_generate_table_judge_sql(  # noqa: PLR0913
     project_id: str,
     dataset_id: str = "agent_eval",
     rubric_id: str = "groundedness_4pt_v1",
@@ -122,7 +124,9 @@ def build_ai_generate_table_judge_sql(
         )
     remote_model = JUDGE_MODEL_ENDPOINTS[selected_model]
     effective_rubric = (
-        rubric if selected_model == rubric.judge_model else rubric.model_copy(update={"judge_model": selected_model})
+        rubric
+        if selected_model == rubric.judge_model
+        else rubric.model_copy(update={"judge_model": selected_model})
     )
     system_prompt = _escape_googlesql_string_literal(
         build_autorater_system_prompt(effective_rubric)
@@ -132,7 +136,7 @@ def build_ai_generate_table_judge_sql(
     escaped_response = escape_sql_xml_expr("p.final_response")
 
     run_filter = (
-        f"\n    AND t.outcome_id IN (\n"
+        f"\n    AND t.outcome_id IN (\n"  # noqa: S608
         f"      SELECT outcome_id\n"
         f"      FROM `{valid_project}.{valid_dataset}.fleet_case_outcomes`\n"
         f"      WHERE run_id = '{valid_run_id}' AND outcome_id IS NOT NULL\n"
@@ -194,7 +198,7 @@ FROM AI.GENERATE_TABLE(
     '{{"generation_config": {{"temperature": 0.0, "max_output_tokens": 2048, "thinking_config": {{"thinking_level": "LOW"}}}}}}' AS model_params
   )
 );
-"""
+"""  # noqa: S608
 
 
 MANAGED_EVALUATE_AGENT_METRICS: tuple[str, ...] = (
@@ -208,7 +212,7 @@ MANAGED_EVALUATE_AGENT_METRICS: tuple[str, ...] = (
 )
 
 
-def build_ai_evaluate_agent_sql(
+def build_ai_evaluate_agent_sql(  # noqa: PLR0913
     project_id: str,
     dataset_id: str = "agent_eval",
     eval_view: str = "v_bqaa_eval_turn_filtered",
@@ -245,7 +249,7 @@ def build_ai_evaluate_agent_sql(
         predicates.append(f"MOD(ABS(FARM_FINGERPRINT(trace_id)), 100) < {canary_sample_pct}")
     if valid_run_id:
         predicates.append(
-            f"trace_id IN ("
+            f"trace_id IN ("  # noqa: S608
             f"SELECT trace_id FROM `{valid_project}.{valid_dataset}.fleet_case_outcomes` "
             f"WHERE run_id = '{valid_run_id}' AND trace_id IS NOT NULL)"
         )
@@ -264,7 +268,7 @@ FROM AI.EVALUATE_AGENT(
       {metrics_sql}
   ]
 );
-"""
+"""  # noqa: S608
 
 
 DEFAULT_SKU_RATES: dict[str, tuple[float, float, float, float, float, float]] = {
@@ -275,20 +279,21 @@ DEFAULT_SKU_RATES: dict[str, tuple[float, float, float, float, float, float]] = 
 }
 
 
-def evaluate_traces_in_sqlite(
+def evaluate_traces_in_sqlite(  # noqa: PLR0913
     spans: Sequence[OTelGenAISpanRecord],
     judge_outcomes: dict[str, bool] | None = None,
     sme_confusion: ConfusionMatrix | None = None,
     rubric_id: str = "groundedness_4pt_v1",
     judge_cost_per_call_usd: float = 0.0025,
+    sme_ordinal_pairs: Sequence[tuple[int, int]] | None = None,
+    passing_score: int = 3,
+    irr_threshold: float = 0.80,
 ) -> dict[str, SQLTraceEvalSummary]:
-    """Execute deterministic SQLite twin of `sql/views.sql` with exact BigQuery parity.
+    """Execute pure-SQLite twin of `sql/views.sql` with exact BigQuery SQL math parity.
 
-    Mirrors:
-    - Portable `COALESCE` application ID resolution (`EVAL-P07`)
-    - Span-level `<=200K` and `>200K` burndown cliff (`EVAL-P04`)
-    - Conditional `Rule 0` conditioning on `judge_outcomes` (`EVAL-P05`)
-    - Fail-closed `None` (`NULL`) guard when `judged_samples == 0` or `Youden J <= 1e-6` (`D3`)
+    Computes Rule 0 (`<= 8` tools, zero tool errors), Rogan-Gladen prevalence calibration,
+    95% Delta-method CIs, Quadratic Gwet's AC2 IRR, and 4-bucket CPVO directly inside
+    SQLite SQL views without calling Python statistical helpers.
     """
     if not spans:
         return {}
@@ -296,6 +301,9 @@ def evaluate_traces_in_sqlite(
     judge_map = judge_outcomes or {}
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
+    conn.create_function("SQRT", 1, math.sqrt)
+    conn.create_function("POW", 2, math.pow)
+    conn.create_function("CEIL", 1, math.ceil)
     cur = conn.cursor()
 
     cur.execute(
@@ -325,6 +333,41 @@ def evaluate_traces_in_sqlite(
         )
         """
     )
+    cur.execute(
+        """
+        CREATE TABLE eval_results (
+            trace_id TEXT PRIMARY KEY,
+            binary_pass INTEGER NOT NULL,
+            judge_cost_usd REAL NOT NULL
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE sme_confusion_counts (
+            tp INTEGER NOT NULL,
+            fn INTEGER NOT NULL,
+            tn INTEGER NOT NULL,
+            fp INTEGER NOT NULL
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE sme_ordinal_labels (
+            human_ordinal_score INTEGER NOT NULL,
+            judge_ordinal_score INTEGER NOT NULL
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE eval_config (
+            irr_threshold REAL NOT NULL
+        )
+        """
+    )
+    cur.execute("INSERT INTO eval_config (irr_threshold) VALUES (?)", (float(irr_threshold),))
 
     for s in spans:
         rates = DEFAULT_SKU_RATES.get(s.model_name, DEFAULT_SKU_RATES["gemini-3.8-flash"])
@@ -372,6 +415,36 @@ def evaluate_traces_in_sqlite(
             ),
         )
 
+    cur.executemany(
+        "INSERT INTO eval_results (trace_id, binary_pass, judge_cost_usd) VALUES (?, ?, ?)",
+        [(tid, 1 if passed else 0, judge_cost_per_call_usd) for tid, passed in judge_map.items()],
+    )
+
+    if sme_ordinal_pairs:
+        cur.executemany(
+            "INSERT INTO sme_ordinal_labels (human_ordinal_score, judge_ordinal_score) VALUES (?, ?)",
+            [(int(h), int(j)) for h, j in sme_ordinal_pairs],
+        )
+
+    if sme_confusion is not None:
+        cur.execute(
+            "INSERT INTO sme_confusion_counts (tp, fn, tn, fp) VALUES (?, ?, ?, ?)",
+            (sme_confusion.tp, sme_confusion.fn, sme_confusion.tn, sme_confusion.fp),
+        )
+    elif sme_ordinal_pairs:
+        cur.execute(
+            """
+            INSERT INTO sme_confusion_counts (tp, fn, tn, fp)
+            SELECT
+                SUM(CASE WHEN human_ordinal_score >= ? AND judge_ordinal_score >= ? THEN 1 ELSE 0 END),
+                SUM(CASE WHEN human_ordinal_score >= ? AND judge_ordinal_score < ? THEN 1 ELSE 0 END),
+                SUM(CASE WHEN human_ordinal_score < ? AND judge_ordinal_score < ? THEN 1 ELSE 0 END),
+                SUM(CASE WHEN human_ordinal_score < ? AND judge_ordinal_score >= ? THEN 1 ELSE 0 END)
+            FROM sme_ordinal_labels
+            """,
+            (passing_score,) * 8,
+        )
+
     cur.execute(
         """
         CREATE VIEW v_trace_sql_evaluation AS
@@ -379,12 +452,23 @@ def evaluate_traces_in_sqlite(
             trace_id,
             apphub_application_id,
             MAX(end_epoch_ms) - MIN(start_epoch_ms) AS trace_latency_ms,
-            SUM(CASE WHEN span_kind = 'execute_tool' AND (status_code = 'ERROR' OR tool_call_status != 'SUCCESS') THEN 1 ELSE 0 END) AS tool_error_count,
-            CASE WHEN MIN(rule0_pass) = 1 AND SUM(CASE WHEN status_code = 'ERROR' THEN 1 ELSE 0 END) = 0 THEN 1 ELSE 0 END AS rule0_pass,
+            SUM(CASE WHEN span_kind = 'execute_tool' THEN 1 ELSE 0 END) AS tool_call_count,
+            SUM(CASE WHEN span_kind = 'execute_tool'
+                AND (status_code = 'ERROR' OR COALESCE(tool_call_status, 'SUCCESS') != 'SUCCESS')
+                THEN 1 ELSE 0 END) AS tool_error_count,
+            CASE WHEN MIN(rule0_pass) = 1
+                AND SUM(CASE WHEN status_code = 'ERROR' THEN 1 ELSE 0 END) = 0
+                AND SUM(CASE WHEN span_kind = 'execute_tool'
+                    AND (status_code = 'ERROR' OR COALESCE(tool_call_status, 'SUCCESS') != 'SUCCESS')
+                    THEN 1 ELSE 0 END) = 0
+                AND SUM(CASE WHEN span_kind = 'execute_tool' THEN 1 ELSE 0 END) <= 8
+                THEN 1 ELSE 0 END AS rule0_pass,
             MAX(finops_traffic_type) AS primary_traffic_type,
             SUM(input_tokens) AS total_input_tokens,
             SUM(cached_input_tokens) AS total_cached_input_tokens,
-            CASE WHEN SUM(input_tokens) > 0 THEN CAST(SUM(cached_input_tokens) AS REAL) / SUM(input_tokens) ELSE 0.0 END AS cache_hit_ratio,
+            CASE WHEN SUM(input_tokens) > 0
+                THEN CAST(SUM(cached_input_tokens) AS REAL) / SUM(input_tokens)
+                ELSE 0.0 END AS cache_hit_ratio,
             SUM(weighted_burndown_tokens) AS weighted_burndown_tokens,
             SUM(CASE WHEN finops_traffic_type = 'production_inference' THEN span_cost_usd ELSE 0.0 END) AS production_inference_usd,
             SUM(CASE WHEN finops_traffic_type = 'conflict_escalation' THEN span_cost_usd ELSE 0.0 END) AS conflict_escalation_usd,
@@ -395,99 +479,227 @@ def evaluate_traces_in_sqlite(
         """
     )
 
-    rows = cur.execute("SELECT * FROM v_trace_sql_evaluation").fetchall()
-    by_app: dict[str, list[sqlite3.Row]] = {}
-    for row in rows:
-        by_app.setdefault(row["apphub_application_id"], []).append(row)
+    cur.execute(
+        """
+        CREATE VIEW v_agent_eval_and_finops_summary AS
+        WITH app_traces AS (
+            SELECT
+                apphub_application_id,
+                COUNT(*) AS total_traces,
+                SUM(CASE WHEN primary_traffic_type IN ('production_inference', 'conflict_escalation')
+                    THEN 1 ELSE 0 END) AS production_traces,
+                AVG(CAST(rule0_pass AS REAL)) AS rule0_pass_rate,
+                AVG(CASE WHEN tool_error_count = 0 THEN 1.0 ELSE 0.0 END) AS tool_success_rate,
+                AVG(cache_hit_ratio) AS avg_cache_hit_ratio,
+                SUM(weighted_burndown_tokens) AS total_weighted_burndown_tokens,
+                SUM(production_inference_usd) AS production_inference_usd,
+                SUM(conflict_escalation_usd) AS conflict_escalation_usd,
+                SUM(agent_gym_eval_usd) AS agent_gym_eval_usd,
+                SUM(span_autorater_judge_usd) AS span_autorater_judge_usd
+            FROM v_trace_sql_evaluation
+            GROUP BY apphub_application_id
+        ),
+        ranked_latencies AS (
+            SELECT
+                apphub_application_id,
+                trace_latency_ms,
+                ROW_NUMBER() OVER (PARTITION BY apphub_application_id ORDER BY trace_latency_ms) AS rn,
+                COUNT(*) OVER (PARTITION BY apphub_application_id) AS cnt
+            FROM v_trace_sql_evaluation
+        ),
+        p95_latencies AS (
+            SELECT
+                apphub_application_id,
+                trace_latency_ms AS p95_latency_ms
+            FROM ranked_latencies
+            WHERE rn = MIN(cnt, MAX(1, CAST(CEIL(0.95 * cnt) AS INTEGER)))
+        ),
+        judge_stats AS (
+            SELECT
+                t.apphub_application_id,
+                SUM(CASE WHEN t.rule0_pass = 1 THEN 1 ELSE 0 END) AS judged_samples,
+                CASE WHEN SUM(CASE WHEN t.rule0_pass = 1 THEN 1 ELSE 0 END) > 0
+                    THEN AVG(CASE WHEN t.rule0_pass = 1 THEN CAST(e.binary_pass AS REAL) END)
+                    ELSE NULL END AS raw_judge_pass_rate,
+                SUM(e.judge_cost_usd) AS table_judge_usd
+            FROM eval_results AS e
+            INNER JOIN v_trace_sql_evaluation AS t
+                ON e.trace_id = t.trace_id
+            GROUP BY t.apphub_application_id
+        ),
+        sme_rates AS (
+            SELECT
+                CAST(tp + fn AS REAL) AS n_pos,
+                CAST(tn + fp AS REAL) AS n_neg,
+                CASE WHEN (tp + fn) > 0 THEN CAST(tp AS REAL) / (tp + fn) ELSE NULL END AS tpr,
+                CASE WHEN (tn + fp) > 0 THEN CAST(tn AS REAL) / (tn + fp) ELSE NULL END AS tnr
+            FROM sme_confusion_counts
+            LIMIT 1
+        ),
+        gwet_marginals AS (
+            SELECT
+                COUNT(*) AS pair_count,
+                AVG(1.0 - POW(CAST(human_ordinal_score - judge_ordinal_score AS REAL) / 3.0, 2.0)) AS p_a,
+                (AVG(CASE WHEN human_ordinal_score = 1 THEN 1.0 ELSE 0.0 END) + AVG(CASE WHEN judge_ordinal_score = 1 THEN 1.0 ELSE 0.0 END)) / 2.0 AS pi_1,
+                (AVG(CASE WHEN human_ordinal_score = 2 THEN 1.0 ELSE 0.0 END) + AVG(CASE WHEN judge_ordinal_score = 2 THEN 1.0 ELSE 0.0 END)) / 2.0 AS pi_2,
+                (AVG(CASE WHEN human_ordinal_score = 3 THEN 1.0 ELSE 0.0 END) + AVG(CASE WHEN judge_ordinal_score = 3 THEN 1.0 ELSE 0.0 END)) / 2.0 AS pi_3,
+                (AVG(CASE WHEN human_ordinal_score = 4 THEN 1.0 ELSE 0.0 END) + AVG(CASE WHEN judge_ordinal_score = 4 THEN 1.0 ELSE 0.0 END)) / 2.0 AS pi_4
+            FROM sme_ordinal_labels
+        ),
+        gwet_irr AS (
+            SELECT
+                CASE
+                    WHEN pair_count = 0 THEN NULL
+                    WHEN ABS(1.0 - ((26.0 / 27.0) * (pi_1 * (1.0 - pi_1) + pi_2 * (1.0 - pi_2) + pi_3 * (1.0 - pi_3) + pi_4 * (1.0 - pi_4)))) < 1e-12
+                        THEN 1.0
+                    ELSE (
+                        p_a - ((26.0 / 27.0) * (pi_1 * (1.0 - pi_1) + pi_2 * (1.0 - pi_2) + pi_3 * (1.0 - pi_3) + pi_4 * (1.0 - pi_4)))
+                    ) / (
+                        1.0 - ((26.0 / 27.0) * (pi_1 * (1.0 - pi_1) + pi_2 * (1.0 - pi_2) + pi_3 * (1.0 - pi_3) + pi_4 * (1.0 - pi_4)))
+                    )
+                END AS gwet_ac2
+            FROM gwet_marginals
+        ),
+        rg_base AS (
+            SELECT
+                a.*,
+                p.p95_latency_ms,
+                COALESCE(j.judged_samples, 0) AS judged_samples,
+                j.raw_judge_pass_rate,
+                MAX(a.span_autorater_judge_usd, COALESCE(j.table_judge_usd, 0.0)) AS autorater_judge_usd,
+                s.n_pos,
+                s.n_neg,
+                s.tpr,
+                s.tnr,
+                (s.tpr + s.tnr - 1.0) AS youden_j,
+                g.gwet_ac2,
+                cfg.irr_threshold,
+                CASE
+                    WHEN COALESCE(j.judged_samples, 0) = 0 THEN 'UNJUDGED'
+                    WHEN s.tpr IS NOT NULL AND s.tnr IS NOT NULL AND (s.tpr + s.tnr - 1.0) > 1e-6 THEN 'CALIBRATED'
+                    ELSE 'UNCALIBRATED'
+                END AS calibration_status,
+                CASE
+                    WHEN COALESCE(j.judged_samples, 0) > 0
+                        AND s.tpr IS NOT NULL
+                        AND s.tnr IS NOT NULL
+                        AND (s.tpr + s.tnr - 1.0) > 1e-6
+                    THEN MIN(1.0, MAX(0.0, (j.raw_judge_pass_rate + s.tnr - 1.0) / (s.tpr + s.tnr - 1.0)))
+                    ELSE NULL
+                END AS calibrated_pass_rate
+            FROM app_traces AS a
+            INNER JOIN p95_latencies AS p
+                ON a.apphub_application_id = p.apphub_application_id
+            LEFT JOIN judge_stats AS j
+                ON a.apphub_application_id = j.apphub_application_id
+            LEFT JOIN sme_rates AS s ON 1 = 1
+            LEFT JOIN gwet_irr AS g ON 1 = 1
+            LEFT JOIN eval_config AS cfg ON 1 = 1
+        ),
+        rg_ci AS (
+            SELECT
+                *,
+                CASE
+                    WHEN calibrated_pass_rate IS NOT NULL THEN
+                        SQRT(
+                            (raw_judge_pass_rate * (1.0 - raw_judge_pass_rate) / judged_samples)
+                            + POW(calibrated_pass_rate, 2.0) * (tpr * (1.0 - tpr) / n_pos)
+                            + POW(1.0 - calibrated_pass_rate, 2.0) * (tnr * (1.0 - tnr) / n_neg)
+                        ) / youden_j
+                    ELSE NULL
+                END AS se_theta,
+                (production_inference_usd + conflict_escalation_usd + agent_gym_eval_usd + autorater_judge_usd) AS total_spend_usd
+            FROM rg_base
+        )
+        SELECT
+            apphub_application_id,
+            total_traces,
+            production_traces,
+            rule0_pass_rate,
+            tool_success_rate,
+            p95_latency_ms,
+            avg_cache_hit_ratio,
+            total_weighted_burndown_tokens,
+            judged_samples,
+            calibration_status,
+            raw_judge_pass_rate,
+            calibrated_pass_rate,
+            CASE WHEN se_theta IS NOT NULL
+                THEN MIN(1.0, MAX(0.0, calibrated_pass_rate - 1.959963984540054 * se_theta))
+                ELSE NULL END AS calibrated_ci_95_lower,
+            CASE WHEN se_theta IS NOT NULL
+                THEN MIN(1.0, MAX(0.0, calibrated_pass_rate + 1.959963984540054 * se_theta))
+                ELSE NULL END AS calibrated_ci_95_upper,
+            gwet_ac2,
+            CASE WHEN gwet_ac2 IS NOT NULL
+                THEN CASE WHEN gwet_ac2 >= irr_threshold THEN 1 ELSE 0 END
+                ELSE NULL END AS passes_irr_gate,
+            production_inference_usd,
+            conflict_escalation_usd,
+            agent_gym_eval_usd,
+            autorater_judge_usd,
+            total_spend_usd,
+            CASE
+                WHEN calibrated_pass_rate IS NOT NULL
+                    AND calibrated_pass_rate > 0.0
+                    AND rule0_pass_rate > 0.0
+                    AND production_traces > 0
+                THEN total_spend_usd / (production_traces * rule0_pass_rate * calibrated_pass_rate)
+                ELSE NULL
+            END AS cost_per_verified_outcome_usd
+        FROM rg_ci
+        ORDER BY apphub_application_id
+        """
+    )
 
     summaries: dict[str, SQLTraceEvalSummary] = {}
-    for app_id, app_rows in sorted(by_app.items()):
-        total_traces = len(app_rows)
-        prod_traces = sum(
-            1
-            for r in app_rows
-            if r["primary_traffic_type"] in ("production_inference", "conflict_escalation")
-        )
-        rule0_pass_rate = sum(r["rule0_pass"] for r in app_rows) / total_traces
-        tool_success_rate = sum(1 for r in app_rows if r["tool_error_count"] == 0) / total_traces
-        latencies = sorted(float(r["trace_latency_ms"]) for r in app_rows)
-        p95_idx = min(len(latencies) - 1, max(0, math.ceil(0.95 * len(latencies)) - 1))
-        p95_latency = latencies[p95_idx]
-        avg_cache_hit = sum(float(r["cache_hit_ratio"]) for r in app_rows) / total_traces
-        total_burndown = sum(float(r["weighted_burndown_tokens"]) for r in app_rows)
-
-        prod_usd = sum(float(r["production_inference_usd"]) for r in app_rows)
-        esc_usd = sum(float(r["conflict_escalation_usd"]) for r in app_rows)
-        gym_usd = sum(float(r["agent_gym_eval_usd"]) for r in app_rows)
-        span_judge_usd = sum(float(r["span_autorater_judge_usd"]) for r in app_rows)
-
-        # Conditional Rule 0 conditioning: only Rule-0-passing judged traces enter p_hat_obs,
-        # while all judge calls on this app contribute to autorater_judge_usd.
-        all_judged_for_app = [r for r in app_rows if r["trace_id"] in judge_map]
-        rule0_judged_outcomes = [
-            judge_map[r["trace_id"]] for r in all_judged_for_app if r["rule0_pass"] == 1
-        ]
-        judged_samples = len(rule0_judged_outcomes)
-        table_judge_usd = len(all_judged_for_app) * judge_cost_per_call_usd
-        autorater_usd = max(span_judge_usd, table_judge_usd)
-        total_spend = prod_usd + esc_usd + gym_usd + autorater_usd
-
-        raw_pass_rate: float | None = None
-        calibrated_pass: float | None = None
-        ci_lower: float | None = None
-        ci_upper: float | None = None
-        cal_status: Literal["CALIBRATED", "UNCALIBRATED", "UNJUDGED"] = "UNJUDGED"
-
-        if judged_samples > 0:
-            raw_pass_rate = sum(1 for passed in rule0_judged_outcomes if passed) / judged_samples
-            if sme_confusion is not None:
-                try:
-                    rg = rogan_gladen_calibrate(
-                        observed_pass_rate=raw_pass_rate,
-                        sample_size=judged_samples,
-                        confusion=sme_confusion,
-                    )
-                    calibrated_pass = rg.calibrated_pass_rate
-                    ci_lower = rg.ci_95_lower
-                    ci_upper = rg.ci_95_upper
-                    cal_status = "CALIBRATED"
-                except ValueError:
-                    cal_status = "UNCALIBRATED"
-            else:
-                cal_status = "UNCALIBRATED"
-
-        cpvo: float | None = None
-        if (
-            calibrated_pass is not None
-            and calibrated_pass > 0.0
-            and rule0_pass_rate > 0.0
-            and prod_traces > 0
-        ):
-            verified_outcomes = prod_traces * rule0_pass_rate * calibrated_pass
-            cpvo = total_spend / verified_outcomes
-
+    for row in cur.execute("SELECT * FROM v_agent_eval_and_finops_summary").fetchall():
+        app_id = str(row["apphub_application_id"])
+        passes_irr = bool(row["passes_irr_gate"]) if row["passes_irr_gate"] is not None else None
         summaries[app_id] = SQLTraceEvalSummary(
             apphub_application_id=app_id,
             rubric_id=rubric_id,
-            total_traces=total_traces,
-            production_traces=prod_traces,
-            rule0_pass_rate=rule0_pass_rate,
-            tool_success_rate=tool_success_rate,
-            p95_latency_ms=p95_latency,
-            avg_cache_hit_ratio=avg_cache_hit,
-            total_weighted_burndown_tokens=total_burndown,
-            judged_samples=judged_samples,
-            calibration_status=cal_status,
-            raw_judge_pass_rate=raw_pass_rate,
-            calibrated_pass_rate=calibrated_pass,
-            calibrated_ci_95_lower=ci_lower,
-            calibrated_ci_95_upper=ci_upper,
-            production_inference_usd=prod_usd,
-            conflict_escalation_usd=esc_usd,
-            agent_gym_eval_usd=gym_usd,
-            autorater_judge_usd=autorater_usd,
-            total_spend_usd=total_spend,
-            cost_per_verified_outcome_usd=cpvo,
+            total_traces=int(row["total_traces"]),
+            production_traces=int(row["production_traces"]),
+            rule0_pass_rate=float(row["rule0_pass_rate"]),
+            tool_success_rate=float(row["tool_success_rate"]),
+            p95_latency_ms=float(row["p95_latency_ms"]),
+            avg_cache_hit_ratio=float(row["avg_cache_hit_ratio"]),
+            total_weighted_burndown_tokens=float(row["total_weighted_burndown_tokens"]),
+            judged_samples=int(row["judged_samples"]),
+            calibration_status=row["calibration_status"],
+            raw_judge_pass_rate=(
+                float(row["raw_judge_pass_rate"])
+                if row["raw_judge_pass_rate"] is not None
+                else None
+            ),
+            calibrated_pass_rate=(
+                float(row["calibrated_pass_rate"])
+                if row["calibrated_pass_rate"] is not None
+                else None
+            ),
+            calibrated_ci_95_lower=(
+                float(row["calibrated_ci_95_lower"])
+                if row["calibrated_ci_95_lower"] is not None
+                else None
+            ),
+            calibrated_ci_95_upper=(
+                float(row["calibrated_ci_95_upper"])
+                if row["calibrated_ci_95_upper"] is not None
+                else None
+            ),
+            gwet_ac2=float(row["gwet_ac2"]) if row["gwet_ac2"] is not None else None,
+            passes_irr_gate=passes_irr,
+            production_inference_usd=float(row["production_inference_usd"]),
+            conflict_escalation_usd=float(row["conflict_escalation_usd"]),
+            agent_gym_eval_usd=float(row["agent_gym_eval_usd"]),
+            autorater_judge_usd=float(row["autorater_judge_usd"]),
+            total_spend_usd=float(row["total_spend_usd"]),
+            cost_per_verified_outcome_usd=(
+                float(row["cost_per_verified_outcome_usd"])
+                if row["cost_per_verified_outcome_usd"] is not None
+                else None
+            ),
         )
 
     conn.close()

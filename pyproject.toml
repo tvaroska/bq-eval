@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "bq-eval"
-version = "0.2.0"
+version = "0.2.2"
 description = "BQ Eval & FinOps: dual-path BigQuery agent evaluation, calibrated SQL quality gates, and USD Cost per Verified Outcome."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -17,6 +17,7 @@ bq-eval = "bq_eval.cli:main"
 
 [project.optional-dependencies]
 dev = [
+  "ast-grep-cli>=0.35",
   "mypy>=1.11.0",
   "pytest>=8.0.0",
   "ruff>=0.6.0",
@@ -35,5 +36,31 @@ line-length = 100
 target-version = "py312"
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B"]
+select = [
+  "E",
+  "W",
+  "F",
+  "I",
+  "B",
+  "C4",
+  "UP",
+  "S",
+  "BLE",
+  "ANN",
+  "RUF",
+  "C90",
+  "PLR0911",
+  "PLR0912",
+  "PLR0913",
+  "PLR0915",
+]
 ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"**/tests/**" = ["S101"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+explicit_package_bases = true
+exclude = ["^\\.venv/"]

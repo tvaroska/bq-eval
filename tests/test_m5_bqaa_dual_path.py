@@ -294,7 +294,7 @@ def test_ai_evaluate_agent_sql_builder_and_cli(capsys: pytest.CaptureFixture[str
     assert "MOD(ABS(FARM_FINGERPRINT(trace_id)), 100) < 10" in sql
     assert "'tool_use_quality_v1'" in sql
 
-    with pytest.raises(ValueError, match="Unknown AI.EVALUATE_AGENT"):
+    with pytest.raises(ValueError, match=r"Unknown AI\.EVALUATE_AGENT"):
         build_ai_evaluate_agent_sql(
             project_id="demo-proj",
             managed_metrics=("invalid_metric_v99",),

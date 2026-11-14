@@ -112,7 +112,7 @@ class PrefixCacheDilutionReport(BaseModel):
     recommendation: str
 
 
-def diagnose_prefix_cache_dilution(
+def diagnose_prefix_cache_dilution(  # noqa: PLR0913
     spans: Sequence[OTelGenAISpanRecord],
     distinct_prompt_variants: int = 1,
     target_cache_hit_ratio: float = 0.75,
@@ -151,7 +151,9 @@ def diagnose_prefix_cache_dilution(
     recoverable_usd = 0.0
     if observed_ratio < target_cache_hit_ratio:
         for span in spans:
-            shortfall = max(0.0, target_cache_hit_ratio * span.input_tokens - span.cached_input_tokens)
+            shortfall = max(
+                0.0, target_cache_hit_ratio * span.input_tokens - span.cached_input_tokens
+            )
             if shortfall <= 0.0:
                 continue
             if span.input_tokens > long_context_threshold_tokens:
@@ -272,7 +274,7 @@ class FocusChargebackRow(BaseModel):
     total_allocated_cost_usd: float
 
 
-def allocate_focus_two_pool_chargeback(
+def allocate_focus_two_pool_chargeback(  # noqa: PLR0913
     app_burndown_tokens: dict[str, float],
     app_cost_centers: dict[str, str],
     reserved_pt_capacity_tokens: float,

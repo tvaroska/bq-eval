@@ -220,6 +220,35 @@ def _compute_span_cost_usd(span: OTelGenAISpanRecord) -> float:
     )
 
 
+def _summarize_app_group(
+    group_key: tuple[str, str, str, str],
+    t_list: list[dict[str, float | int | bool]],
+) -> Step1CostOutcomeRow:
+    app_id, bu, cc, fw = group_key
+    n_traces = len(t_list)
+    n_last_1h = sum(1 for x in t_list if x["in_last_1h"])
+    n_pass = sum(1 for x in t_list if x["step1_pass"])
+    latencies = sorted(float(x["latency_ms"]) for x in t_list)
+    p95_idx = min(len(latencies) - 1, max(0, math.ceil(0.95 * len(latencies)) - 1))
+    tot_cost = sum(float(x["cost_usd"]) for x in t_list)
+    return Step1CostOutcomeRow(
+        apphub_application_id=app_id,
+        business_unit=bu,
+        cost_center=cc,
+        framework_runtime=fw,
+        total_traces=n_traces,
+        last_1h_traces=n_last_1h,
+        step1_passing_traces=n_pass,
+        step1_pass_rate=n_pass / n_traces,
+        tool_success_rate=sum(1 for x in t_list if x["tool_ok"]) / n_traces,
+        p95_latency_ms=latencies[p95_idx],
+        avg_cache_hit_ratio=sum(float(x["cache_ratio"]) for x in t_list) / n_traces,
+        total_cost_usd=tot_cost,
+        cost_per_trace_usd=tot_cost / n_traces,
+        step1_cost_per_outcome_usd=(tot_cost / n_pass) if n_pass > 0 else None,
+    )
+
+
 def evaluate_time_shifted_corpus(
     spans: Sequence[OTelGenAISpanRecord],
     payloads: Sequence[TracePayloadRecord],
@@ -228,14 +257,12 @@ def evaluate_time_shifted_corpus(
     last_hour_replicas: int = 15,
 ) -> TimeShiftLoadgenReport:
     """Evaluate Step 1 Cost per App/BU/Outcome and Step 2/2.5 slices on time-shifted traces."""
+    del payloads
     one_hour_ago = reference_time - timedelta(hours=1)
-
-    # Group spans by trace_id
     traces_by_id: dict[str, list[OTelGenAISpanRecord]] = {}
     for s in spans:
         traces_by_id.setdefault(s.trace_id, []).append(s)
 
-    # Group trace rollups by (apphub_application_id, business_unit, cost_center)
     app_groups: dict[tuple[str, str, str, str], list[dict[str, float | int | bool]]] = {}
     last_1h_count = 0
     sample_10pct_count = 0
@@ -244,15 +271,14 @@ def evaluate_time_shifted_corpus(
 
     for trace_id, t_spans in traces_by_id.items():
         root = t_spans[0]
-        app_id = root.resolved_application_id
-        bu = str(root.attributes.get("business_unit", "unassigned_bu"))
-        cc = str(root.attributes.get("cost_center", "UNASSIGNED"))
-        fw = f"{root.attributes.get('framework', 'unknown')} ({root.attributes.get('runtime', 'unknown')})"
-
+        group_key = (
+            root.resolved_application_id,
+            str(root.attributes.get("business_unit", "unassigned_bu")),
+            str(root.attributes.get("cost_center", "UNASSIGNED")),
+            f"{root.attributes.get('framework', 'unknown')} ({root.attributes.get('runtime', 'unknown')})",
+        )
         trace_start = min(s.start_time for s in t_spans)
-        trace_end = max(s.end_time for s in t_spans)
-        trace_latency_ms = (trace_end - trace_start).total_seconds() * 1000.0
-
+        trace_latency_ms = (max(s.end_time for s in t_spans) - trace_start).total_seconds() * 1000.0
         tool_calls = sum(1 for s in t_spans if s.span_kind == GenAISpanKind.EXECUTE_TOOL)
         tool_errors = sum(
             1
@@ -267,72 +293,34 @@ def evaluate_time_shifted_corpus(
             and tool_calls <= 8
         )
         total_in = sum(s.input_tokens for s in t_spans)
-        total_cached = sum(s.cached_input_tokens for s in t_spans)
-        cache_ratio = (total_cached / total_in) if total_in > 0 else 0.0
-        trace_cost = sum(_compute_span_cost_usd(s) for s in t_spans)
-
         in_last_1h = trace_start >= one_hour_ago
         bucket = _deterministic_bucket_100(trace_id)
-        in_10pct = bucket < 10
-        in_5pct = bucket < 5
+        last_1h_count += int(in_last_1h)
+        sample_10pct_count += int(bucket < 10)
+        sample_5pct_count += int(bucket < 5)
+        last_1h_and_5pct_count += int(in_last_1h and bucket < 5)
 
-        if in_last_1h:
-            last_1h_count += 1
-        if in_10pct:
-            sample_10pct_count += 1
-        if in_5pct:
-            sample_5pct_count += 1
-        if in_last_1h and in_5pct:
-            last_1h_and_5pct_count += 1
-
-        app_groups.setdefault((app_id, bu, cc, fw), []).append(
+        app_groups.setdefault(group_key, []).append(
             {
                 "in_last_1h": in_last_1h,
                 "step1_pass": step1_pass,
                 "tool_ok": tool_errors == 0,
                 "latency_ms": trace_latency_ms,
-                "cache_ratio": cache_ratio,
-                "cost_usd": trace_cost,
+                "cache_ratio": (sum(s.cached_input_tokens for s in t_spans) / total_in)
+                if total_in > 0
+                else 0.0,
+                "cost_usd": sum(_compute_span_cost_usd(s) for s in t_spans),
             }
         )
 
-    step1_rows: list[Step1CostOutcomeRow] = []
-    for (app_id, bu, cc, fw), t_list in sorted(
-        app_groups.items(),
-        key=lambda item: sum(float(x["cost_usd"]) for x in item[1]),
-        reverse=True,
-    ):
-        n_traces = len(t_list)
-        n_last_1h = sum(1 for x in t_list if x["in_last_1h"])
-        n_pass = sum(1 for x in t_list if x["step1_pass"])
-        pass_rate = n_pass / n_traces
-        tool_ok_rate = sum(1 for x in t_list if x["tool_ok"]) / n_traces
-        latencies = sorted(float(x["latency_ms"]) for x in t_list)
-        p95_idx = min(len(latencies) - 1, max(0, math.ceil(0.95 * len(latencies)) - 1))
-        p95_ms = latencies[p95_idx]
-        avg_cache = sum(float(x["cache_ratio"]) for x in t_list) / n_traces
-        tot_cost = sum(float(x["cost_usd"]) for x in t_list)
-        cost_per_trace = tot_cost / n_traces
-        cost_per_outcome = (tot_cost / n_pass) if n_pass > 0 else None
-
-        step1_rows.append(
-            Step1CostOutcomeRow(
-                apphub_application_id=app_id,
-                business_unit=bu,
-                cost_center=cc,
-                framework_runtime=fw,
-                total_traces=n_traces,
-                last_1h_traces=n_last_1h,
-                step1_passing_traces=n_pass,
-                step1_pass_rate=pass_rate,
-                tool_success_rate=tool_ok_rate,
-                p95_latency_ms=p95_ms,
-                avg_cache_hit_ratio=avg_cache,
-                total_cost_usd=tot_cost,
-                cost_per_trace_usd=cost_per_trace,
-                step1_cost_per_outcome_usd=cost_per_outcome,
-            )
+    step1_rows = [
+        _summarize_app_group(group_key, t_list)
+        for group_key, t_list in sorted(
+            app_groups.items(),
+            key=lambda item: sum(float(x["cost_usd"]) for x in item[1]),
+            reverse=True,
         )
+    ]
 
     return TimeShiftLoadgenReport(
         reference_time=reference_time,
@@ -364,11 +352,12 @@ def render_loadgen_markdown_report(report: TimeShiftLoadgenReport) -> str:
             f"${r.cost_per_trace_usd:.4f} | **{cpo}** |"
         )
     table_body = "\n".join(rows_md)
+    step1_passing_total = sum(r.step1_passing_traces for r in report.step1_rows)
 
     return f"""# BQ Eval Time-Shift Demo Load Generator (`bq-eval loadgen`)
 
 - **Reference Timestamp (`CURRENT_TIMESTAMP()`):** `{report.reference_time.isoformat()}`
-- **Time-Shifted Volume:** `{report.total_traces:,}` traces (`{report.total_spans:,}` spans across `{report.total_replicas}` replicas of 16 golden templates)
+- **Time-Shifted Volume:** `{report.total_traces:,}` total traces (`{step1_passing_total:,}` Step-1 passing; `{report.total_spans:,}` spans across `{report.total_replicas}` replicas of 16 golden templates)
 
 ## 1. Step 1: Day-1 Cost per Application, Business Unit & Outcome (`0` Extra Tables)
 
@@ -378,7 +367,9 @@ def render_loadgen_markdown_report(report: TimeShiftLoadgenReport) -> str:
 
 ## 2. Step 2 & Step 2.5 Trace Slice Volumes Ready for `AI.GENERATE_TABLE`
 
-| Evaluation Stage & Slice | SQL Filter on `v_step2_trace_rubric_prompts` | Matching Traces |
+> Note: Counts below reflect all traces in `v_step2_all_trace_rubric_prompts` (`{report.total_traces:,}` total; `{step1_passing_total:,}` pass Step-1 gates in `v_step2_trace_rubric_prompts`).
+
+| Evaluation Stage & Slice | SQL Filter on `v_step2_all_trace_rubric_prompts` | Matching Traces |
 | :--- | :--- | ---: |
 | **Step 2A — Full Trace Eval (`100%`)** | *(No sample filter)* | `{report.total_traces:,}` |
 | **Step 2B — Default `10%` Sample** | `AND MOD(ABS(FARM_FINGERPRINT(trace_id)), 100) < 10` | `{report.sample_10pct_traces:,}` |

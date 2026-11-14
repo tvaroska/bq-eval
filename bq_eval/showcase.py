@@ -285,7 +285,7 @@ def render_markdown_report(artifacts: ShowcaseRunArtifacts) -> str:
 
     return f"""# BQ Eval & FinOps Executive Scorecard (`bq-eval`)
 
-## 1. Tier 1–3 Application Quality & Cost per Verified Outcome (`CPVO`)
+## 1. Tier 1-3 Application Quality & Cost per Verified Outcome (`CPVO`)
 
 | Application ID | Traces | Rule 0 Pass | Calibration Status | Raw Judge Pass | Rogan-Gladen Calibrated Pass | Weighted Burndown | Total Spend | CPVO |
 | :--- | ---: | ---: | :--- | ---: | :--- | ---: | ---: | ---: |

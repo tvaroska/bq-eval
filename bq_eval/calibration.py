@@ -175,7 +175,7 @@ def compute_gwet_ac2(
     return (p_a - p_e) / (1.0 - p_e)
 
 
-def build_calibration_result(
+def build_calibration_result(  # noqa: PLR0913
     human_ordinal_scores: Sequence[int],
     judge_ordinal_scores: Sequence[int],
     observed_pass_rate: float,

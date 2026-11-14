@@ -140,7 +140,7 @@ def test_declarative_ast_rules_and_positive_controls(tmp_path: Path) -> None:
     if not Path(ast_grep).is_file():
         pytest.skip("ast-grep binary not installed on this runner")
 
-    live = subprocess.run(
+    live = subprocess.run(  # noqa: S603
         [ast_grep, "scan", "--rule", str(rules_path)],
         cwd=REPO_ROOT,
         capture_output=True,
@@ -171,7 +171,7 @@ def test_declarative_ast_rules_and_positive_controls(tmp_path: Path) -> None:
                 if stripped.startswith("- "):
                     snippet = str(ast.literal_eval(stripped[2:].strip()))
                     target_file.write_text(f"{snippet}\n", encoding="utf-8")
-                    res = subprocess.run(
+                    res = subprocess.run(  # noqa: S603
                         [ast_grep, "scan", "--rule", str(single_rule), "."],
                         cwd=case_dir,
                         capture_output=True,

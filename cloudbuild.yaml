@@ -6,13 +6,18 @@ steps:
       - "-c"
       - |
         export PYTHONDONTWRITEBYTECODE=1
-        uv lock --check --offline
-        uv sync --frozen --extra dev
-        uv pip install --python .venv/bin/python "ast-grep-cli>=0.35"
+        uv lock --check --offline --no-config
+        uv sync --frozen --extra dev --no-config
         .venv/bin/ast-grep scan --rule specs/ast.rules.yaml
-        .venv/bin/ruff check --no-cache bq_eval tests examples
+        .venv/bin/ruff format --check --no-cache bq_eval tests examples scripts
+        .venv/bin/ruff check --no-cache bq_eval tests examples scripts
+        .venv/bin/mypy --strict --cache-dir=/dev/null bq_eval tests examples scripts
         .venv/bin/pytest -p no:cacheprovider -v
-        .venv/bin/bq-eval demo --html-out /tmp/scorecard.html
+        .venv/bin/bq-eval demo --html-out /tmp/scorecard.html >/dev/null
+        .venv/bin/bq-eval loadgen --replicas 5 --last-hour-replicas 2 >/dev/null
+        .venv/bin/bq-eval judge-sql --project-id demo-proj >/dev/null
+        .venv/bin/bq-eval judge-sql --engine evaluate-agent --project-id demo-proj >/dev/null
+        .venv/bin/python examples/run_showcase_demo.py >/dev/null
 
 options:
   logging: CLOUD_LOGGING_ONLY
