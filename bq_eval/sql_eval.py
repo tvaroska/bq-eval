@@ -16,7 +16,7 @@ from bq_eval.rubrics import CANONICAL_RUBRICS, build_autorater_system_prompt
 
 
 class SQLTraceEvalSummary(BaseModel):
-    """Per-application Tier 1-3 evaluation and 4-bucket FinOps summary (EVAL-P04..P08)."""
+    """Per-application Tier 1-3 evaluation and 4-bucket FinOps summary (EVAL-P01, EVAL-P03, EVAL-P04, EVAL-P08, EVAL-P11)."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -97,7 +97,7 @@ def build_ai_generate_table_judge_sql(  # noqa: PLR0913
     run_id: str | None = None,
     judge_model: str | None = None,
 ) -> str:
-    """Build production BigQuery `AI.GENERATE_TABLE` SQL query (EVAL-P08).
+    """Build production BigQuery `AI.GENERATE_TABLE` SQL query (EVAL-P02, EVAL-P08).
 
     Enforces:
     1. Stratified sampling: 100% of deterministic failures (`NOT rule0_pass`, tool errors,

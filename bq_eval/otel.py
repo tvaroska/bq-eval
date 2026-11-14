@@ -42,7 +42,7 @@ def resolve_application_id(
     attributes: dict[str, Any] | None = None,
     service_name: str | None = None,
 ) -> str:
-    """Resolve portable application ID matching SQL COALESCE precedence (EVAL-P07).
+    """Resolve portable application ID matching SQL COALESCE precedence (EVAL-P08).
 
     Order of precedence:
     1. Explicit `gcp_apphub_application_id` column
@@ -68,7 +68,7 @@ def compute_weighted_burndown_tokens(
     thinking_tokens: int = 0,
     long_context_threshold: int = LONG_CONTEXT_THRESHOLD_TOKENS,
 ) -> float:
-    """Compute span-level weighted burndown tokens with >200K long-context cliff (EVAL-P04).
+    """Compute span-level weighted burndown tokens with >200K long-context cliff (EVAL-P08).
 
     * Standard (<= 200,000 input tokens): 1.0x uncached + 0.1x cached + 4.0x (output + thinking)
     * Long-context (> 200,000 input tokens): 2.0x uncached + 0.2x cached + 7.5x (output + thinking)

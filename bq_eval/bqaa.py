@@ -4,7 +4,7 @@ Maps BigQuery Agent Analytics (`BigQueryAgentAnalyticsPlugin` / `BigQueryCallbac
 `agent_events` rows onto `OTelGenAISpanRecord` and `TracePayloadRecord` with exact parity
 against `sql/bqaa_adapter_views.sql`:
 - Deduplicates BigQuery Storage Write API retry rows by `event_id` (latest `timestamp` wins).
-- Enforces `ADR-003` / `EVAL-P07` strict `'unregistered_app'` fallback when explicit
+- Enforces `ADR-003` / `EVAL-P08` strict `'unregistered_app'` fallback when explicit
   `custom_metadata` App Hub identifiers are absent (never collapsing into `adk.app_name` or `agent`).
 - Converts `usage_metadata` token counts for span-level `<=200K` and `>200K` burndown cliffs.
 """

@@ -2,7 +2,7 @@
 -- BQ Eval & FinOps (bq-eval) — Dual-Path Compatibility Views + Physical DDL
 --   * Full Capture (default here): Native OTel `_AllSpans` + `_AllLogs` + BigLake `completions`
 --   * Light Capture (`BQAA`) & Hybrid Dual-Path: see `sql/bqaa_adapter_views.sql`
--- Standard: EVAL-P04, EVAL-P05, EVAL-P06, EVAL-P07, EVAL-P08, EVAL-P11 (v2026.11.3)
+-- Standard: EVAL-P01, EVAL-P02, EVAL-P03, EVAL-P04, EVAL-P05, EVAL-P08, EVAL-P11 (v2026.11.3)
 -- =============================================================================
 
 CREATE SCHEMA IF NOT EXISTS `agent_eval`

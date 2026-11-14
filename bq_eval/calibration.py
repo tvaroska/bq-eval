@@ -42,7 +42,7 @@ class ConfusionMatrix(BaseModel):
 
 
 class RoganGladenResult(BaseModel):
-    """Bias-corrected true pass rate and 95% confidence interval (EVAL-P05)."""
+    """Bias-corrected true pass rate and 95% confidence interval (EVAL-P04)."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -87,7 +87,7 @@ def rogan_gladen_calibrate(
     confusion: ConfusionMatrix,
     z_value: float = 1.959963984540054,
 ) -> RoganGladenResult:
-    """Apply Rogan-Gladen prevalence adjustment with Delta-method 95% CI (EVAL-P05).
+    """Apply Rogan-Gladen prevalence adjustment with Delta-method 95% CI (EVAL-P04).
 
     Formula:
         theta_RG = clip((p_obs + TNR - 1) / (TPR + TNR - 1), 0, 1)

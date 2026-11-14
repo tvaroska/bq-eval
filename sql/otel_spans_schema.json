@@ -18,6 +18,12 @@
     "description": "Parent span identifier (NULL for root agent invocation span)."
   },
   {
+    "name": "span_name",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "OpenTelemetry span name (e.g., invoke_agent, execute_tool, outcome.closed)."
+  },
+  {
     "name": "start_time",
     "type": "TIMESTAMP",
     "mode": "REQUIRED",
@@ -28,6 +34,12 @@
     "type": "TIMESTAMP",
     "mode": "REQUIRED",
     "description": "Span completion timestamp in UTC."
+  },
+  {
+    "name": "receive_time",
+    "type": "TIMESTAMP",
+    "mode": "NULLABLE",
+    "description": "Observability Analytics ingestion timestamp in UTC (receive_time - end_time measures lag)."
   },
   {
     "name": "latency_ms",
@@ -42,10 +54,16 @@
     "description": "OpenTelemetry status code: OK, ERROR, or UNSET."
   },
   {
+    "name": "otel_span_kind",
+    "type": "STRING",
+    "mode": "REQUIRED",
+    "description": "OpenTelemetry SpanKind (e.g., SPAN_KIND_SERVER, SPAN_KIND_CLIENT, SPAN_KIND_INTERNAL)."
+  },
+  {
     "name": "span_kind",
     "type": "STRING",
     "mode": "REQUIRED",
-    "description": "GenAI operation name: invoke_agent, execute_tool, chat, embeddings, or retrieval."
+    "description": "GenAI operation name: invoke_agent, execute_tool, chat, embeddings, retrieval, or internal."
   },
   {
     "name": "service_name",
@@ -57,7 +75,7 @@
     "name": "gcp_apphub_application_id",
     "type": "STRING",
     "mode": "NULLABLE",
-    "description": "Resolved Application ID via COALESCE(gcp.apphub.application.id, gcp.agent.id, NULLIF(service_name, 'agent-service'), 'unregistered_app')."
+    "description": "Server-stamped or collector-stamped App Hub Application ID (ADR-003: NULL for unregistered workloads, resolved downstream via COALESCE(..., 'unregistered_app'))."
   },
   {
     "name": "gcp_apphub_service_id",
@@ -81,7 +99,7 @@
     "name": "model_name",
     "type": "STRING",
     "mode": "REQUIRED",
-    "description": "Customer-facing model identifier (e.g., gemini-3.8-flash, gemini-4-argon, gemini-3.5-flash-lite)."
+    "description": "Customer-facing model identifier (e.g., gemini-3.8-flash, gemini-4-argon, gemini-3.5-flash-lite, or none)."
   },
   {
     "name": "input_tokens",
@@ -93,7 +111,7 @@
     "name": "cached_input_tokens",
     "type": "INT64",
     "mode": "REQUIRED",
-    "description": "Cached prefix prompt tokens (gen_ai.usage.cached_input_tokens) billed at 0.1x (<=200K) or 0.2x (>200K)."
+    "description": "Cached prefix prompt tokens (gen_ai.usage.cache_read.input_tokens) billed at 0.1x (<=200K) or 0.2x (>200K)."
   },
   {
     "name": "output_tokens",
@@ -105,7 +123,7 @@
     "name": "thinking_tokens",
     "type": "INT64",
     "mode": "REQUIRED",
-    "description": "Internal reasoning tokens (gen_ai.usage.thinking_tokens) billed at 4.0x (<=200K) or 7.5x (>200K)."
+    "description": "Internal reasoning tokens (gen_ai.usage.reasoning.output_tokens / thoughts_tokens) billed at 4.0x (<=200K) or 7.5x (>200K)."
   },
   {
     "name": "tool_name",
@@ -123,7 +141,7 @@
     "name": "rule0_pass",
     "type": "BOOL",
     "mode": "REQUIRED",
-    "description": "Deterministic Rule 0 schema, citation-anchor, and math verification outcome."
+    "description": "Deterministic Rule 0 schema, citation-anchor, and math verification outcome (EVAL-P01)."
   },
   {
     "name": "finops_traffic_type",
@@ -132,9 +150,45 @@
     "description": "FinOps attribution bucket: production_inference, conflict_escalation, agent_gym_eval, or autorater_judge."
   },
   {
+    "name": "outcome_id",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "EVAL-P11 business outcome identifier propagated via W3C baggage (outcome.id)."
+  },
+  {
+    "name": "outcome_owner",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "EVAL-P11 owning App Hub application ID propagated via W3C baggage (outcome.owner)."
+  },
+  {
+    "name": "source_mode",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "Workflow ingestion/execution lane (e.g., A2A_PATH_A, PDF_PATH_B_FLASH, PDF_PATH_B_ARGON)."
+  },
+  {
+    "name": "skill_id",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "Compiled skill identifier applied during span execution (e.g., loan-payoff-statement)."
+  },
+  {
+    "name": "skill_version",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "Semantic version of the compiled skill applied during span execution (e.g., 1.0.0, 1.1.0)."
+  },
+  {
+    "name": "entity_id",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "Optional business subject identifier recorded on outcome close or trace metadata."
+  },
+  {
     "name": "attributes",
     "type": "JSON",
     "mode": "NULLABLE",
-    "description": "Full OpenTelemetry span attribute payload serialized as BigQuery JSON."
+    "description": "Full OpenTelemetry span attribute payload serialized as BigQuery JSON (including prompt/completion payload URIs)."
   }
 ]

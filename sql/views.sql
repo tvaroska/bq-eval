@@ -3,7 +3,7 @@
 --   * Zero duplicate view names with `sql/step1_trace_views.sql` (deploy Step 1 first)
 --   * Joins `model_pricing_catalog`, `app_registry`, `eval_results`, and `sme_labels`
 --   * Domain-agnostic core: demo-specific overlays live in `sql/demo_docubridge_extensions.sql`
--- Standard: EVAL-P01, EVAL-P03, EVAL-P04, EVAL-P08, EVAL-P11 (v2026.11.3)
+-- Standard: EVAL-P01, EVAL-P03, EVAL-P04, EVAL-P05, EVAL-P08, EVAL-P11 (v2026.11.3)
 -- =============================================================================
 
 -- -----------------------------------------------------------------------------

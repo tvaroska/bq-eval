@@ -52,7 +52,7 @@ class OrdinalScoreOutput(BaseModel):
 
 
 def wrap_untrusted_text(raw_text: str, tag: str = "untrusted_text") -> str:
-    """XML-escape untrusted user/model text and wrap in `<untrusted_text>` tags (EVAL-P08)."""
+    """XML-escape untrusted user/model text and wrap in `<untrusted_text>` tags (EVAL-P02)."""
     escaped = html.escape(raw_text or "", quote=False)
     return f"<{tag}>\n{escaped}\n</{tag}>"
 

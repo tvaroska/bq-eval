@@ -3,7 +3,7 @@
 --   * Light Capture (BQAA): Maps `agent_events` (BigQueryAgentAnalyticsPlugin /
 --     BigQueryCallbackHandler / Conversational Analytics) onto `agent_eval.otel_spans`
 --     and `agent_eval.trace_payloads` with zero data copies and 0 external tables.
---   * Preserves ADR-003 / EVAL-P07 strict `'unregistered_app'` fallback: workloads
+--   * Preserves ADR-003 / EVAL-P08 strict `'unregistered_app'` fallback: workloads
 --     without explicit `custom_metadata."apphub.application.id"` (or server-stamped
 --     `_AllSpans` join) resolve directly to `'unregistered_app'`, never collapsing
 --     into self-reported `adk.app_name` or `agent` strings.
@@ -63,7 +63,7 @@ SELECT
     agent,
     'unknown_service'
   ) AS service_name,
-  -- ADR-003 / EVAL-P07 strict App Hub resolution (NULL -> 'unregistered_app' downstream)
+  -- ADR-003 / EVAL-P08 strict App Hub resolution (NULL -> 'unregistered_app' downstream)
   COALESCE(
     JSON_VALUE(attributes, '$.custom_metadata."gcp.apphub.application.id"'),
     JSON_VALUE(attributes, '$.custom_metadata."apphub.application.id"'),
