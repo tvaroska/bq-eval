@@ -17,8 +17,10 @@ bq-eval = "bq_eval.cli:main"
 
 [project.optional-dependencies]
 dev = [
+  "mypy>=1.11.0",
   "pytest>=8.0.0",
   "ruff>=0.6.0",
+  "sqlglot>=25.0.0",
 ]
 
 [tool.hatch.build.targets.wheel]
