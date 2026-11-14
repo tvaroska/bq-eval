@@ -167,3 +167,49 @@ FROM AI.EVALUATE_AGENT(
   ]
 );
 ```
+
+### Persisting Engine B (`AI.EVALUATE_AGENT`) Verdicts into Step 3 (`agent_eval.eval_results`)
+
+```sql
+INSERT INTO `agent_eval.eval_results` (
+  eval_id, eval_run_id, trace_id, outcome_id, apphub_application_id, rubric_id, judge_model,
+  sampling_stratum, rule0_pass, reasoning_trace, ordinal_score, binary_pass,
+  judge_input_tokens, judge_output_tokens, judge_thinking_tokens, evaluated_at
+)
+SELECT
+  GENERATE_UUID() AS eval_id,
+  'run_2026_11_06_bqaa_managed' AS eval_run_id,
+  eval_out.trace_id,
+  eval_out.outcome_id,
+  eval_out.apphub_application_id,
+  metric_row.metric_name AS rubric_id,
+  'ai_evaluate_agent_managed' AS judge_model,
+  'SAMPLE_10PCT' AS sampling_stratum,
+  eval_out.step1_pass AS rule0_pass,
+  COALESCE(metric_row.explanation, 'Managed AI.EVALUATE_AGENT verdict') AS reasoning_trace,
+  CAST(ROUND(LEAST(4.0, GREATEST(1.0, COALESCE(metric_row.score, 0.0) * 3.0 + 1.0))) AS INT64) AS ordinal_score,
+  (COALESCE(metric_row.score, 0.0) >= 0.75) AS binary_pass,
+  0 AS judge_input_tokens,
+  0 AS judge_output_tokens,
+  0 AS judge_thinking_tokens,
+  CURRENT_TIMESTAMP() AS evaluated_at
+FROM AI.EVALUATE_AGENT(
+  TABLE (
+    SELECT cand.*
+    FROM `agent_eval.v_bqaa_eval_turn_filtered` AS cand
+    LEFT JOIN `agent_eval.eval_results` AS existing
+      ON cand.trace_id = existing.trace_id
+      AND existing.eval_run_id = 'run_2026_11_06_bqaa_managed'
+    WHERE MOD(ABS(FARM_FINGERPRINT(cand.trace_id)), 100) < 10
+      AND existing.eval_id IS NULL
+  ),
+  trace_col => 'trace',
+  managed_metrics => [
+    'tool_use_quality_v1',
+    'final_response_quality_v1',
+    'hallucination_v1',
+    'safety_v1'
+  ]
+) AS eval_out,
+UNNEST(eval_out.evaluation_results) AS metric_row;
+```

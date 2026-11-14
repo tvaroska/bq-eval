@@ -2,7 +2,7 @@
 -- BQ Eval — Step 2: 1 Rubric Table + Stateless Gemini Eval Over Traces
 --   * Source is ALWAYS Traces (joins v_step1_trace_eval with trace_payloads)
 --   * Adds 1 Table: `agent_eval.rubrics` (can be a CSV in Cloud Storage or a
---     native BigQuery table seeded with the 4 example rubrics from step2_rubrics.csv)
+--     native BigQuery table seeded with the 6 canonical rubrics from step2_rubrics.csv)
 --   * 0 Result Tables Required: Static SQL queries run AI.GENERATE_TABLE on
 --     100% of traces or a 10% sample and return verdicts directly in the output
 -- =============================================================================
@@ -40,7 +40,7 @@ OPTIONS (
 -- );
 
 -- -----------------------------------------------------------------------------
--- 2B. Option B: Native BigQuery `agent_eval.rubrics` Table + 4 Example Rubrics
+-- 2B. Option B: Native BigQuery `agent_eval.rubrics` Table + 6 Canonical Rubrics
 --   * Uses CREATE OR REPLACE TABLE ... AS SELECT so it runs in both billed
 --     projects and BigQuery Sandbox free-tier scratchpads without DML blocks
 -- -----------------------------------------------------------------------------

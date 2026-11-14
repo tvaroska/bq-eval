@@ -173,3 +173,31 @@ def compute_gwet_ac2(
     if abs(1.0 - p_e) < 1e-12:
         return 1.0
     return (p_a - p_e) / (1.0 - p_e)
+
+
+def build_calibration_result(
+    human_ordinal_scores: Sequence[int],
+    judge_ordinal_scores: Sequence[int],
+    observed_pass_rate: float,
+    sample_size: int,
+    passing_score: int = 3,
+    irr_threshold: float = 0.80,
+    categories: Sequence[int] = (1, 2, 3, 4),
+) -> CalibrationResult:
+    """Build combined Quadratic Gwet's AC2 IRR gate and Rogan-Gladen calibration summary."""
+    ac2 = compute_gwet_ac2(human_ordinal_scores, judge_ordinal_scores, categories=categories)
+    confusion = compute_confusion_matrix(
+        human_labels=[score >= passing_score for score in human_ordinal_scores],
+        judge_labels=[score >= passing_score for score in judge_ordinal_scores],
+    )
+    rg = rogan_gladen_calibrate(
+        observed_pass_rate=observed_pass_rate,
+        sample_size=sample_size,
+        confusion=confusion,
+    )
+    return CalibrationResult(
+        gwet_ac2=ac2,
+        passes_irr_gate=ac2 >= irr_threshold,
+        confusion_matrix=confusion,
+        rogan_gladen=rg,
+    )

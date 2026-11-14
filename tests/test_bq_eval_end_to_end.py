@@ -187,7 +187,15 @@ def test_xml_prompt_injection_escaping_in_python_and_sql() -> None:
             in sql
         )
     assert "FARM_FINGERPRINT(t.trace_id)" in sql
-    assert "MODEL `demo-proj.agent_eval.gemini_4_argon_judge`" in sql
+    assert "MODEL `demo-proj.agent_eval.gemini_3_8_flash_judge`" in sql
+    argon_sql = build_ai_generate_table_judge_sql(
+        project_id="demo-proj",
+        dataset_id="agent_eval",
+        rubric_id="groundedness_4pt_v1",
+        canary_sample_pct=5,
+        judge_model="gemini-4-argon",
+    )
+    assert "MODEL `demo-proj.agent_eval.gemini_4_argon_judge`" in argon_sql
 
 
 def test_rogan_gladen_and_sqlite_exact_parity_and_fail_closed_guard() -> None:
@@ -356,7 +364,7 @@ def test_finops_roi_prefix_cache_pareto_and_focus_chargeback() -> None:
         app_burndown_tokens={"app-a": 60_000_000.0, "app-b": 20_000_000.0},
         app_cost_centers={"app-a": "CC-A", "app-b": "CC-B"},
         reserved_pt_capacity_tokens=100_000_000.0,
-        reserved_pt_Fixed_cost_usd=100.0,
+        reserved_pt_fixed_cost_usd=100.0,
     )
     assert len(rows) == 3  # app-a, app-b, plus platform-shared-reservation idle pool
     total_allocated = sum(r.total_allocated_cost_usd for r in rows)
@@ -429,19 +437,20 @@ def test_progressive_step1_step2_step25_step3_pack() -> None:
     csv_path = REPO_ROOT / "sql" / "step2_rubrics.csv"
     with csv_path.open("r", encoding="utf-8", newline="") as f:
         rows = list(csv.DictReader(f))
-    assert len(rows) == 4
+    assert len(rows) == 6
     rubric_ids = {r["rubric_id"] for r in rows}
-    assert rubric_ids == {
-        "groundedness_4pt_v1",
-        "tool_trajectory_4pt_v1",
-        "completeness_4pt_v1",
-        "escalation_policy_4pt_v1",
-    }
-    for r in rows:
-        assert int(r["passing_score"]) == 3
-        assert "Score 1" in r["rubric_prompt"] and "Score 4" in r["rubric_prompt"]
-
+    assert rubric_ids == set(CANONICAL_RUBRICS)
     step2_sql = (REPO_ROOT / "sql" / "step2_stateless_eval.sql").read_text(encoding="utf-8")
+    for r in rows:
+        spec = CANONICAL_RUBRICS[r["rubric_id"]]
+        assert r["title"] == spec.title
+        assert r["dimension"] == spec.dimension
+        assert int(r["passing_score"]) == spec.passing_score == 3
+        assert r["judge_model"] == spec.judge_model == "gemini-3.8-flash"
+        assert "Score 1" in r["rubric_prompt"] and "Score 4" in r["rubric_prompt"]
+        assert f"'{r['rubric_id']}'" in step2_sql
+        assert f"'{r['rubric_prompt']}'" in step2_sql
+
     assert "CREATE OR REPLACE EXTERNAL TABLE `agent_eval.rubrics`" in step2_sql
     assert "CREATE OR REPLACE TABLE `agent_eval.rubrics`" in step2_sql
     assert "CREATE OR REPLACE VIEW `agent_eval.v_step2_trace_rubric_prompts`" in step2_sql

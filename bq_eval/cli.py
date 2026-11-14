@@ -82,9 +82,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="Canonical 4-point ordinal rubric ID (for --engine generate-table).",
     )
     sql_p.add_argument(
+        "--judge-model",
+        choices=("gemini-3.8-flash", "gemini-4-argon"),
+        default=None,
+        help="Optional autorater model override for --engine generate-table (defaults to rubric setting).",
+    )
+    sql_p.add_argument(
         "--eval-view",
         default="v_bqaa_eval_turn_filtered",
         help="BQAA AgentData turn/session view name (for --engine evaluate-agent).",
+    )
+    sql_p.add_argument(
+        "--managed-metrics",
+        default=None,
+        help="Comma-separated AI.EVALUATE_AGENT managed metric names (for --engine evaluate-agent).",
     )
     sql_p.add_argument(
         "--canary-pct",
@@ -136,13 +147,28 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.command == "judge-sql":
         if args.engine == "evaluate-agent":
-            sql = build_ai_evaluate_agent_sql(
-                project_id=args.project_id,
-                dataset_id=args.dataset_id,
-                eval_view=args.eval_view,
-                canary_sample_pct=args.canary_pct,
-                run_id=args.run_id,
+            metrics_arg = (
+                tuple(m.strip() for m in args.managed_metrics.split(",") if m.strip())
+                if args.managed_metrics
+                else None
             )
+            if metrics_arg is not None:
+                sql = build_ai_evaluate_agent_sql(
+                    project_id=args.project_id,
+                    dataset_id=args.dataset_id,
+                    eval_view=args.eval_view,
+                    managed_metrics=metrics_arg,
+                    canary_sample_pct=args.canary_pct,
+                    run_id=args.run_id,
+                )
+            else:
+                sql = build_ai_evaluate_agent_sql(
+                    project_id=args.project_id,
+                    dataset_id=args.dataset_id,
+                    eval_view=args.eval_view,
+                    canary_sample_pct=args.canary_pct,
+                    run_id=args.run_id,
+                )
         else:
             sql = build_ai_generate_table_judge_sql(
                 project_id=args.project_id,
@@ -150,6 +176,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 rubric_id=args.rubric_id,
                 canary_sample_pct=args.canary_pct,
                 run_id=args.run_id,
+                judge_model=args.judge_model,
             )
         print(sql)
         return 0

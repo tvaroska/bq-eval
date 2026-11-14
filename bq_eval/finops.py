@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import warnings
 from collections.abc import Sequence
 from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from bq_eval.otel import OTelGenAISpanRecord
+from bq_eval.otel import LONG_CONTEXT_THRESHOLD_TOKENS, OTelGenAISpanRecord
 
 
 class ModelPricingSKU(BaseModel):
@@ -21,10 +22,27 @@ class ModelPricingSKU(BaseModel):
     input_usd_per_1m: float = Field(..., ge=0.0)
     cached_input_usd_per_1m: float = Field(..., ge=0.0)
     output_usd_per_1m: float = Field(..., ge=0.0)
-    long_context_threshold_tokens: int = 200_000
+    long_context_threshold_tokens: int = LONG_CONTEXT_THRESHOLD_TOKENS
     long_context_input_usd_per_1m: float = Field(..., ge=0.0)
     long_context_cached_usd_per_1m: float = Field(..., ge=0.0)
     long_context_output_usd_per_1m: float = Field(..., ge=0.0)
+
+
+def compute_span_cost_usd(span: OTelGenAISpanRecord, sku: ModelPricingSKU) -> float:
+    """Compute USD cost for a single span using `sku` and its long-context pricing cliff."""
+    uncached_input = span.uncached_input_tokens
+    output_and_thinking = span.output_tokens + span.thinking_tokens
+    if span.input_tokens > sku.long_context_threshold_tokens:
+        return (
+            (uncached_input / 1e6) * sku.long_context_input_usd_per_1m
+            + (span.cached_input_tokens / 1e6) * sku.long_context_cached_usd_per_1m
+            + (output_and_thinking / 1e6) * sku.long_context_output_usd_per_1m
+        )
+    return (
+        (uncached_input / 1e6) * sku.input_usd_per_1m
+        + (span.cached_input_tokens / 1e6) * sku.cached_input_usd_per_1m
+        + (output_and_thinking / 1e6) * sku.output_usd_per_1m
+    )
 
 
 class EvalFinOpsROI(BaseModel):
@@ -100,8 +118,11 @@ def diagnose_prefix_cache_dilution(
     target_cache_hit_ratio: float = 0.75,
     input_usd_per_1m: float = 0.15,
     cached_usd_per_1m: float = 0.015,
+    long_context_threshold_tokens: int = LONG_CONTEXT_THRESHOLD_TOKENS,
+    long_context_input_usd_per_1m: float | None = None,
+    long_context_cached_usd_per_1m: float | None = None,
 ) -> PrefixCacheDilutionReport:
-    """Detect 1/N system-prompt prefix fragmentation and quantify monthly savings."""
+    """Detect 1/N system-prompt prefix fragmentation and quantify cliff-aware savings."""
     if not spans:
         raise ValueError("spans must be non-empty.")
     if distinct_prompt_variants < 1:
@@ -113,12 +134,34 @@ def diagnose_prefix_cache_dilution(
     observed_ratio = (total_cached / total_input) if total_input > 0 else 0.0
     ceiling = 1.0 / float(distinct_prompt_variants)
 
-    additional_cached_tokens = max(0.0, (target_cache_hit_ratio - observed_ratio) * total_input)
-    # Moving 1 token from uncached (1.0x) to cached (0.1x) saves 0.9 weighted burndown tokens
-    recoverable_burndown = additional_cached_tokens * 0.9
-    recoverable_usd = (additional_cached_tokens / 1e6) * max(
-        0.0, input_usd_per_1m - cached_usd_per_1m
+    long_in_rate = (
+        long_context_input_usd_per_1m
+        if long_context_input_usd_per_1m is not None
+        else input_usd_per_1m * 2.0
     )
+    long_cached_rate = (
+        long_context_cached_usd_per_1m
+        if long_context_cached_usd_per_1m is not None
+        else cached_usd_per_1m * 2.0
+    )
+    std_rate_delta = max(0.0, input_usd_per_1m - cached_usd_per_1m)
+    long_rate_delta = max(0.0, long_in_rate - long_cached_rate)
+
+    recoverable_burndown = 0.0
+    recoverable_usd = 0.0
+    if observed_ratio < target_cache_hit_ratio:
+        for span in spans:
+            shortfall = max(0.0, target_cache_hit_ratio * span.input_tokens - span.cached_input_tokens)
+            if shortfall <= 0.0:
+                continue
+            if span.input_tokens > long_context_threshold_tokens:
+                # Moving 1 >200K token from uncached (2.0x) to cached (0.2x) saves 1.8x burndown.
+                recoverable_burndown += shortfall * 1.8
+                recoverable_usd += (shortfall / 1e6) * long_rate_delta
+            else:
+                # Moving 1 <=200K token from uncached (1.0x) to cached (0.1x) saves 0.9x burndown.
+                recoverable_burndown += shortfall * 0.9
+                recoverable_usd += (shortfall / 1e6) * std_rate_delta
 
     dilution_detected = distinct_prompt_variants > 1 and observed_ratio < target_cache_hit_ratio
     if dilution_detected:
@@ -233,10 +276,12 @@ def allocate_focus_two_pool_chargeback(
     app_burndown_tokens: dict[str, float],
     app_cost_centers: dict[str, str],
     reserved_pt_capacity_tokens: float,
-    reserved_pt_Fixed_cost_usd: float,
+    reserved_pt_fixed_cost_usd: float | None = None,
     payg_overflow_usd_per_1m_weighted: float = 0.15,
     platform_owner_id: str = "platform-shared-reservation",
     platform_cost_center: str = "CC-PLATFORM-IDLE",
+    *,
+    reserved_pt_Fixed_cost_usd: float | None = None,
 ) -> list[FocusChargebackRow]:
     """Allocate Provisioned Throughput (PT) + PAYG overflow using FOCUS 1.2 Two-Pool rules.
 
@@ -248,6 +293,21 @@ def allocate_focus_two_pool_chargeback(
     """
     if reserved_pt_capacity_tokens <= 0:
         raise ValueError("reserved_pt_capacity_tokens must be positive.")
+    if reserved_pt_Fixed_cost_usd is not None:
+        warnings.warn(
+            "reserved_pt_Fixed_cost_usd is deprecated; use reserved_pt_fixed_cost_usd instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        if reserved_pt_fixed_cost_usd is not None:
+            raise ValueError(
+                "Specify either reserved_pt_fixed_cost_usd or reserved_pt_Fixed_cost_usd, not both."
+            )
+        fixed_cost_usd = reserved_pt_Fixed_cost_usd
+    elif reserved_pt_fixed_cost_usd is None:
+        raise ValueError("reserved_pt_fixed_cost_usd is required.")
+    else:
+        fixed_cost_usd = reserved_pt_fixed_cost_usd
 
     total_demand = sum(max(0.0, v) for v in app_burndown_tokens.values())
     utilized_tokens = min(reserved_pt_capacity_tokens, total_demand)
@@ -257,8 +317,8 @@ def allocate_focus_two_pool_chargeback(
     utilized_ratio = utilized_tokens / reserved_pt_capacity_tokens
     idle_ratio = idle_tokens / reserved_pt_capacity_tokens
 
-    utilized_pool_usd = reserved_pt_Fixed_cost_usd * utilized_ratio
-    idle_tax_usd = reserved_pt_Fixed_cost_usd * idle_ratio
+    utilized_pool_usd = fixed_cost_usd * utilized_ratio
+    idle_tax_usd = fixed_cost_usd * idle_ratio
     total_overflow_usd = (overflow_tokens / 1e6) * payg_overflow_usd_per_1m_weighted
 
     rows: list[FocusChargebackRow] = []

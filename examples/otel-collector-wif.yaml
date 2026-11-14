@@ -1,0 +1,62 @@
+# Keyless Workload Identity Federation (WIF) OpenTelemetry Collector Configuration
+# Routes external / multi-cloud OTLP GenAI spans into Cloud Trace (BigQuery linked
+# `obs_traces._AllSpans`) without static service-account JSON key files.
+#
+# Required environment variables on the collector host / workload:
+#   GOOGLE_CLOUD_PROJECT            Target GCP project ID hosting `obs_traces`
+#   GOOGLE_APPLICATION_CREDENTIALS  Path to WIF credential configuration JSON
+#                                   (generated via `gcloud iam workload-identity-pools
+#                                    create-cred-config` — contains no private key)
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 512
+    spike_limit_mib: 128
+
+  batch:
+    send_batch_size: 512
+    timeout: 5s
+
+  # Normalize enterprise attribution attributes expected by sql/ddl.sql (`agent_eval.otel_spans`).
+  # Downstream views resolve gcp.apphub.application.id -> apphub.application.id -> unregistered_app.
+  resource:
+    attributes:
+      - key: service.namespace
+        value: enterprise-agents
+        action: insert
+      - key: deployment.environment
+        value: production
+        action: insert
+
+exporters:
+  # Exports OTLP spans directly to Google Cloud Trace using Workload Identity Federation ADC.
+  # Cloud Trace links the span stream directly to BigQuery (`obs_traces._AllSpans`).
+  googlecloud:
+    project: ${env:GOOGLE_CLOUD_PROJECT}
+    trace:
+      attribute_mappings:
+        - key: gcp.apphub.application.id
+          replacement: gcp.apphub.application.id
+        - key: gen_ai.finops.traffic_type
+          replacement: gen_ai.finops.traffic_type
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+service:
+  extensions: [health_check]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, resource, batch]
+      exporters: [googlecloud]

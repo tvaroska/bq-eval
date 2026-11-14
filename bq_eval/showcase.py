@@ -224,7 +224,7 @@ def run_showcase_pipeline() -> ShowcaseRunArtifacts:
             "catalog-enrichment-agent": "CC-MERCH-CATALOG",
         },
         reserved_pt_capacity_tokens=100_000_000.0,
-        reserved_pt_Fixed_cost_usd=120.0,
+        reserved_pt_fixed_cost_usd=120.0,
     )
 
     off_peak_plan = plan_off_peak_eval_schedule(
@@ -275,6 +275,14 @@ def render_markdown_report(artifacts: ShowcaseRunArtifacts) -> str:
         else "NULL (Fail-Closed)"
     )
 
+    focus_lines = "\n".join(
+        f"| `{row.apphub_application_id}` | `{row.cost_center}` | "
+        f"{row.weighted_burndown_tokens:,.0f} | {row.utilization_share * 100:.1f}% | "
+        f"${row.utilized_pt_cost_usd:.2f} | ${row.unutilized_idle_capacity_tax_usd:.2f} | "
+        f"${row.payg_overflow_cost_usd:.2f} | ${row.total_allocated_cost_usd:.2f} |"
+        for row in artifacts.focus_chargeback
+    )
+
     return f"""# BQ Eval & FinOps Executive Scorecard (`bq-eval`)
 
 ## 1. Tier 1–3 Application Quality & Cost per Verified Outcome (`CPVO`)
@@ -300,6 +308,10 @@ def render_markdown_report(artifacts: ShowcaseRunArtifacts) -> str:
 
 ## 4. FOCUS 1.2 Two-Pool Chargeback & Off-Peak PT Water-Filling
 
+| Allocation Owner | Cost Center | Weighted Burndown | Share | Utilized PT | Idle Capacity Tax | PAYG Overflow | Total Allocated |
+| :--- | :--- | ---: | ---: | ---: | ---: | ---: | ---: |
+{focus_lines}
+
 - **Off-Peak PT Batch-Eval Coverage:** `{artifacts.off_peak_plan.zero_marginal_cost_coverage_pct:.1f}%` of `{artifacts.off_peak_plan.total_batch_eval_tokens_requested:,.0f}` batch eval tokens scheduled into zero-marginal-cost PT valleys (saving `${artifacts.off_peak_plan.avoided_payg_cost_usd:.2f}`).
 """
 
@@ -310,6 +322,18 @@ def write_html_scorecard(artifacts: ShowcaseRunArtifacts, output_path: Path) -> 
     catalog = artifacts.summaries["catalog-enrichment-agent"]
     roi = artifacts.eval_roi
     dil = artifacts.cache_dilution
+
+    focus_html_rows = "\n          ".join(
+        f"<tr><td><code>{row.apphub_application_id}</code></td>"
+        f"<td><code>{row.cost_center}</code></td>"
+        f"<td>{row.weighted_burndown_tokens:,.0f}</td>"
+        f"<td>{row.utilization_share * 100:.1f}%</td>"
+        f"<td>${row.utilized_pt_cost_usd:.2f}</td>"
+        f"<td>${row.unutilized_idle_capacity_tax_usd:.2f}</td>"
+        f"<td>${row.payg_overflow_cost_usd:.2f}</td>"
+        f"<td><strong>${row.total_allocated_cost_usd:.2f}</strong></td></tr>"
+        for row in artifacts.focus_chargeback
+    )
 
     html_doc = f"""<!DOCTYPE html>
 <html lang="en">
@@ -480,6 +504,27 @@ def write_html_scorecard(artifacts: ShowcaseRunArtifacts, output_path: Path) -> 
       <p style="margin-top: 16px; color: var(--muted); font-size: 0.88rem;">
         <strong>Prefix-Cache Diagnostics:</strong> Observed hit rate {dil.observed_cache_hit_ratio * 100:.1f}% across {dil.distinct_prompt_variants} prompt variants. {dil.recommendation}
       </p>
+    </div>
+
+    <div class="card" style="margin-top: 24px;">
+      <h2>FOCUS 1.2 Two-Pool Chargeback Allocation</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Allocation Owner</th>
+            <th>Cost Center</th>
+            <th>Weighted Burndown</th>
+            <th>Share</th>
+            <th>Utilized PT</th>
+            <th>Idle Capacity Tax</th>
+            <th>PAYG Overflow</th>
+            <th>Total Allocated</th>
+          </tr>
+        </thead>
+        <tbody>
+          {focus_html_rows}
+        </tbody>
+      </table>
     </div>
   </div>
 </body>

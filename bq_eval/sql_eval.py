@@ -81,12 +81,19 @@ def _escape_googlesql_string_literal(text: str) -> str:
     )
 
 
+JUDGE_MODEL_ENDPOINTS: dict[str, str] = {
+    "gemini-3.8-flash": "gemini_3_8_flash_judge",
+    "gemini-4-argon": "gemini_4_argon_judge",
+}
+
+
 def build_ai_generate_table_judge_sql(
     project_id: str,
     dataset_id: str = "agent_eval",
     rubric_id: str = "groundedness_4pt_v1",
     canary_sample_pct: int = 5,
     run_id: str | None = None,
+    judge_model: str | None = None,
 ) -> str:
     """Build production BigQuery `AI.GENERATE_TABLE` SQL query (EVAL-P08).
 
@@ -108,12 +115,18 @@ def build_ai_generate_table_judge_sql(
     valid_run_id = _validate_run_id(run_id)
 
     rubric = CANONICAL_RUBRICS[rubric_id]
-    remote_model = (
-        "gemini_3_8_flash_judge"
-        if rubric.judge_model == "gemini-3.8-flash"
-        else "gemini_4_argon_judge"
+    selected_model = judge_model or rubric.judge_model
+    if selected_model not in JUDGE_MODEL_ENDPOINTS:
+        raise ValueError(
+            f"Unsupported judge_model {selected_model!r}: expected one of {sorted(JUDGE_MODEL_ENDPOINTS)}"
+        )
+    remote_model = JUDGE_MODEL_ENDPOINTS[selected_model]
+    effective_rubric = (
+        rubric if selected_model == rubric.judge_model else rubric.model_copy(update={"judge_model": selected_model})
     )
-    system_prompt = _escape_googlesql_string_literal(build_autorater_system_prompt(rubric))
+    system_prompt = _escape_googlesql_string_literal(
+        build_autorater_system_prompt(effective_rubric)
+    )
     escaped_prompt = escape_sql_xml_expr("p.user_prompt")
     escaped_context = escape_sql_xml_expr("p.retrieved_context")
     escaped_response = escape_sql_xml_expr("p.final_response")
@@ -163,7 +176,7 @@ SELECT
   outcome_id,
   apphub_application_id,
   '{rubric.rubric_id}' AS rubric_id,
-  '{rubric.judge_model}' AS judge_model,
+  '{selected_model}' AS judge_model,
   sampling_stratum,
   rule0_pass,
   reasoning_trace,

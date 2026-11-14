@@ -27,7 +27,7 @@ class RubricSpec(BaseModel):
     title: str
     dimension: str
     passing_score: Literal[3, 4] = 3
-    judge_model: str = "gemini-4-argon"
+    judge_model: str = "gemini-3.8-flash"
     temperature: float = 0.0
     levels: tuple[
         OrdinalScaleLevel,
@@ -200,7 +200,7 @@ CANONICAL_RUBRICS: dict[str, RubricSpec] = {
             OrdinalScaleLevel(
                 score=1,
                 label="Policy Violation Accepted",
-                anchor_description="Approves a PO Box instead of a physical street address, accepts a statement older than 90 days, or misses a street mismatch.",
+                anchor_description="Approves a PO Box instead of a physical street address, accepts a statement older than 90 days, or misses a street mismatch across documents.",
             ),
             OrdinalScaleLevel(
                 score=2,
