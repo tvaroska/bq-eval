@@ -33,10 +33,13 @@ CREATE TABLE IF NOT EXISTS `agent_eval_seed.otel_spans` (
   trace_id STRING NOT NULL,
   span_id STRING NOT NULL,
   parent_span_id STRING,
+  span_name STRING NOT NULL,
   start_time TIMESTAMP NOT NULL,
   end_time TIMESTAMP NOT NULL,
+  receive_time TIMESTAMP NOT NULL,
   latency_ms FLOAT64 NOT NULL,
   status_code STRING NOT NULL,
+  otel_span_kind STRING NOT NULL,
   span_kind STRING NOT NULL,
   service_name STRING NOT NULL,
   gcp_apphub_application_id STRING,
@@ -52,6 +55,12 @@ CREATE TABLE IF NOT EXISTS `agent_eval_seed.otel_spans` (
   tool_call_status STRING,
   rule0_pass BOOL NOT NULL,
   finops_traffic_type STRING NOT NULL,
+  outcome_id STRING,
+  outcome_owner STRING,
+  source_mode STRING,
+  skill_id STRING,
+  skill_version STRING,
+  entity_id STRING,
   attributes JSON
 )
 PARTITION BY DATE(start_time)
@@ -475,6 +484,7 @@ shifted_spans AS (
         '-', FORMAT_TIMESTAMP('%Y%m%d', CURRENT_TIMESTAMP())
       )
     END AS parent_span_id,
+    COALESCE(s.tool_name, s.span_kind) AS span_name,
     TIMESTAMP_ADD(
       TIMESTAMP_SUB(
         CURRENT_TIMESTAMP(),
@@ -489,8 +499,16 @@ shifted_spans AS (
       ),
       INTERVAL CAST(s.span_offset_ms + s.latency_ms AS INT64) MILLISECOND
     ) AS end_time,
+    TIMESTAMP_ADD(
+      TIMESTAMP_SUB(
+        CURRENT_TIMESTAMP(),
+        INTERVAL (r.base_age_minutes * 60 + s.template_idx * 7) SECOND
+      ),
+      INTERVAL CAST(s.span_offset_ms + s.latency_ms AS INT64) MILLISECOND
+    ) AS receive_time,
     s.latency_ms,
     s.status_code,
+    IF(s.parent_span_id IS NULL, 'SPAN_KIND_SERVER', 'SPAN_KIND_INTERNAL') AS otel_span_kind,
     s.span_kind,
     s.service_name,
     s.gcp_apphub_application_id,
@@ -506,6 +524,16 @@ shifted_spans AS (
     s.tool_call_status,
     s.rule0_pass,
     s.finops_traffic_type,
+    CONCAT(
+      'out-', s.trace_id,
+      '-r', LPAD(CAST(r.replica_id AS STRING), 3, '0'),
+      '-', FORMAT_TIMESTAMP('%Y%m%d', CURRENT_TIMESTAMP())
+    ) AS outcome_id,
+    s.gcp_apphub_application_id AS outcome_owner,
+    'SEED_DEMO' AS source_mode,
+    'default-skill' AS skill_id,
+    '1.0.0' AS skill_version,
+    CONCAT('entity-', CAST(s.template_idx AS STRING), '-r', LPAD(CAST(r.replica_id AS STRING), 3, '0')) AS entity_id,
     s.attributes
   FROM `agent_eval_seed.seed_otel_spans` AS s
   CROSS JOIN replicas AS r

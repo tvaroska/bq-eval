@@ -184,9 +184,10 @@ FROM `agent_eval.v_step1_trace_eval`
 GROUP BY apphub_application_id, business_unit, cost_center;
 
 -- -----------------------------------------------------------------------------
--- View 1D: Business Outcomes Closed (`v_outcomes` — EVAL-P11 Rule 3)
+-- View 1D: Business Outcomes Closed (`v_outcomes` — EVAL-P11)
 --   * Reads zero-duration spans where span_name = 'outcome.closed'
---   * Applies per-workflow verified definition (Decision 19)
+--   * Domain-agnostic: verified when outcome.status = 'succeeded' and explicit
+--     outcome.verified (or Rule 0 pass when absent) is TRUE
 -- -----------------------------------------------------------------------------
 CREATE OR REPLACE VIEW `agent_eval.v_outcomes` AS
 SELECT
@@ -224,26 +225,10 @@ SELECT
   LOGICAL_AND(
     CASE
       WHEN COALESCE(JSON_VALUE(s.attributes, '$."outcome.status"'), 'succeeded') != 'succeeded' THEN FALSE
-      WHEN COALESCE(s.outcome_owner, s.gcp_apphub_application_id, '') = 'kyc-address-verification' THEN
-        COALESCE(
-          SAFE_CAST(JSON_VALUE(s.attributes, '$."outcome.verified"') AS BOOL),
-          SAFE_CAST(JSON_VALUE(s.attributes, '$."human_accepted"') AS BOOL),
-          SAFE_CAST(JSON_VALUE(s.attributes, '$."step2_judge_pass"') AS BOOL),
-          s.rule0_pass
-        )
-      WHEN COALESCE(s.outcome_owner, s.gcp_apphub_application_id, '') = 'meridian-loan-consolidation' THEN
-        COALESCE(
-          SAFE_CAST(JSON_VALUE(s.attributes, '$."outcome.verified"') AS BOOL),
-          SAFE_CAST(JSON_VALUE(s.attributes, '$."ledger_locked"') AS BOOL),
-          TRUE
-        )
-      WHEN COALESCE(s.outcome_owner, s.gcp_apphub_application_id, '') = 'benefits-rfp-procurement' THEN
-        COALESCE(
-          SAFE_CAST(JSON_VALUE(s.attributes, '$."outcome.verified"') AS BOOL),
-          SAFE_CAST(JSON_VALUE(s.attributes, '$."schema_valid_quotes"') AS BOOL),
-          TRUE
-        )
-      ELSE COALESCE(SAFE_CAST(JSON_VALUE(s.attributes, '$."outcome.verified"') AS BOOL), s.rule0_pass)
+      ELSE COALESCE(
+        SAFE_CAST(JSON_VALUE(s.attributes, '$."outcome.verified"') AS BOOL),
+        s.rule0_pass
+      )
     END
   ) AS is_verified
 FROM `agent_eval.otel_spans` AS s
@@ -252,14 +237,15 @@ WHERE s.span_name = 'outcome.closed'
 GROUP BY outcome_id;
 
 -- -----------------------------------------------------------------------------
--- View 1E: Estimated Cloud Run Compute & Storage Infra Cost per Outcome (`v_infra_cost_estimate`)
---   * Decision 15: Server-span duration * list price * configured vCPU/GiB + per-workflow storage
+-- View 1E: Estimated Compute & Storage Infra Cost per Outcome (`v_infra_cost_estimate`)
+--   * Strictly 1 row per outcome_id so downstream multi-agent/mode joins never fan out
+--   * Server-span duration * list price * configured vCPU/GiB + optional outcome.storage_usd
 -- -----------------------------------------------------------------------------
 CREATE OR REPLACE VIEW `agent_eval.v_infra_cost_estimate` AS
 WITH server_span_compute AS (
   SELECT
     w.outcome_id,
-    COALESCE(w.outcome_owner, w.apphub_application_id) AS apphub_application_id,
+    ANY_VALUE(COALESCE(w.outcome_owner, w.apphub_application_id)) AS apphub_application_id,
     SUM(w.latency_ms / 1000.0) AS total_server_seconds,
     -- Cloud Run Tier 1 list price proxy: 2 vCPU * $0.00002400/vCPU-s + 2 GiB * $0.00000250/GiB-s = $0.000053/s
     SUM(
@@ -268,38 +254,31 @@ WITH server_span_compute AS (
         (COALESCE(SAFE_CAST(JSON_VALUE(w.attributes, '$."service.vcpu"') AS FLOAT64), 2.0) * 0.00002400)
         + (COALESCE(SAFE_CAST(JSON_VALUE(w.attributes, '$."service.gib"') AS FLOAT64), 2.0) * 0.00000250)
       )
-    ) AS estimated_compute_usd
+    ) AS estimated_compute_usd,
+    COALESCE(
+      MAX(SAFE_CAST(JSON_VALUE(w.attributes, '$."outcome.storage_usd"') AS FLOAT64)),
+      0.000020
+    ) AS estimated_storage_usd
   FROM `agent_eval.v_step1_trace_waterfall` AS w
   WHERE w.outcome_id IS NOT NULL
     AND w.otel_span_kind IN ('2', 'SPAN_KIND_SERVER', 'SPAN_KIND_INTERNAL')
     AND COALESCE(w.apphub_application_id, '') NOT LIKE '%external%'
-  GROUP BY w.outcome_id, apphub_application_id
+  GROUP BY w.outcome_id
 )
 SELECT
   c.outcome_id,
   c.apphub_application_id,
   c.total_server_seconds,
   c.estimated_compute_usd,
-  CASE
-    WHEN c.apphub_application_id = 'meridian-loan-consolidation' THEN 0.000400 -- ~4 MB * 7yr Archive WORM vault
-    WHEN c.apphub_application_id = 'benefits-rfp-procurement' THEN 0.000120 -- ~2 MB * 3yr Standard/Archive
-    WHEN c.apphub_application_id = 'kyc-address-verification' THEN 0.000040 -- ~0.5 MB * 5yr Archive KYC retention
-    ELSE 0.000020
-  END AS estimated_storage_usd,
-  c.estimated_compute_usd + CASE
-    WHEN c.apphub_application_id = 'meridian-loan-consolidation' THEN 0.000400
-    WHEN c.apphub_application_id = 'benefits-rfp-procurement' THEN 0.000120
-    WHEN c.apphub_application_id = 'kyc-address-verification' THEN 0.000040
-    ELSE 0.000020
-  END AS estimated_infra_cost_usd
+  c.estimated_storage_usd,
+  c.estimated_compute_usd + c.estimated_storage_usd AS estimated_infra_cost_usd
 FROM server_span_compute AS c;
 
 -- -----------------------------------------------------------------------------
 -- View 1F: Cost per Verified Outcome Across Multi-Agent Traces (`v_cost_per_verified_outcome`)
---   * EVAL-P11 Rule 4 + Decision 15 + Decision 19:
---   * Groups model spend by outcome_id (excluding external counterparty apps),
+--   * EVAL-P11: Groups model spend by outcome_id (excluding external counterparty apps),
 --     keeps failed/abandoned/escalated outcomes in numerator (no survivor bias),
---     and slices by apphub_application_id, source_mode, and agent_name.
+--     and proportionally allocates 1.0x outcome infra cost across multi-agent/mode slices.
 -- -----------------------------------------------------------------------------
 CREATE OR REPLACE VIEW `agent_eval.v_cost_per_verified_outcome` AS
 WITH outcome_spans AS (
@@ -324,13 +303,13 @@ WITH outcome_spans AS (
   WHERE w.outcome_id IS NOT NULL
     AND COALESCE(w.apphub_application_id, '') NOT LIKE '%external%'
     AND COALESCE(JSON_VALUE(w.attributes, '$."apphub.external"'), 'false') != 'true'
-  GROUP BY
-    w.outcome_id,
-    apphub_application_id,
-    source_mode,
-    w.agent_name,
-    outcome_status,
-    is_verified
+  GROUP BY 1, 2, 3, 4, 5, 6
+),
+weighted_outcome_spans AS (
+  SELECT
+    os.*,
+    SUM(os.span_count) OVER (PARTITION BY os.outcome_id) AS outcome_total_spans
+  FROM outcome_spans AS os
 )
 SELECT
   os.apphub_application_id,
@@ -345,18 +324,26 @@ SELECT
   SUM(os.thinking_tokens) AS total_thinking_tokens,
   SUM(os.measured_model_cost_usd) AS measured_model_cost_usd,
   SUM(os.measured_judge_cost_usd) AS measured_judge_cost_usd,
-  SUM(COALESCE(inf.estimated_infra_cost_usd, 0.0)) AS estimated_infra_cost_usd,
+  SUM(COALESCE(inf.estimated_infra_cost_usd, 0.0) * COALESCE(SAFE_DIVIDE(os.span_count, os.outcome_total_spans), 0.0)) AS estimated_infra_cost_usd,
   SUM(os.measured_model_cost_usd + os.measured_judge_cost_usd) AS total_ai_cost_usd,
-  SUM(os.measured_model_cost_usd + os.measured_judge_cost_usd + COALESCE(inf.estimated_infra_cost_usd, 0.0)) AS total_cost_with_infra_usd,
+  SUM(
+    os.measured_model_cost_usd
+    + os.measured_judge_cost_usd
+    + COALESCE(inf.estimated_infra_cost_usd, 0.0) * COALESCE(SAFE_DIVIDE(os.span_count, os.outcome_total_spans), 0.0)
+  ) AS total_cost_with_infra_usd,
   SAFE_DIVIDE(
     SUM(os.measured_model_cost_usd + os.measured_judge_cost_usd),
     NULLIF(COUNT(DISTINCT IF(os.is_verified, os.outcome_id, NULL)), 0)
   ) AS cost_per_verified_outcome_ai_usd,
   SAFE_DIVIDE(
-    SUM(os.measured_model_cost_usd + os.measured_judge_cost_usd + COALESCE(inf.estimated_infra_cost_usd, 0.0)),
+    SUM(
+      os.measured_model_cost_usd
+      + os.measured_judge_cost_usd
+      + COALESCE(inf.estimated_infra_cost_usd, 0.0) * COALESCE(SAFE_DIVIDE(os.span_count, os.outcome_total_spans), 0.0)
+    ),
     NULLIF(COUNT(DISTINCT IF(os.is_verified, os.outcome_id, NULL)), 0)
   ) AS cost_per_verified_outcome_usd
-FROM outcome_spans AS os
+FROM weighted_outcome_spans AS os
 LEFT JOIN `agent_eval.v_infra_cost_estimate` AS inf
   ON os.outcome_id = inf.outcome_id
 GROUP BY
@@ -365,7 +352,7 @@ GROUP BY
   os.agent_name;
 
 -- -----------------------------------------------------------------------------
--- View 1G: Outcome Attribution Coverage Gate (`v_attribution_coverage` — EVAL-P11 Rule 4)
+-- View 1G: Outcome Attribution Coverage Gate (`v_attribution_coverage` — EVAL-P11)
 --   * Reports attributed vs. unattributed (outcome_id IS NULL) model spend
 --   * Gate: attribution_coverage_pct >= 99.0 for registered applications
 -- -----------------------------------------------------------------------------
@@ -404,9 +391,10 @@ FROM `agent_eval.v_step1_trace_waterfall` AS w
 GROUP BY w.apphub_application_id;
 
 -- -----------------------------------------------------------------------------
--- View 1H: Day-1 vs. Day-2 Skill Lineage ROI (`v_skill_lineage_roi` — Decision 6 & 20)
---   * Compares Day-1 (v1.0.0) vs. Day-2 (v1.1.0 after Agent Gym) cost and human reviews
+-- View 1H: Day-1 vs. Day-2 Skill Lineage ROI (`v_skill_lineage_roi`)
+--   * Compares Day-1 (v1.0.0) vs. Day-2 (v1.1.0+ compiled skills) cost and human reviews
 --     per verified outcome grouped by outcome_id / outcome_parent_id.
+--   * Proportionally allocates 1.0x outcome infra cost across multi-skill outcomes.
 -- -----------------------------------------------------------------------------
 CREATE OR REPLACE VIEW `agent_eval.v_skill_lineage_roi` AS
 WITH deal_outcomes AS (
@@ -414,13 +402,13 @@ WITH deal_outcomes AS (
     COALESCE(o.outcome_parent_id, w.outcome_id) AS deal_outcome_id,
     w.outcome_id,
     COALESCE(o.outcome_owner, w.outcome_owner, w.apphub_application_id) AS apphub_application_id,
-    COALESCE(w.skill_id, o.skill_id, 'loan-payoff-statement') AS skill_id,
+    COALESCE(w.skill_id, o.skill_id, 'default-skill') AS skill_id,
     COALESCE(w.skill_version, o.skill_version, '1.0.0') AS skill_version,
     COALESCE(o.is_verified, FALSE) AS is_verified,
+    COUNT(*) AS span_count,
     LOGICAL_OR(w.finops_traffic_type = 'conflict_escalation' OR w.model_name = 'gemini-4-argon') AS escalated_to_argon,
     COUNTIF(
       COALESCE(JSON_VALUE(w.attributes, '$."hitl.review"'), '') = 'true'
-      OR w.span_name LIKE '%overwatch%'
       OR w.finops_traffic_type = 'conflict_escalation'
     ) AS human_review_spans,
     SUM(CASE WHEN w.finops_traffic_type != 'agent_gym_eval' THEN w.span_cost_usd ELSE 0.0 END) AS deal_model_cost_usd,
@@ -429,13 +417,13 @@ WITH deal_outcomes AS (
   LEFT JOIN `agent_eval.v_outcomes` AS o
     ON w.outcome_id = o.outcome_id
   WHERE w.outcome_id IS NOT NULL
-  GROUP BY
-    deal_outcome_id,
-    w.outcome_id,
-    apphub_application_id,
-    skill_id,
-    skill_version,
-    is_verified
+  GROUP BY 1, 2, 3, 4, 5, 6
+),
+weighted_deal_outcomes AS (
+  SELECT
+    d.*,
+    SUM(d.span_count) OVER (PARTITION BY d.outcome_id) AS outcome_total_spans
+  FROM deal_outcomes AS d
 )
 SELECT
   d.apphub_application_id,
@@ -455,13 +443,16 @@ SELECT
     NULLIF(COUNT(DISTINCT IF(d.is_verified, d.outcome_id, NULL)), 0)
   ) AS human_reviews_per_verified_outcome,
   SUM(d.deal_model_cost_usd) AS measured_model_cost_usd,
-  SUM(COALESCE(inf.estimated_infra_cost_usd, 0.0)) AS estimated_infra_cost_usd,
+  SUM(COALESCE(inf.estimated_infra_cost_usd, 0.0) * COALESCE(SAFE_DIVIDE(d.span_count, d.outcome_total_spans), 0.0)) AS estimated_infra_cost_usd,
   SUM(d.agent_gym_compile_cost_usd) AS one_time_skill_compile_cost_usd,
   SAFE_DIVIDE(
-    SUM(d.deal_model_cost_usd + COALESCE(inf.estimated_infra_cost_usd, 0.0)),
+    SUM(
+      d.deal_model_cost_usd
+      + COALESCE(inf.estimated_infra_cost_usd, 0.0) * COALESCE(SAFE_DIVIDE(d.span_count, d.outcome_total_spans), 0.0)
+    ),
     NULLIF(COUNT(DISTINCT IF(d.is_verified, d.outcome_id, NULL)), 0)
   ) AS cost_per_verified_outcome_usd
-FROM deal_outcomes AS d
+FROM weighted_deal_outcomes AS d
 LEFT JOIN `agent_eval.v_infra_cost_estimate` AS inf
   ON d.outcome_id = inf.outcome_id
 GROUP BY

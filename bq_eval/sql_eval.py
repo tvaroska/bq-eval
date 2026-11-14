@@ -51,6 +51,14 @@ def escape_sql_xml_expr(column_expr: str) -> str:
     )
 
 
+def _validate_sql_identifier(value: str, field_name: str, *, allow_hyphen: bool = False) -> str:
+    cleaned = value.strip()
+    pattern = r"[a-zA-Z0-9_-]+" if allow_hyphen else r"[a-zA-Z0-9_]+"
+    if not cleaned or not re.fullmatch(pattern, cleaned):
+        raise ValueError(f"Invalid {field_name} {value!r}: must match ^{pattern}$")
+    return cleaned
+
+
 def _validate_run_id(run_id: str | None) -> str | None:
     if run_id is None:
         return None
@@ -60,6 +68,17 @@ def _validate_run_id(run_id: str | None) -> str | None:
     if not re.fullmatch(r"[a-zA-Z0-9_.-]+", cleaned):
         raise ValueError(f"Invalid run_id {run_id!r}: must match ^[a-zA-Z0-9_.-]+$")
     return cleaned
+
+
+def _escape_googlesql_string_literal(text: str) -> str:
+    """Escape backslashes, single quotes, and newlines for a single-line GoogleSQL literal."""
+    return (
+        text.replace("\\", "\\\\")
+        .replace("'", "\\'")
+        .replace("\r\n", "\\n")
+        .replace("\n", "\\n")
+        .replace("\r", "\\n")
+    )
 
 
 def build_ai_generate_table_judge_sql(
@@ -77,8 +96,11 @@ def build_ai_generate_table_judge_sql(
        optionally scoped to a specific fleet `run_id`.
     2. Nested SQL `REPLACE` XML escaping inside `<untrusted_text>` blocks so prompt payloads
        cannot break out of XML delimiters.
-    3. CoT-first output struct: `reasoning_trace STRING, ordinal_score INT64, binary_pass BOOL`.
+    3. CoT-first output struct: `reasoning_trace STRING NOT NULL, ordinal_score INT64 NOT NULL`
+       with deterministic `binary_pass` thresholding and judge token estimates.
     """
+    valid_project = _validate_sql_identifier(project_id, "project_id", allow_hyphen=True)
+    valid_dataset = _validate_sql_identifier(dataset_id, "dataset_id")
     if rubric_id not in CANONICAL_RUBRICS:
         raise ValueError(f"Unknown rubric_id: {rubric_id}")
     if not (0 <= canary_sample_pct <= 100):
@@ -91,7 +113,7 @@ def build_ai_generate_table_judge_sql(
         if rubric.judge_model == "gemini-3.8-flash"
         else "gemini_4_argon_judge"
     )
-    system_prompt = build_autorater_system_prompt(rubric).replace("'", "\\'")
+    system_prompt = _escape_googlesql_string_literal(build_autorater_system_prompt(rubric))
     escaped_prompt = escape_sql_xml_expr("p.user_prompt")
     escaped_context = escape_sql_xml_expr("p.retrieved_context")
     escaped_response = escape_sql_xml_expr("p.final_response")
@@ -99,13 +121,13 @@ def build_ai_generate_table_judge_sql(
     run_filter = (
         f"\n    AND t.outcome_id IN (\n"
         f"      SELECT outcome_id\n"
-        f"      FROM `{project_id}.{dataset_id}.fleet_case_outcomes`\n"
+        f"      FROM `{valid_project}.{valid_dataset}.fleet_case_outcomes`\n"
         f"      WHERE run_id = '{valid_run_id}' AND outcome_id IS NOT NULL\n"
         f"    )"
         if valid_run_id
         else ""
     )
-    eval_run_col = f"  '{valid_run_id}' AS eval_run_id,\n  outcome_id,\n" if valid_run_id else ""
+    eval_run_col = f"  '{valid_run_id}' AS eval_run_id,\n" if valid_run_id else ""
 
     return f"""-- Tier 2 Stratified AI.GENERATE_TABLE Judge Execution ({rubric.rubric_id})
 WITH candidate_traces AS (
@@ -125,8 +147,8 @@ WITH candidate_traces AS (
       'Retrieved Context:\\n<untrusted_text>\\n', {escaped_context}, '\\n</untrusted_text>\\n\\n',
       'Agent Final Response:\\n<untrusted_text>\\n', {escaped_response}, '\\n</untrusted_text>'
     ) AS prompt
-  FROM `{project_id}.{dataset_id}.v_trace_sql_evaluation` AS t
-  INNER JOIN `{project_id}.{dataset_id}.trace_payloads` AS p
+  FROM `{valid_project}.{valid_dataset}.v_trace_sql_evaluation` AS t
+  LEFT JOIN `{valid_project}.{valid_dataset}.trace_payloads` AS p
     ON t.trace_id = p.trace_id
   WHERE (
     NOT t.rule0_pass
@@ -138,6 +160,7 @@ WITH candidate_traces AS (
 SELECT
   GENERATE_UUID() AS eval_id,
 {eval_run_col}  trace_id,
+  outcome_id,
   apphub_application_id,
   '{rubric.rubric_id}' AS rubric_id,
   '{rubric.judge_model}' AS judge_model,
@@ -146,12 +169,15 @@ SELECT
   reasoning_trace,
   ordinal_score,
   (ordinal_score >= {rubric.passing_score}) AS binary_pass,
+  DIV(LENGTH(prompt), 4) AS judge_input_tokens,
+  DIV(LENGTH(COALESCE(reasoning_trace, '')), 4) + 12 AS judge_output_tokens,
+  0 AS judge_thinking_tokens,
   CURRENT_TIMESTAMP() AS evaluated_at
 FROM AI.GENERATE_TABLE(
-  MODEL `{project_id}.{dataset_id}.{remote_model}`,
+  MODEL `{valid_project}.{valid_dataset}.{remote_model}`,
   TABLE candidate_traces,
   STRUCT(
-    'reasoning_trace STRING NOT NULL, ordinal_score INT64 NOT NULL, binary_pass BOOL NOT NULL' AS output_schema,
+    'reasoning_trace STRING NOT NULL, ordinal_score INT64 NOT NULL' AS output_schema,
     '{{"generation_config": {{"temperature": 0.0, "max_output_tokens": 2048, "thinking_config": {{"thinking_level": "LOW"}}}}}}' AS model_params
   )
 );
@@ -188,6 +214,9 @@ def build_ai_evaluate_agent_sql(
     gates (`step1_pass = TRUE` and `NOT has_tool_loop`) plus deterministic `FARM_FINGERPRINT`
     sampling before invoking `AI.EVALUATE_AGENT`.
     """
+    valid_project = _validate_sql_identifier(project_id, "project_id", allow_hyphen=True)
+    valid_dataset = _validate_sql_identifier(dataset_id, "dataset_id")
+    valid_view = _validate_sql_identifier(eval_view, "eval_view")
     if not managed_metrics:
         raise ValueError("At least one managed metric is required.")
     unknown = [m for m in managed_metrics if m not in MANAGED_EVALUATE_AGENT_METRICS]
@@ -204,7 +233,7 @@ def build_ai_evaluate_agent_sql(
     if valid_run_id:
         predicates.append(
             f"trace_id IN ("
-            f"SELECT trace_id FROM `{project_id}.{dataset_id}.fleet_case_outcomes` "
+            f"SELECT trace_id FROM `{valid_project}.{valid_dataset}.fleet_case_outcomes` "
             f"WHERE run_id = '{valid_run_id}' AND trace_id IS NOT NULL)"
         )
     sample_clause = f"\n    WHERE {' AND '.join(predicates)}" if predicates else ""
@@ -212,7 +241,7 @@ def build_ai_evaluate_agent_sql(
     return f"""-- Tier 2 Engine B: Step-1 Pre-Filtered AI.EVALUATE_AGENT Execution ({canary_sample_pct}% Sample)
 WITH candidate_turns AS (
   SELECT *
-  FROM `{project_id}.{dataset_id}.{eval_view}`{sample_clause}
+  FROM `{valid_project}.{valid_dataset}.{valid_view}`{sample_clause}
 )
 SELECT *
 FROM AI.EVALUATE_AGENT(

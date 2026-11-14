@@ -107,7 +107,7 @@ FROM AI.GENERATE_TABLE(
   MODEL `agent_eval.gemini_3_8_flash_judge`,
   (
     SELECT *
-    FROM `agent_eval.v_step2_trace_rubric_prompts`
+    FROM `agent_eval.v_step2_all_trace_rubric_prompts`
     WHERE rubric_id = 'groundedness_4pt_v1'
       AND trace_start_time >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR)
       AND (

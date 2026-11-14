@@ -483,29 +483,37 @@ def _transpile_bq_view_to_sqlite(view_sql: str) -> str:
         flags=re.IGNORECASE,
     ).rstrip(";")
     body = body.replace("`agent_eval.", "`").replace("agent_eval.", "")
-    body = re.sub(
-        r"SAFE_CAST\s*\((.*?)\s+AS\s+FLOAT64\)",
-        r"CAST(\1 AS REAL)",
-        body,
-        flags=re.IGNORECASE | re.DOTALL,
-    )
-    body = re.sub(
-        r"SAFE_CAST\s*\((.*?)\s+AS\s+BOOL\)",
-        r"CAST(\1 AS INTEGER)",
-        body,
-        flags=re.IGNORECASE | re.DOTALL,
-    )
-    body = re.sub(
-        r"SAFE_DIVIDE\s*\(([^,]+),\s*([^)]+)\)",
-        r"CASE WHEN (\2) IS NULL OR (\2) = 0 THEN NULL ELSE CAST(\1 AS REAL) / (\2) END",
-        body,
-        flags=re.IGNORECASE,
-    )
-    body = re.sub(r"LOGICAL_OR\s*\(", "MAX(", body, flags=re.IGNORECASE)
-    body = re.sub(r"LOGICAL_AND\s*\(", "MIN(", body, flags=re.IGNORECASE)
-    body = re.sub(r"ANY_VALUE\s*\(", "MAX(", body, flags=re.IGNORECASE)
-    sql_out = sqlglot.transpile(body, read="bigquery", write="sqlite")[0]
-    return sql_out
+    ast_node = sqlglot.parse_one(body, read="bigquery")
+
+    def _rewrite_node(node: exp.Expression) -> exp.Expression:
+        if isinstance(node, exp.SafeDivide):
+            num = node.this.copy()
+            den = node.expression.copy()
+            return sqlglot.parse_one(
+                f"CASE WHEN ({den.sql('sqlite')}) IS NULL OR ({den.sql('sqlite')}) = 0 "
+                f"THEN NULL ELSE CAST(({num.sql('sqlite')}) AS REAL) / ({den.sql('sqlite')}) END",
+                read="sqlite",
+            )
+        if isinstance(node, exp.TryCast):
+            return exp.Cast(this=node.this, to=node.to)
+        if isinstance(node, exp.AnyValue):
+            return exp.Max(this=node.this)
+        if isinstance(node, exp.LogicalOr):
+            return exp.Max(this=node.this)
+        if isinstance(node, exp.LogicalAnd):
+            return exp.Min(this=node.this)
+        if isinstance(node, exp.Anonymous):
+            upper = node.name.upper()
+            if upper == "LOGICAL_OR" and node.expressions:
+                return exp.Max(this=node.expressions[0])
+            if upper == "LOGICAL_AND" and node.expressions:
+                return exp.Min(this=node.expressions[0])
+            if upper == "ANY_VALUE" and node.expressions:
+                return exp.Max(this=node.expressions[0])
+        return node
+
+    transformed = ast_node.transform(_rewrite_node)
+    return transformed.sql(dialect="sqlite")
 
 
 def test_multi_key_outcome_fanout_exact_1x_infra_and_judge_cost() -> None:

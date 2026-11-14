@@ -12,8 +12,6 @@
     "ruff:S",
     "ruff:W"
   ],
-  "oversized_files": {
-    "bq_eval/loadgen.py": 1120
-  },
+  "oversized_files": {},
   "narration_comments": 8
 }

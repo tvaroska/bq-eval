@@ -100,10 +100,14 @@ SELECT
 
 -- -----------------------------------------------------------------------------
 -- 3. View 2A: XML-Escaped Trace × Rubric Evaluation Prompts
---   * LEFT JOINs Step-1 passing traces with 1-row-per-trace_id trace_payloads
---     so 0-token Path-A traces are preserved and Step-1 rejects are not re-judged
+--   * `v_step2_all_trace_rubric_prompts` preserves BOTH passing and Step-1 failing
+--     traces (for error-tail diagnosis and canary+error views).
+--   * `v_step2_trace_rubric_prompts` filters `step1_pass = TRUE` so routine
+--     Step-2 semantic scoring skips deterministic `$0` rejects.
+--   * LEFT JOINs with 1-row-per-trace_id `trace_payloads` so 0-token structured
+--     traces are never dropped.
 -- -----------------------------------------------------------------------------
-CREATE OR REPLACE VIEW `agent_eval.v_step2_trace_rubric_prompts` AS
+CREATE OR REPLACE VIEW `agent_eval.v_step2_all_trace_rubric_prompts` AS
 SELECT
   t.trace_id,
   t.outcome_id,
@@ -137,8 +141,12 @@ SELECT
 FROM `agent_eval.v_step1_trace_eval` AS t
 LEFT JOIN `agent_eval.trace_payloads` AS p
   ON t.trace_id = p.trace_id
-CROSS JOIN `agent_eval.rubrics` AS r
-WHERE t.step1_pass = TRUE;
+CROSS JOIN `agent_eval.rubrics` AS r;
+
+CREATE OR REPLACE VIEW `agent_eval.v_step2_trace_rubric_prompts` AS
+SELECT *
+FROM `agent_eval.v_step2_all_trace_rubric_prompts`
+WHERE step1_pass = TRUE;
 
 -- -----------------------------------------------------------------------------
 -- 3B. Ready-to-Inspect Slice Views for Step 2 (10%) & Step 2.5 (5%, Last 1h)
@@ -209,7 +217,7 @@ SELECT
   rubric_id,
   judge_model,
   prompt
-FROM `agent_eval.v_step2_trace_rubric_prompts`
+FROM `agent_eval.v_step2_all_trace_rubric_prompts`
 WHERE rubric_id = 'groundedness_4pt_v1'
   AND trace_start_time >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR)
   AND (
@@ -219,57 +227,59 @@ WHERE rubric_id = 'groundedness_4pt_v1'
 
 -- =============================================================================
 -- 4. Static SQL Example 2A: Run Stateless Eval on FULL Traces (100%, No Saving)
+--    * Commented so deploying this file via `bq query < sql/step2_stateless_eval.sql`
+--      stays $0 and never triggers accidental live Vertex AI billing.
 -- =============================================================================
-SELECT
-  trace_id,
-  apphub_application_id,
-  business_unit,
-  rubric_id,
-  step1_pass,
-  reasoning_trace,
-  ordinal_score,
-  (step1_pass AND ordinal_score >= passing_score) AS verified_pass,
-  trace_cost_usd
-FROM AI.GENERATE_TABLE(
-  MODEL `agent_eval.gemini_3_8_flash_judge`,
-  (
-    SELECT *
-    FROM `agent_eval.v_step2_trace_rubric_prompts`
-    WHERE rubric_id = 'groundedness_4pt_v1'
-  ),
-  STRUCT(
-    'reasoning_trace STRING NOT NULL, ordinal_score INT64 NOT NULL' AS output_schema,
-    '{"generation_config": {"temperature": 0.0, "max_output_tokens": 2048, "thinking_config": {"thinking_level": "LOW"}}}' AS model_params
-  )
-);
+-- SELECT
+--   trace_id,
+--   apphub_application_id,
+--   business_unit,
+--   rubric_id,
+--   step1_pass,
+--   reasoning_trace,
+--   ordinal_score,
+--   (step1_pass AND ordinal_score >= passing_score) AS verified_pass,
+--   trace_cost_usd
+-- FROM AI.GENERATE_TABLE(
+--   MODEL `agent_eval.gemini_3_8_flash_judge`,
+--   (
+--     SELECT *
+--     FROM `agent_eval.v_step2_trace_rubric_prompts`
+--     WHERE rubric_id = 'groundedness_4pt_v1'
+--   ),
+--   STRUCT(
+--     'reasoning_trace STRING NOT NULL, ordinal_score INT64 NOT NULL' AS output_schema,
+--     '{"generation_config": {"temperature": 0.0, "max_output_tokens": 2048, "thinking_config": {"thinking_level": "LOW"}}}' AS model_params
+--   )
+-- );
 
 -- =============================================================================
 -- 5. Static SQL Example 2B: Run Stateless Eval on 10% Sample of Traces (No Saving)
 --   * Deterministic 10% sample via FARM_FINGERPRINT(trace_id)
 -- =============================================================================
-SELECT
-  trace_id,
-  apphub_application_id,
-  business_unit,
-  rubric_id,
-  step1_pass,
-  reasoning_trace,
-  ordinal_score,
-  (step1_pass AND ordinal_score >= passing_score) AS verified_pass,
-  trace_cost_usd
-FROM AI.GENERATE_TABLE(
-  MODEL `agent_eval.gemini_3_8_flash_judge`,
-  (
-    SELECT *
-    FROM `agent_eval.v_step2_trace_rubric_prompts`
-    WHERE rubric_id = 'groundedness_4pt_v1'
-      AND MOD(ABS(FARM_FINGERPRINT(trace_id)), 100) < 10
-  ),
-  STRUCT(
-    'reasoning_trace STRING NOT NULL, ordinal_score INT64 NOT NULL' AS output_schema,
-    '{"generation_config": {"temperature": 0.0, "max_output_tokens": 2048, "thinking_config": {"thinking_level": "LOW"}}}' AS model_params
-  )
-);
+-- SELECT
+--   trace_id,
+--   apphub_application_id,
+--   business_unit,
+--   rubric_id,
+--   step1_pass,
+--   reasoning_trace,
+--   ordinal_score,
+--   (step1_pass AND ordinal_score >= passing_score) AS verified_pass,
+--   trace_cost_usd
+-- FROM AI.GENERATE_TABLE(
+--   MODEL `agent_eval.gemini_3_8_flash_judge`,
+--   (
+--     SELECT *
+--     FROM `agent_eval.v_step2_trace_rubric_prompts`
+--     WHERE rubric_id = 'groundedness_4pt_v1'
+--       AND MOD(ABS(FARM_FINGERPRINT(trace_id)), 100) < 10
+--   ),
+--   STRUCT(
+--     'reasoning_trace STRING NOT NULL, ordinal_score INT64 NOT NULL' AS output_schema,
+--     '{"generation_config": {"temperature": 0.0, "max_output_tokens": 2048, "thinking_config": {"thinking_level": "LOW"}}}' AS model_params
+--   )
+-- );
 
 -- =============================================================================
 -- 6. Engine B (`AI.EVALUATE_AGENT` over Light Capture `BQAA` AgentData Turns)

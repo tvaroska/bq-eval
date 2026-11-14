@@ -80,20 +80,25 @@ def test_ddl_and_views_table_parity() -> None:
     expected_views = {
         "agent_eval.v_trace_waterfall",
         "agent_eval.v_trace_sql_evaluation",
-        "agent_eval.v_step1_cost_per_outcome",
-        "agent_eval.v_outcomes",
-        "agent_eval.v_infra_cost_estimate",
-        "agent_eval.v_cost_per_verified_outcome",
-        "agent_eval.v_attribution_coverage",
-        "agent_eval.v_skill_lineage_roi",
-        "agent_eval.v_otel_spans_coverage",
+        "agent_eval.v_enterprise_cost_per_verified_outcome",
         "agent_eval.v_counterparty_spend",
-        "agent_eval.v_m2_kyc_trap_eval",
         "agent_eval.v_agent_eval_and_finops_summary",
         "agent_eval.v_capacity_hourly_burndown_export",
     }
     created_views = set(re.findall(r"CREATE OR REPLACE VIEW `(agent_eval\.[a-z0-9_]+)`", views_sql))
     assert created_views == expected_views
+
+    demo_sql = (REPO_ROOT / "sql" / "demo_docubridge_extensions.sql").read_text(encoding="utf-8")
+    expected_demo_views = {
+        "agent_eval.v_demo_infra_cost_estimate",
+        "agent_eval.v_demo_cost_per_verified_outcome",
+        "agent_eval.v_demo_skill_lineage_roi",
+        "agent_eval.v_m2_kyc_trap_eval",
+    }
+    created_demo_views = set(
+        re.findall(r"CREATE OR REPLACE VIEW `(agent_eval\.[a-z0-9_]+)`", demo_sql)
+    )
+    assert created_demo_views == expected_demo_views
 
 
 def test_weighted_burndown_standard_and_long_context_cliff() -> None:

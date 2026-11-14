@@ -63,7 +63,7 @@ The source is **always traces** via `agent_eval.v_step2_trace_rubric_prompts`. C
 | **"Run on only the last 1 hour of traces"** | `AND trace_start_time >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR)` |
 | **"Run on the last 24 hours of traces"** | `AND trace_start_time >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR)` |
 | **"Run on 5% of the last 1 hour of traces"** | Combine both: `AND trace_start_time >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) AND MOD(ABS(FARM_FINGERPRINT(trace_id)), 100) < 5` |
-| **"Run on failed or slow traces (> 4s)"** | `AND (NOT step1_pass OR trace_latency_ms > 4000)` |
+| **"Run on failed or slow traces (> 4s)"** | Query `v_step2_all_trace_rubric_prompts` with `AND (NOT step1_pass OR trace_latency_ms > 4000)` |
 | **"Run only on application `X`"** | `AND apphub_application_id = 'X'` |
 
 **Mandatory `AI.GENERATE_TABLE` `STRUCT(...)` Contract:**

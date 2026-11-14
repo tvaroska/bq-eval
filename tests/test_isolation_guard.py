@@ -18,6 +18,7 @@ DETERMINISTIC_CORE_MODULES = (
     "sql_eval.py",
     "finops.py",
     "loadgen.py",
+    "loadgen_seeds.py",
 )
 
 FORBIDDEN_IMPORT_PREFIXES = (

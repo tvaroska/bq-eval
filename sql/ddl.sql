@@ -109,7 +109,6 @@ SELECT
   COALESCE(
     SAFE_CAST(JSON_VALUE(attributes, '$."gen_ai.usage.reasoning.output_tokens"') AS INT64),
     SAFE_CAST(JSON_VALUE(attributes, '$."gen_ai.usage.thoughts_tokens"') AS INT64),
-    SAFE_CAST(JSON_VALUE(attributes, '$."docubridge.thinking_tokens"') AS INT64),
     0
   ) AS thinking_tokens,
   JSON_VALUE(attributes, '$."gen_ai.tool.name"') AS tool_name,
@@ -129,7 +128,6 @@ SELECT
   END AS tool_call_status,
   COALESCE(
     SAFE_CAST(JSON_VALUE(attributes, '$."rule0.pass"') AS BOOL),
-    SAFE_CAST(JSON_VALUE(attributes, '$."docubridge.rule0_pass"') AS BOOL),
     IF(
       STARTS_WITH(name, 'a2a.server.events.event_queue'),
       TRUE,
@@ -138,34 +136,18 @@ SELECT
   ) AS rule0_pass,
   COALESCE(
     JSON_VALUE(attributes, '$."finops.traffic_type"'),
-    JSON_VALUE(attributes, '$."docubridge.finops.traffic_type"'),
     'production_inference'
   ) AS finops_traffic_type,
-  COALESCE(
-    JSON_VALUE(attributes, '$."outcome.id"'),
-    JSON_VALUE(attributes, '$."docubridge.outcome_id"')
-  ) AS outcome_id,
+  JSON_VALUE(attributes, '$."outcome.id"') AS outcome_id,
   COALESCE(
     JSON_VALUE(attributes, '$."outcome.owner"'),
     JSON_VALUE(resource.attributes, '$."apphub.application.id"'),
     JSON_VALUE(resource.attributes, '$."gcp.apphub.application.id"')
   ) AS outcome_owner,
-  COALESCE(
-    JSON_VALUE(attributes, '$."source_mode"'),
-    JSON_VALUE(attributes, '$."docubridge.source_mode"')
-  ) AS source_mode,
-  COALESCE(
-    JSON_VALUE(attributes, '$."skill_id"'),
-    JSON_VALUE(attributes, '$."docubridge.skill_id"')
-  ) AS skill_id,
-  COALESCE(
-    JSON_VALUE(attributes, '$."skill_version"'),
-    JSON_VALUE(attributes, '$."docubridge.skill_version"')
-  ) AS skill_version,
-  COALESCE(
-    JSON_VALUE(attributes, '$."entity_id"'),
-    JSON_VALUE(attributes, '$."docubridge.entity_id"')
-  ) AS entity_id,
+  JSON_VALUE(attributes, '$."source_mode"') AS source_mode,
+  JSON_VALUE(attributes, '$."skill_id"') AS skill_id,
+  JSON_VALUE(attributes, '$."skill_version"') AS skill_version,
+  JSON_VALUE(attributes, '$."entity_id"') AS entity_id,
   attributes
 FROM `obs_traces._AllSpans`;
 
@@ -346,7 +328,7 @@ CREATE TABLE IF NOT EXISTS `agent_eval.fleet_labels` (
   expected_status STRING NOT NULL OPTIONS (description = 'Expected business outcome status (succeeded, failed, escalated, denied).'),
   doc_uris ARRAY<STRING> OPTIONS (description = 'Cloud Storage gs:// or a2a:// document URIs submitted for the case.'),
   doc_sha256 ARRAY<STRING> OPTIONS (description = 'SHA-256 digests of the generated in-memory documents.'),
-  request_payload_json STRING OPTIONS (description = 'Serialized request payload dispatched by run_live_eval_fleet.py.'),
+  request_payload_json STRING OPTIONS (description = 'Serialized request payload dispatched by the live evaluation fleet runner.'),
   created_at TIMESTAMP NOT NULL OPTIONS (description = 'UTC corpus generation timestamp.')
 )
 CLUSTER BY run_id, app, case_type
