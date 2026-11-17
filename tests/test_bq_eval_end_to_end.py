@@ -468,6 +468,15 @@ def test_progressive_step1_step2_step25_step3_pack() -> None:
     assert "MERGE INTO agent_eval.rubrics" in skill_md
     assert "MERGE `agent_eval.rubrics` AS target" in recipes_md
     assert "## 3. Stateless Eval on Only the Last 1 Hour of Traces" in recipes_md
+    assert "MODEL `agent_eval.gemini_4_argon_judge`" in recipes_md
+    assert "INSERT INTO `agent_eval.eval_results`" in recipes_md
+    assert "FROM AI.GENERATE_TABLE(\n  MODEL `agent_eval.gemini_3_8_flash_judge`" in recipes_md
+    workflow3_section = skill_md.split("## Workflow 3:", 1)[1]
+    assert "references/sql_recipes.md" in workflow3_section
+    for link_dir in (".agents", ".claude"):
+        skills_link = REPO_ROOT / link_dir / "skills"
+        assert skills_link.is_symlink()
+        assert skills_link.readlink().as_posix() == "../skills"
 
     # Step 3: Saved results table (`eval_results`) and paired run comparison
     step3_sql = (REPO_ROOT / "sql" / "step3_saved_results.sql").read_text(encoding="utf-8")

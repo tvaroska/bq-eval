@@ -35,7 +35,7 @@ When the user describes a new evaluation criterion in plain English:
 1. **Enforce the 4-Point Ordinal Scale Contract (No Neutral Midpoint)**:
    - **`rubric_id`**: Lowercase snake_case with version suffix (e.g., `underwriting_clarity_4pt_v1`).
    - **`passing_score`**: Default `3` (`ordinal_score >= 3` -> `binary_pass = TRUE`).
-   - **`judge_model`**: Default `gemini-3.8-flash` for entailment/checklist rubrics; use `gemini-4-argon` for complex multi-step reasoning.
+   - **`judge_model`**: Default `gemini-3.8-flash` (`MODEL \`agent_eval.gemini_3_8_flash_judge\``) for entailment/checklist rubrics; use `gemini-4-argon` (`MODEL \`agent_eval.gemini_4_argon_judge\``; see Recipe 7 in [`references/sql_recipes.md`](references/sql_recipes.md)) for complex multi-step reasoning.
    - **Scale Anchors (`Score 1..4`)**:
      - `Score 1`: Severe failure or policy/safety violation.
      - `Score 2`: Material flaw or missing required element (fails threshold).
@@ -74,6 +74,6 @@ The source is **always traces** via `agent_eval.v_step2_trace_rubric_prompts`. C
 
 ## Workflow 3: Promote Stateless Runs to Step 3 (`eval_results`)
 
-When the user asks to **save** the evaluation outputs (for historical trends or paired model comparisons):
-- Prepend `INSERT INTO agent_eval.eval_results (...)` to the `AI.GENERATE_TABLE` query using a named `eval_run_id` (e.g., `'run_2026_11_06_last_1h'`).
-- Add a `LEFT JOIN agent_eval.eval_results AS existing ON cand.trace_id = existing.trace_id AND cand.rubric_id = existing.rubric_id AND existing.eval_run_id = '...' WHERE existing.eval_id IS NULL` guard so re-running never double-bills already-scored traces.
+When the user asks to **save** the evaluation outputs (for historical trends or paired model comparisons in [`../../sql/step3_saved_results.sql`](../../sql/step3_saved_results.sql)):
+- Copy the full 16-column Step-3 `INSERT INTO \`agent_eval.eval_results\` (...)` template from [`references/sql_recipes.md`](references/sql_recipes.md) — Recipe 8 for Engine A (`AI.GENERATE_TABLE`) or Recipe 6 for Engine B (`AI.EVALUATE_AGENT`) — using a named `eval_run_id` (e.g., `'run_2026_11_06_last_1h'`) so `outcome_id`, `rule0_pass`, `binary_pass`, and judge token columns align with `agent_eval.v_step3_eval_runs` and `agent_eval.v_step3_paired_run_comparison`.
+- Always keep the `LEFT JOIN \`agent_eval.eval_results\` AS existing ON cand.trace_id = existing.trace_id AND cand.rubric_id = existing.rubric_id AND existing.eval_run_id = '...' WHERE ... AND existing.eval_id IS NULL` idempotency guard so re-running never double-bills already-scored traces.

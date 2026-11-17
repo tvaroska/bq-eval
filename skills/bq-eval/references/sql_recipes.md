@@ -213,3 +213,86 @@ FROM AI.EVALUATE_AGENT(
 ) AS eval_out,
 UNNEST(eval_out.evaluation_results) AS metric_row;
 ```
+
+---
+
+## 7. Stateless Complex Reasoning Eval Using `gemini-4-argon` (`MODEL agent_eval.gemini_4_argon_judge`)
+
+For rubrics declaring `judge_model = 'gemini-4-argon'` (multi-step financial, legal, or cross-document reasoning registered in [`../../../sql/ddl.sql`](../../../sql/ddl.sql)), invoke `MODEL \`agent_eval.gemini_4_argon_judge\`` with `thinking_level` set to `"MEDIUM"` (or `"HIGH"`):
+
+```sql
+SELECT
+  trace_id,
+  outcome_id,
+  apphub_application_id,
+  business_unit,
+  rubric_id,
+  step1_pass,
+  reasoning_trace,
+  ordinal_score,
+  (step1_pass AND ordinal_score >= passing_score) AS verified_pass,
+  trace_cost_usd
+FROM AI.GENERATE_TABLE(
+  MODEL `agent_eval.gemini_4_argon_judge`,
+  (
+    SELECT *
+    FROM `agent_eval.v_step2_trace_rubric_prompts`
+    WHERE judge_model = 'gemini-4-argon'
+      AND trace_start_time >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR)
+      AND MOD(ABS(FARM_FINGERPRINT(trace_id)), 100) < 5
+  ),
+  STRUCT(
+    'reasoning_trace STRING NOT NULL, ordinal_score INT64 NOT NULL' AS output_schema,
+    '{"generation_config": {"temperature": 0.0, "max_output_tokens": 4096, "thinking_config": {"thinking_level": "MEDIUM"}}}' AS model_params
+  )
+);
+```
+
+---
+
+## 8. Persisting Engine A (`AI.GENERATE_TABLE`) Verdicts into Step 3 (`agent_eval.eval_results`)
+
+Aligned 1:1 with the 16-column `agent_eval.eval_results` table in [`../../../sql/step3_saved_results.sql`](../../../sql/step3_saved_results.sql), skipping already-scored `(eval_run_id, trace_id, rubric_id)` triples while preserving `outcome_id` for `EVAL-P11` outcome-level `CPVO` joins:
+
+```sql
+INSERT INTO `agent_eval.eval_results` (
+  eval_id, eval_run_id, trace_id, outcome_id, apphub_application_id, rubric_id, judge_model,
+  sampling_stratum, rule0_pass, reasoning_trace, ordinal_score, binary_pass,
+  judge_input_tokens, judge_output_tokens, judge_thinking_tokens, evaluated_at
+)
+SELECT
+  GENERATE_UUID() AS eval_id,
+  'run_2026_11_06_last_1h' AS eval_run_id,
+  trace_id,
+  outcome_id,
+  apphub_application_id,
+  rubric_id,
+  judge_model,
+  'LAST_1H' AS sampling_stratum,
+  step1_pass AS rule0_pass,
+  reasoning_trace,
+  ordinal_score,
+  (ordinal_score >= passing_score) AS binary_pass,
+  DIV(LENGTH(prompt), 4) AS judge_input_tokens,
+  DIV(LENGTH(COALESCE(reasoning_trace, '')), 4) + 12 AS judge_output_tokens,
+  0 AS judge_thinking_tokens,
+  CURRENT_TIMESTAMP() AS evaluated_at
+FROM AI.GENERATE_TABLE(
+  MODEL `agent_eval.gemini_3_8_flash_judge`,
+  (
+    SELECT cand.*
+    FROM `agent_eval.v_step2_trace_rubric_prompts` AS cand
+    LEFT JOIN `agent_eval.eval_results` AS existing
+      ON cand.trace_id = existing.trace_id
+      AND cand.rubric_id = existing.rubric_id
+      AND existing.eval_run_id = 'run_2026_11_06_last_1h'
+    WHERE cand.rubric_id = 'groundedness_4pt_v1'
+      AND cand.trace_start_time >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR)
+      AND existing.eval_id IS NULL
+  ),
+  STRUCT(
+    'reasoning_trace STRING NOT NULL, ordinal_score INT64 NOT NULL' AS output_schema,
+    '{"generation_config": {"temperature": 0.0, "max_output_tokens": 2048, "thinking_config": {"thinking_level": "LOW"}}}' AS model_params
+  )
+);
+```
