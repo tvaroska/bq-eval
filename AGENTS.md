@@ -7,7 +7,7 @@ For regulated banking Model Risk Management (`SR 11-7`, `SR 26-2 / OCC 2026-13`)
 
 Before editing this repository, read:
 1. [`CRITICAL.md`](CRITICAL.md) — Non-negotiable engineering, calibration, FinOps, and hygiene invariants.
-2. [`DECISIONS.md`](DECISIONS.md) — Architectural Decision Records (`ADR-001` through `ADR-008`).
+2. [`DECISIONS.md`](DECISIONS.md) — Architectural Decision Records (`ADR-001` through `ADR-009`).
 3. [`docs/roadmap.md`](docs/roadmap.md) — Showcase milestones and roadmap.
 
 ---
