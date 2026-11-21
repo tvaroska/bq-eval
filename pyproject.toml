@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "bq-eval"
 version = "0.2.2"
-description = "BQ Eval & FinOps: dual-path BigQuery agent evaluation, calibrated SQL quality gates, and USD Cost per Verified Outcome."
+description = "Evaluate AI agents where traces land: BigQuery SQL views run deterministic checks that gate sampled, human-calibrated LLM judges and measure cost per verified outcome."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [

@@ -98,3 +98,43 @@ Because semantic evaluation is conditioned on traces passing Step 1 / `Rule 0` d
 4. **Two Complementary CPVO Views (`EVAL-P04` vs. `EVAL-P11`):**
    - `v_agent_eval_and_finops_summary` reports **trace-level Rogan-Gladen calibrated CPVO** per `(apphub_application_id, rubric_id)` with 95% delta-method CIs and SQL Gwet's `AC2`.
    - `v_cost_per_verified_outcome` (Step 1) and `v_enterprise_cost_per_verified_outcome` (effective-dated pricing + Step-2 judge cost) report **multi-agent business-outcome CPVO** grouped by `outcome.id` with proportional `1.0x` infra and judge allocation across multi-agent slices.
+
+---
+
+## 7. BigQuery Deployment Commands & Repository Map
+
+### 7.1 Step 1 on BigQuery (`0` New Tables, No Skill)
+
+```bash
+# Option 1 (Light Capture: BQAA agent_events): deploy zero-copy BQAA adapter views
+# (Uncomment Mode A in sql/bqaa_adapter_views.sql if running BQAA standalone without _AllSpans)
+bq query --project_id=YOUR_PROJECT --use_legacy_sql=false < sql/bqaa_adapter_views.sql
+
+# Option 2 (Demo Seed): populate 800 synthetic traces in isolated dataset agent_eval_seed
+bq query --project_id=YOUR_PROJECT --use_legacy_sql=false < sql/demo_time_shift_loadgen.sql
+
+# Deploy static Step-1 views
+bq query --project_id=YOUR_PROJECT --use_legacy_sql=false < sql/step1_trace_views.sql
+```
+
+### 7.2 Step 2 & Step 3 on BigQuery
+
+```bash
+# Step 2: create agent_eval.rubrics, prompt views, and stateless 100% / 10% evaluations
+bq query --project_id=YOUR_PROJECT --use_legacy_sql=false < sql/step2_stateless_eval.sql
+
+# Step 3: persist verdicts (Engine A or B), paired run comparisons, and daily token quota guard
+bq query --project_id=YOUR_PROJECT --use_legacy_sql=false < sql/step3_saved_results.sql
+bq query --project_id=YOUR_PROJECT --use_legacy_sql=false < sql/step3_daily_quota_guard.sql
+```
+
+### 7.3 Local CLI Helpers & Verification Suite
+
+```bash
+python3 -m bq_eval.cli demo --html-out /tmp/bq_eval_scorecard.html
+python3 -m bq_eval.cli loadgen --replicas 50 --last-hour-replicas 15
+python3 -m bq_eval.cli judge-sql --engine generate-table --project-id my-gcp-project --canary-pct 5
+python3 -m bq_eval.cli judge-sql --engine evaluate-agent --project-id my-gcp-project --canary-pct 10
+```
+
+See [`AGENTS.md`](../AGENTS.md) for the full file-by-file repository map and canonical lint, type-check, AST, and pytest commands.

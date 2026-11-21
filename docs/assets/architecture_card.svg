@@ -1,184 +1,71 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 940" width="100%" height="100%">
-  <defs>
-    <style>
-      .font { font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
-      .mono { font-family: 'JetBrains Mono', 'Fira Code', 'Courier New', monospace; }
-    </style>
-  </defs>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900" width="100%" height="100%">
+  <rect x="0" y="0" width="1600" height="900" fill="#F8FAFC"/>
+  <rect x="24" y="24" width="1552" height="852" rx="16" fill="#FFFFFF" stroke="#0F172A" stroke-width="2.5"/>
 
-  <!-- Outer Soft Slate Canvas -->
-  <rect x="0" y="0" width="1600" height="940" fill="#F8FAFC"/>
-  <rect x="20" y="20" width="1560" height="900" rx="14" fill="#FFFFFF" stroke="#0F172A" stroke-width="2.5"/>
+  <rect x="24" y="24" width="1552" height="104" rx="14" fill="#0F172A"/>
+  <rect x="24" y="96" width="1552" height="32" fill="#0F172A"/>
+  <text x="64" y="88" font-family="'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="38" font-weight="800" fill="#FFFFFF">BQ Eval</text>
+  <text x="256" y="87" font-family="'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="26" font-weight="600" fill="#CBD5E1">Lakehouse SQL Evals</text>
 
-  <!-- Top Dark Navy Swiss Masthead -->
-  <rect x="20" y="20" width="1560" height="104" rx="12" fill="#0F172A"/>
-  <rect x="20" y="90" width="1560" height="34" fill="#0F172A"/>
-  <text x="56" y="66" class="font" font-family="Inter, Segoe UI, Roboto, sans-serif" font-size="28" font-weight="800" fill="#FFFFFF">BQ EVAL &amp; FINOPS</text>
-  <text x="56" y="96" class="font" font-family="Inter, Segoe UI, Roboto, sans-serif" font-size="14" font-weight="500" fill="#94A3B8">Dual-Path Agent Capture (Light BQAA + Full OpenTelemetry) · Zero-Table Day-1 SQL · USD Cost per Verified Outcome</text>
+  <rect x="64" y="176" width="320" height="390" rx="14" fill="#F0F9FF" stroke="#0284C7" stroke-width="3"/>
+  <rect x="64" y="176" width="320" height="76" rx="12" fill="#E0F2FE"/>
+  <rect x="64" y="228" width="320" height="24" fill="#E0F2FE"/>
+  <rect x="64" y="251" width="320" height="3" fill="#0284C7"/>
+  <text x="224" y="226" text-anchor="middle" font-family="'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="28" font-weight="800" fill="#0C4A6E">Agent Traces</text>
+  <rect x="84" y="288" width="280" height="104" rx="12" fill="#FFFFFF" stroke="#38BDF8" stroke-width="2.5"/>
+  <text x="224" y="349" text-anchor="middle" font-family="'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="24" font-weight="700" fill="#0369A1">ADK, LangGraph</text>
+  <rect x="84" y="416" width="280" height="104" rx="12" fill="#E0F2FE" stroke="#0284C7" stroke-width="2.5"/>
+  <text x="224" y="477" text-anchor="middle" font-family="'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="24" font-weight="700" fill="#0C4A6E">OpenTelemetry</text>
 
-  <!-- Top Right Color Legend Pills -->
-  <rect x="932" y="48" width="196" height="44" rx="8" fill="#1E293B" stroke="#38BDF8" stroke-width="1.5"/>
-  <circle cx="956" cy="70" r="6" fill="#38BDF8"/>
-  <text x="972" y="75" class="font" font-family="Inter, Segoe UI, Roboto, sans-serif" font-size="13" font-weight="700" fill="#F8FAFC">Dual-Path Capture</text>
+  <rect x="392" y="368" width="36" height="6" fill="#2563EB"/>
+  <polygon points="424,358 444,371 424,384" fill="#2563EB"/>
 
-  <rect x="1144" y="48" width="208" height="44" rx="8" fill="#1E293B" stroke="#F59E0B" stroke-width="1.5"/>
-  <circle cx="1168" cy="70" r="6" fill="#F59E0B"/>
-  <text x="1184" y="75" class="font" font-family="Inter, Segoe UI, Roboto, sans-serif" font-size="13" font-weight="700" fill="#FDE68A">Calibrated SQL Judge</text>
+  <rect x="448" y="176" width="320" height="390" rx="14" fill="#EFF6FF" stroke="#2563EB" stroke-width="3"/>
+  <rect x="448" y="176" width="320" height="76" rx="12" fill="#DBEAFE"/>
+  <rect x="448" y="228" width="320" height="24" fill="#DBEAFE"/>
+  <rect x="448" y="251" width="320" height="3" fill="#2563EB"/>
+  <text x="608" y="226" text-anchor="middle" font-family="'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="28" font-weight="800" fill="#1E3A8A">SQL Gate</text>
+  <rect x="468" y="288" width="280" height="104" rx="12" fill="#FFFFFF" stroke="#93C5FD" stroke-width="2.5"/>
+  <text x="608" y="349" text-anchor="middle" font-family="'JetBrains Mono', 'Fira Code', 'Courier New', monospace" font-size="24" font-weight="700" fill="#1D4ED8">100% checked</text>
+  <rect x="468" y="416" width="280" height="104" rx="12" fill="#ECFDF5" stroke="#10B981" stroke-width="2.5"/>
+  <text x="608" y="477" text-anchor="middle" font-family="'JetBrains Mono', 'Fira Code', 'Courier New', monospace" font-size="26" font-weight="700" fill="#047857">$0 judge</text>
 
-  <rect x="1368" y="48" width="180" height="44" rx="8" fill="#1E293B" stroke="#10B981" stroke-width="1.5"/>
-  <circle cx="1392" cy="70" r="6" fill="#10B981"/>
-  <text x="1408" y="75" class="font" font-family="Inter, Segoe UI, Roboto, sans-serif" font-size="13" font-weight="700" fill="#6EE7B7">Outcome FinOps</text>
+  <rect x="776" y="368" width="36" height="6" fill="#D97706"/>
+  <polygon points="808,358 828,371 808,384" fill="#D97706"/>
 
-  <!-- TOP ROW: STAGES 01 -> 02 -> 03 (y=156, h=296) -->
+  <rect x="832" y="176" width="320" height="390" rx="14" fill="#FFFBEB" stroke="#D97706" stroke-width="3.5"/>
+  <rect x="832" y="176" width="320" height="76" rx="12" fill="#FEF3C7"/>
+  <rect x="832" y="228" width="320" height="24" fill="#FEF3C7"/>
+  <rect x="832" y="251" width="320" height="3" fill="#D97706"/>
+  <text x="992" y="226" text-anchor="middle" font-family="'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="28" font-weight="800" fill="#92400E">Sampled Judge</text>
+  <rect x="852" y="288" width="280" height="104" rx="12" fill="#FFFFFF" stroke="#F59E0B" stroke-width="2.5"/>
+  <text x="992" y="349" text-anchor="middle" font-family="'JetBrains Mono', 'Fira Code', 'Courier New', monospace" font-size="24" font-weight="700" fill="#B45309">5-10% judged</text>
+  <rect x="852" y="416" width="280" height="104" rx="12" fill="#ECFDF5" stroke="#059669" stroke-width="2.5"/>
+  <text x="992" y="477" text-anchor="middle" font-family="'JetBrains Mono', 'Fira Code', 'Courier New', monospace" font-size="24" font-weight="700" fill="#047857">92.2% saved</text>
 
-  <!-- STAGE 01: SKY BLUE -->
-  <rect x="56" y="156" width="440" height="296" rx="10" fill="#F8FAFC" stroke="#0284C7" stroke-width="2.5"/>
-  <rect x="56" y="156" width="440" height="64" rx="10" fill="#E0F2FE"/>
-  <rect x="56" y="196" width="440" height="24" fill="#E0F2FE"/>
-  <line x1="56" y1="220" x2="496" y2="220" stroke="#0284C7" stroke-width="2"/>
-  <text x="80" y="199" class="mono" font-family="JetBrains Mono, Courier New, monospace" font-size="32" font-weight="800" fill="#0369A1">01</text>
-  <text x="140" y="194" class="mono" font-family="JetBrains Mono, Courier New, monospace" font-size="12" font-weight="800" letter-spacing="1" fill="#0C4A6E">DUAL-PATH CAPTURE</text>
+  <rect x="1160" y="368" width="36" height="6" fill="#059669"/>
+  <polygon points="1192,358 1212,371 1192,384" fill="#059669"/>
 
-  <text x="80" y="262" class="font" font-family="Inter, Segoe UI, Roboto, sans-serif" font-size="20" font-weight="800" fill="#0F172A">Light BQAA or Full OTel</text>
-  <text x="80" y="288" class="font" font-family="Inter, Segoe UI, Roboto, sans-serif" font-size="13.5" font-weight="500" fill="#475569">One SQL contract from 3-line Python or enterprise OTLP</text>
+  <rect x="1216" y="176" width="320" height="390" rx="14" fill="#ECFDF5" stroke="#059669" stroke-width="3"/>
+  <rect x="1216" y="176" width="320" height="76" rx="12" fill="#D1FAE5"/>
+  <rect x="1216" y="228" width="320" height="24" fill="#D1FAE5"/>
+  <rect x="1216" y="251" width="320" height="3" fill="#059669"/>
+  <text x="1376" y="226" text-anchor="middle" font-family="'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="28" font-weight="800" fill="#065F46">Outcome Cost</text>
+  <rect x="1236" y="288" width="280" height="104" rx="12" fill="#FFFFFF" stroke="#34D399" stroke-width="2.5"/>
+  <text x="1376" y="349" text-anchor="middle" font-family="'JetBrains Mono', 'Fira Code', 'Courier New', monospace" font-size="24" font-weight="700" fill="#047857">USD/outcome</text>
+  <rect x="1236" y="416" width="280" height="104" rx="12" fill="#FFFBEB" stroke="#F59E0B" stroke-width="2.5"/>
+  <text x="1376" y="477" text-anchor="middle" font-family="'JetBrains Mono', 'Fira Code', 'Courier New', monospace" font-size="23" font-weight="700" fill="#B45309">Fail-closed NULL</text>
 
-  <rect x="80" y="314" width="392" height="52" rx="8" fill="#FFFFFF" stroke="#7DD3FC" stroke-width="1.5"/>
-  <text x="100" y="345" class="font" font-family="Inter, Segoe UI, Roboto, sans-serif" font-size="13" font-weight="700" fill="#0369A1">Light Capture: 3-Line BQAA Event Stream (1 Table)</text>
+  <rect x="989" y="566" width="6" height="68" fill="#7C3AED"/>
+  <polygon points="980,630 992,652 1004,630" fill="#7C3AED"/>
 
-  <rect x="80" y="378" width="392" height="52" rx="8" fill="#E0F2FE" stroke="#38BDF8" stroke-width="1.5"/>
-  <text x="100" y="409" class="mono" font-family="JetBrains Mono, Courier New, monospace" font-size="13" font-weight="700" fill="#0C4A6E">Full Capture: Native OpenTelemetry &amp; App Hub</text>
+  <rect x="1373" y="588" width="6" height="68" fill="#7C3AED"/>
+  <polygon points="1364,592 1376,570 1388,592" fill="#7C3AED"/>
 
-  <!-- Arrow 01 -> 02 -->
-  <line x1="496" y1="304" x2="564" y2="304" stroke="#2563EB" stroke-width="3.5"/>
-  <polygon points="564,295 580,304 564,313" fill="#2563EB"/>
-  <text x="538" y="288" text-anchor="middle" class="mono" font-family="JetBrains Mono, Courier New, monospace" font-size="11" font-weight="800" letter-spacing="0.8" fill="#1D4ED8">INGEST</text>
-
-  <!-- STAGE 02: ROYAL BLUE -->
-  <rect x="580" y="156" width="440" height="296" rx="10" fill="#EFF6FF" stroke="#2563EB" stroke-width="2.5"/>
-  <rect x="580" y="156" width="440" height="64" rx="10" fill="#DBEAFE"/>
-  <rect x="580" y="196" width="440" height="24" fill="#DBEAFE"/>
-  <line x1="580" y1="220" x2="1020" y2="220" stroke="#2563EB" stroke-width="2"/>
-  <text x="604" y="199" class="mono" font-family="JetBrains Mono, Courier New, monospace" font-size="32" font-weight="800" fill="#1D4ED8">02</text>
-  <text x="664" y="194" class="mono" font-family="JetBrains Mono, Courier New, monospace" font-size="12" font-weight="800" letter-spacing="1" fill="#1E3A8A">STEP 1 &amp; STEP 2 ENGINE</text>
-
-  <text x="604" y="262" class="font" font-family="Inter, Segoe UI, Roboto, sans-serif" font-size="20" font-weight="800" fill="#0F172A">SQL Gate &amp; Dual AI Judge</text>
-  <text x="604" y="288" class="font" font-family="Inter, Segoe UI, Roboto, sans-serif" font-size="13.5" font-weight="500" fill="#334155">Filter 100% in SQL before scoring 5 to 10% with AI</text>
-
-  <rect x="604" y="314" width="188" height="116" rx="8" fill="#ECFDF5" stroke="#34D399" stroke-width="2"/>
-  <text x="622" y="344" class="font" font-family="Inter, Segoe UI, Roboto, sans-serif" font-size="13" font-weight="700" fill="#047857">Step 1: Static SQL</text>
-  <text x="622" y="370" class="font" font-family="Inter, Segoe UI, Roboto, sans-serif" font-size="12" font-weight="500" fill="#065F46">Tool, loop &amp; SLA gates</text>
-  <text x="622" y="406" class="mono" font-family="JetBrains Mono, Courier New, monospace" font-size="13" font-weight="700" fill="#059669">$0 Judge Cost</text>
-
-  <rect x="808" y="314" width="188" height="116" rx="8" fill="#FFFBEB" stroke="#F59E0B" stroke-width="2"/>
-  <text x="826" y="344" class="font" font-family="Inter, Segoe UI, Roboto, sans-serif" font-size="13" font-weight="700" fill="#B45309">Step 2: Dual Judge</text>
-  <text x="826" y="370" class="font" font-family="Inter, Segoe UI, Roboto, sans-serif" font-size="12" font-weight="500" fill="#78350F">4-Pt Rubrics &amp; Turn Eval</text>
-  <text x="826" y="406" class="mono" font-family="JetBrains Mono, Courier New, monospace" font-size="13" font-weight="700" fill="#D97706">10% Canary + Tail</text>
-
-  <!-- Arrow 02 -> 03 -->
-  <line x1="1020" y1="304" x2="1088" y2="304" stroke="#D97706" stroke-width="3.5"/>
-  <polygon points="1088,295 1104,304 1088,313" fill="#D97706"/>
-  <text x="1062" y="288" text-anchor="middle" class="mono" font-family="JetBrains Mono, Courier New, monospace" font-size="11" font-weight="800" letter-spacing="0.8" fill="#B45309">VERIFY</text>
-
-  <!-- STAGE 03: DARK NAVY & AMBER GOLD -->
-  <rect x="1104" y="156" width="440" height="296" rx="10" fill="#0F172A" stroke="#F59E0B" stroke-width="3"/>
-  <rect x="1104" y="156" width="440" height="64" rx="10" fill="#1E293B"/>
-  <rect x="1104" y="196" width="440" height="24" fill="#1E293B"/>
-  <line x1="1104" y1="220" x2="1544" y2="220" stroke="#F59E0B" stroke-width="2"/>
-  <text x="1128" y="199" class="mono" font-family="JetBrains Mono, Courier New, monospace" font-size="32" font-weight="800" fill="#F59E0B">03</text>
-  <text x="1188" y="194" class="mono" font-family="JetBrains Mono, Courier New, monospace" font-size="12" font-weight="800" letter-spacing="1" fill="#FDE68A">STEP 3 SAVED VERDICTS</text>
-
-  <text x="1128" y="262" class="font" font-family="Inter, Segoe UI, Roboto, sans-serif" font-size="20" font-weight="800" fill="#FFFFFF">Rule 0 &amp; Zero-Flip Vault</text>
-  <text x="1128" y="288" class="font" font-family="Inter, Segoe UI, Roboto, sans-serif" font-size="13.5" font-weight="500" fill="#CBD5E1">Prompt-injection escaped judges · Fail-closed unjudged apps</text>
-
-  <rect x="1128" y="314" width="392" height="52" rx="8" fill="#1E293B" stroke="#F59E0B" stroke-width="1.5"/>
-  <text x="1148" y="345" class="font" font-family="Inter, Segoe UI, Roboto, sans-serif" font-size="13" font-weight="700" fill="#FDE68A">Paired Run Comparison: 0.0% Negative Flips</text>
-
-  <rect x="1128" y="378" width="392" height="52" rx="8" fill="#1E293B" stroke="#10B981" stroke-width="1.5"/>
-  <text x="1148" y="409" class="mono" font-family="JetBrains Mono, Courier New, monospace" font-size="13" font-weight="700" fill="#34D399">92.2% Judge Savings vs. Full-Fleet Eval</text>
-
-  <!-- Downward Connector Stage 03 -> Stage 04 -->
-  <line x1="1324" y1="452" x2="1324" y2="548" stroke="#059669" stroke-width="3.5"/>
-  <polygon points="1315,548 1324,564 1333,548" fill="#059669"/>
-  <text x="1376" y="508" class="mono" font-family="JetBrains Mono, Courier New, monospace" font-size="11" font-weight="800" letter-spacing="0.8" fill="#047857">PROJECT</text>
-
-  <!-- Direct Triage Connector Stage 02 -> Stage 05 -->
-  <line x1="890" y1="452" x2="890" y2="548" stroke="#D97706" stroke-width="3" stroke-dasharray="8,6"/>
-  <polygon points="881,548 890,564 899,548" fill="#D97706"/>
-  <rect x="756" y="486" width="268" height="32" rx="16" fill="#FEF3C7" stroke="#F59E0B" stroke-width="1.5"/>
-  <text x="890" y="507" text-anchor="middle" class="mono" font-family="JetBrains Mono, Courier New, monospace" font-size="11" font-weight="800" letter-spacing="0.8" fill="#B45309">QUARANTINE REVIEW QUEUE</text>
-
-  <!-- BOTTOM ROW: STAGES 06 <- 05 <- 04 (y=564, h=296) -->
-
-  <!-- STAGE 04: EMERALD GREEN -->
-  <rect x="1104" y="564" width="440" height="296" rx="10" fill="#ECFDF5" stroke="#059669" stroke-width="2.5"/>
-  <rect x="1104" y="564" width="440" height="64" rx="10" fill="#D1FAE5"/>
-  <rect x="1104" y="604" width="440" height="24" fill="#D1FAE5"/>
-  <line x1="1104" y1="628" x2="1544" y2="628" stroke="#059669" stroke-width="2"/>
-  <text x="1128" y="607" class="mono" font-family="JetBrains Mono, Courier New, monospace" font-size="32" font-weight="800" fill="#047857">04</text>
-  <text x="1188" y="602" class="mono" font-family="JetBrains Mono, Courier New, monospace" font-size="12" font-weight="800" letter-spacing="1" fill="#065F46">OUTCOME FINOPS &amp; CPVO</text>
-
-  <text x="1128" y="670" class="font" font-family="Inter, Segoe UI, Roboto, sans-serif" font-size="20" font-weight="800" fill="#0F172A">USD Cost per Outcome</text>
-  <text x="1128" y="696" class="font" font-family="Inter, Segoe UI, Roboto, sans-serif" font-size="13.5" font-weight="500" fill="#334155">200K context cliff pricing &amp; FOCUS 1.2 chargeback</text>
-
-  <rect x="1128" y="722" width="392" height="52" rx="8" fill="#FFFFFF" stroke="#6EE7B7" stroke-width="1.5"/>
-  <text x="1148" y="753" class="font" font-family="Inter, Segoe UI, Roboto, sans-serif" font-size="13" font-weight="700" fill="#065F46">App, Business Unit &amp; Verified Outcome Rollup</text>
-
-  <rect x="1128" y="786" width="392" height="52" rx="8" fill="#D1FAE5" stroke="#34D399" stroke-width="1.5"/>
-  <text x="1148" y="817" class="mono" font-family="JetBrains Mono, Courier New, monospace" font-size="13" font-weight="700" fill="#047857">$0 Marginal Off-Peak Capacity Water-Filling</text>
-
-  <!-- Arrow 04 -> 05 -->
-  <line x1="1104" y1="712" x2="1036" y2="712" stroke="#0891B2" stroke-width="3.5"/>
-  <polygon points="1036,703 1020,712 1036,721" fill="#0891B2"/>
-  <text x="1062" y="696" text-anchor="middle" class="mono" font-family="JetBrains Mono, Courier New, monospace" font-size="11" font-weight="800" letter-spacing="0.8" fill="#0E7490">RENDER</text>
-
-  <!-- STAGE 05: TEAL / CYAN -->
-  <rect x="580" y="564" width="440" height="296" rx="10" fill="#ECFEFF" stroke="#0891B2" stroke-width="2.5"/>
-  <rect x="580" y="564" width="440" height="64" rx="10" fill="#CFFAFE"/>
-  <rect x="580" y="604" width="440" height="24" fill="#CFFAFE"/>
-  <line x1="580" y1="628" x2="1020" y2="628" stroke="#0891B2" stroke-width="2"/>
-  <text x="604" y="607" class="mono" font-family="JetBrains Mono, Courier New, monospace" font-size="32" font-weight="800" fill="#0E7490">05</text>
-  <text x="664" y="602" class="mono" font-family="JetBrains Mono, Courier New, monospace" font-size="12" font-weight="800" letter-spacing="1" fill="#155E75">EXECUTIVE SCORECARDS</text>
-
-  <text x="604" y="670" class="font" font-family="Inter, Segoe UI, Roboto, sans-serif" font-size="20" font-weight="800" fill="#0F172A">Role-Scoped Visibility</text>
-  <text x="604" y="696" class="font" font-family="Inter, Segoe UI, Roboto, sans-serif" font-size="13.5" font-weight="500" fill="#334155">Instant local SQLite twin or live BigQuery views</text>
-
-  <rect x="604" y="722" width="188" height="116" rx="8" fill="#FFFFFF" stroke="#67E8F9" stroke-width="2"/>
-  <text x="622" y="752" class="font" font-family="Inter, Segoe UI, Roboto, sans-serif" font-size="13" font-weight="700" fill="#0E7490">Developer Waterfall</text>
-  <text x="622" y="778" class="font" font-family="Inter, Segoe UI, Roboto, sans-serif" font-size="12" font-weight="500" fill="#334155">Trace &amp; span triage</text>
-  <text x="622" y="814" class="mono" font-family="JetBrains Mono, Courier New, monospace" font-size="13" font-weight="700" fill="#0891B2">10-Second CLI</text>
-
-  <rect x="808" y="722" width="188" height="116" rx="8" fill="#FFFFFF" stroke="#67E8F9" stroke-width="2"/>
-  <text x="826" y="752" class="font" font-family="Inter, Segoe UI, Roboto, sans-serif" font-size="13" font-weight="700" fill="#0E7490">Executive HTML Card</text>
-  <text x="826" y="778" class="font" font-family="Inter, Segoe UI, Roboto, sans-serif" font-size="12" font-weight="500" fill="#334155">Cost vs. quality matrix</text>
-  <text x="826" y="814" class="mono" font-family="JetBrains Mono, Courier New, monospace" font-size="13" font-weight="700" fill="#0891B2">BU Chargeback</text>
-
-  <!-- Arrow 05 -> 06 -->
-  <line x1="580" y1="712" x2="512" y2="712" stroke="#7C3AED" stroke-width="3.5"/>
-  <polygon points="512,703 496,712 512,721" fill="#7C3AED"/>
-  <text x="538" y="696" text-anchor="middle" class="mono" font-family="JetBrains Mono, Courier New, monospace" font-size="11" font-weight="800" letter-spacing="0.8" fill="#6D28D9">OVERRIDES</text>
-
-  <!-- STAGE 06: VIOLET / PURPLE -->
-  <rect x="56" y="564" width="440" height="296" rx="10" fill="#F5F3FF" stroke="#7C3AED" stroke-width="2.5"/>
-  <rect x="56" y="564" width="440" height="64" rx="10" fill="#EDE9FE"/>
-  <rect x="56" y="604" width="440" height="24" fill="#EDE9FE"/>
-  <line x1="56" y1="628" x2="496" y2="628" stroke="#7C3AED" stroke-width="2"/>
-  <text x="80" y="607" class="mono" font-family="JetBrains Mono, Courier New, monospace" font-size="32" font-weight="800" fill="#6D28D9">06</text>
-  <text x="140" y="602" class="mono" font-family="JetBrains Mono, Courier New, monospace" font-size="12" font-weight="800" letter-spacing="1" fill="#4C1D95">SKILL &amp; SME CALIBRATION</text>
-
-  <text x="80" y="670" class="font" font-family="Inter, Segoe UI, Roboto, sans-serif" font-size="20" font-weight="800" fill="#0F172A">Plain-English Skill &amp; MRM</text>
-  <text x="80" y="696" class="font" font-family="Inter, Segoe UI, Roboto, sans-serif" font-size="13.5" font-weight="500" fill="#334155">Author custom slices &amp; debias pass rates in SQL</text>
-
-  <rect x="80" y="722" width="392" height="52" rx="8" fill="#FFFFFF" stroke="#C4B5FD" stroke-width="1.5"/>
-  <text x="100" y="753" class="font" font-family="Inter, Segoe UI, Roboto, sans-serif" font-size="13" font-weight="700" fill="#5B21B6">Rogan-Gladen 95% CI + Gwet AC2 &gt;= 0.80</text>
-
-  <rect x="80" y="786" width="392" height="52" rx="8" fill="#ECFDF5" stroke="#34D399" stroke-width="1.5"/>
-  <text x="100" y="817" class="mono" font-family="JetBrains Mono, Courier New, monospace" font-size="13" font-weight="700" fill="#047857">Agentic Skill: Plain English to 4-Pt SQL</text>
-
-  <!-- Closed-Loop Feedback Connector Stage 06 -> Stage 02 -->
-  <line x1="276" y1="564" x2="276" y2="502" stroke="#7C3AED" stroke-width="3.5"/>
-  <line x1="276" y1="502" x2="680" y2="502" stroke="#7C3AED" stroke-width="3.5"/>
-  <line x1="680" y1="502" x2="680" y2="468" stroke="#7C3AED" stroke-width="3.5"/>
-  <polygon points="671,468 680,452 689,468" fill="#7C3AED"/>
-  <rect x="334" y="486" width="300" height="32" rx="16" fill="#EDE9FE" stroke="#7C3AED" stroke-width="1.5"/>
-  <text x="484" y="507" text-anchor="middle" class="mono" font-family="JetBrains Mono, Courier New, monospace" font-size="11" font-weight="800" letter-spacing="0.8" fill="#5B21B6">UPGRADES RUBRICS &amp; TRACE SLICES</text>
+  <rect x="448" y="656" width="1088" height="168" rx="14" fill="#F5F3FF" stroke="#7C3AED" stroke-width="3"/>
+  <text x="594" y="750" text-anchor="middle" font-family="'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="28" font-weight="800" fill="#5B21B6">Calibration</text>
+  <rect x="740" y="694" width="360" height="92" rx="12" fill="#FFFFFF" stroke="#8B5CF6" stroke-width="2.5"/>
+  <text x="920" y="749" text-anchor="middle" font-family="'JetBrains Mono', 'Fira Code', 'Courier New', monospace" font-size="25" font-weight="700" fill="#5B21B6">Debiased CI</text>
+  <rect x="1136" y="694" width="360" height="92" rx="12" fill="#ECFDF5" stroke="#10B981" stroke-width="2.5"/>
+  <text x="1316" y="749" text-anchor="middle" font-family="'JetBrains Mono', 'Fira Code', 'Courier New', monospace" font-size="25" font-weight="700" fill="#047857">AC2 &gt;= 0.80</text>
 </svg>
