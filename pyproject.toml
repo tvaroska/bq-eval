@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "bq-eval"
 version = "0.2.2"
-description = "Evaluate AI agents where traces land: BigQuery SQL views run deterministic checks that gate sampled, human-calibrated LLM judges and measure cost per verified outcome."
+description = "Evaluate AI agents where traces land: screen every trace with rules, calibrate sampled LLM judge scores, and track cost per verified outcome, as a reference implementation on BigQuery."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
