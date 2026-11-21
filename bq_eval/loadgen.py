@@ -35,7 +35,7 @@ from bq_eval.loadgen_seeds import (
     build_golden_seed_templates,
 )
 from bq_eval.otel import GenAISpanKind, OTelGenAISpanRecord
-from bq_eval.sql_eval import DEFAULT_SKU_RATES
+from bq_eval.sql_eval import compute_default_span_cost_usd
 
 DEFAULT_SEED_DATASET_ID: str = "agent_eval_seed"
 
@@ -108,7 +108,7 @@ class TimeShiftLoadgenReport(BaseModel):
 
 
 def _deterministic_bucket_100(trace_id: str) -> int:
-    """Deterministic [0..99] hash bucket mirroring `MOD(ABS(FARM_FINGERPRINT(trace_id)), 100)`."""
+    """Deterministic [0..99] SHA-256 preview bucket (approximate volume proxy for BigQuery FARM_FINGERPRINT)."""
     digest = hashlib.sha256(trace_id.encode("utf-8")).digest()
     val = int.from_bytes(digest[:8], byteorder="big", signed=False)
     return val % 100
@@ -122,8 +122,8 @@ def generate_time_shifted_corpus(
     """Time-shift and multiply the 16 golden trace templates into `reference_time`.
 
     - Replicas `1..last_hour_replicas` are placed inside the LAST 1 HOUR
-      (`reference_time - 3..55 minutes`), so Step 2.5 (`INTERVAL 1 HOUR`) always has
-      fresh multi-agent traffic.
+      (`reference_time - 3..55 minutes`), spacing evenly when `last_hour_replicas >= 18`
+      so Step 2.5 (`INTERVAL 1 HOUR`) always contains every requested last-hour replica.
     - Replicas `(last_hour_replicas + 1)..total_replicas` are spread across the
       prior 23 hours (`reference_time - 1h..23h`), preserving exact child-span
       millisecond waterfalls (`span_offset_ms`).
@@ -140,16 +140,18 @@ def generate_time_shifted_corpus(
     spans: list[OTelGenAISpanRecord] = []
     payloads: list[TracePayloadRecord] = []
 
+    last_hour_step_minutes = min(3.0, 52.0 / last_hour_replicas) if last_hour_replicas > 0 else 3.0
+
     for replica_id in range(1, total_replicas + 1):
         if replica_id <= last_hour_replicas:
-            base_age_minutes = replica_id * 3
+            base_age_seconds = round(replica_id * last_hour_step_minutes * 60.0)
         else:
-            base_age_minutes = 60 + ((replica_id - last_hour_replicas) * 35)
+            base_age_seconds = (60 + ((replica_id - last_hour_replicas) * 35)) * 60
 
         for tmpl in templates:
             trace_id = f"{tmpl.base_trace_id}-r{replica_id:03d}-{date_tag}"
             trace_base_start = ref_time - timedelta(
-                seconds=(base_age_minutes * 60) + (tmpl.template_idx * 7)
+                seconds=base_age_seconds + (tmpl.template_idx * 7)
             )
             payloads.append(
                 TracePayloadRecord(
@@ -205,19 +207,7 @@ def generate_time_shifted_corpus(
 
 
 def _compute_span_cost_usd(span: OTelGenAISpanRecord) -> float:
-    rates = DEFAULT_SKU_RATES.get(span.model_name, DEFAULT_SKU_RATES["gemini-3.8-flash"])
-    uncached = span.uncached_input_tokens
-    if span.is_long_context_cliff:
-        return (
-            (uncached / 1e6) * rates[3]
-            + (span.cached_input_tokens / 1e6) * rates[4]
-            + ((span.output_tokens + span.thinking_tokens) / 1e6) * rates[5]
-        )
-    return (
-        (uncached / 1e6) * rates[0]
-        + (span.cached_input_tokens / 1e6) * rates[1]
-        + ((span.output_tokens + span.thinking_tokens) / 1e6) * rates[2]
-    )
+    return compute_default_span_cost_usd(span)
 
 
 def _summarize_app_group(
@@ -367,9 +357,9 @@ def render_loadgen_markdown_report(report: TimeShiftLoadgenReport) -> str:
 
 ## 2. Step 2 & Step 2.5 Trace Slice Volumes Ready for `AI.GENERATE_TABLE`
 
-> Note: Counts below reflect all traces in `v_step2_all_trace_rubric_prompts` (`{report.total_traces:,}` total; `{step1_passing_total:,}` pass Step-1 gates in `v_step2_trace_rubric_prompts`).
+> Note: Counts below reflect all traces in `v_step2_all_trace_rubric_prompts` (`{report.total_traces:,}` total; `{step1_passing_total:,}` pass Step-1 gates in `v_step2_trace_rubric_prompts`). Sample slice counts use a local SHA-256 preview proxy; BigQuery `FARM_FINGERPRINT` selects an independent subset of similar size.
 
-| Evaluation Stage & Slice | SQL Filter on `v_step2_all_trace_rubric_prompts` | Matching Traces |
+| Evaluation Stage & Slice | BigQuery SQL Filter on `v_step2_all_trace_rubric_prompts` | Local Preview Count (SHA-256 Proxy) |
 | :--- | :--- | ---: |
 | **Step 2A — Full Trace Eval (`100%`)** | *(No sample filter)* | `{report.total_traces:,}` |
 | **Step 2B — Default `10%` Sample** | `AND MOD(ABS(FARM_FINGERPRINT(trace_id)), 100) < 10` | `{report.sample_10pct_traces:,}` |

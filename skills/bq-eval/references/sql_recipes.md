@@ -176,42 +176,71 @@ INSERT INTO `agent_eval.eval_results` (
   sampling_stratum, rule0_pass, reasoning_trace, ordinal_score, binary_pass,
   judge_input_tokens, judge_output_tokens, judge_thinking_tokens, evaluated_at
 )
+WITH evaluated AS (
+  SELECT
+    eval_out.trace_id,
+    eval_out.outcome_id,
+    eval_out.apphub_application_id,
+    metric_row.metric_name AS rubric_id,
+    eval_out.step1_pass AS rule0_pass,
+    COALESCE(metric_row.explanation, 'Managed AI.EVALUATE_AGENT verdict') AS reasoning_trace,
+    CAST(ROUND(LEAST(4.0, GREATEST(1.0, metric_row.score * 3.0 + 1.0))) AS INT64) AS ordinal_score,
+    DIV(CHAR_LENGTH(TO_JSON_STRING(eval_out.trace)), 4) AS judge_input_tokens,
+    DIV(CHAR_LENGTH(COALESCE(metric_row.explanation, '')), 4) AS judge_output_tokens
+  FROM AI.EVALUATE_AGENT(
+    TABLE (
+      SELECT cand.*
+      FROM `agent_eval.v_bqaa_eval_turn_filtered` AS cand
+      LEFT JOIN (
+        SELECT trace_id, COUNT(DISTINCT rubric_id) AS scored_metrics
+        FROM `agent_eval.eval_results`
+        WHERE eval_run_id = 'run_2026_11_06_bqaa_managed'
+          AND rubric_id IN (
+            'tool_use_quality_v1',
+            'final_response_quality_v1',
+            'hallucination_v1',
+            'safety_v1'
+          )
+        GROUP BY trace_id
+      ) AS completed
+        ON cand.trace_id = completed.trace_id
+      WHERE MOD(ABS(FARM_FINGERPRINT(cand.trace_id)), 100) < 10
+        AND COALESCE(completed.scored_metrics, 0) < 4
+    ),
+    trace_col => 'trace',
+    managed_metrics => [
+      'tool_use_quality_v1',
+      'final_response_quality_v1',
+      'hallucination_v1',
+      'safety_v1'
+    ]
+  ) AS eval_out,
+  UNNEST(eval_out.evaluation_results) AS metric_row
+  LEFT JOIN `agent_eval.eval_results` AS existing
+    ON eval_out.trace_id = existing.trace_id
+    AND metric_row.metric_name = existing.rubric_id
+    AND existing.eval_run_id = 'run_2026_11_06_bqaa_managed'
+  WHERE metric_row.score IS NOT NULL
+    AND existing.eval_id IS NULL
+)
 SELECT
   GENERATE_UUID() AS eval_id,
   'run_2026_11_06_bqaa_managed' AS eval_run_id,
-  eval_out.trace_id,
-  eval_out.outcome_id,
-  eval_out.apphub_application_id,
-  metric_row.metric_name AS rubric_id,
+  trace_id,
+  outcome_id,
+  apphub_application_id,
+  rubric_id,
   'ai_evaluate_agent_managed' AS judge_model,
   'SAMPLE_10PCT' AS sampling_stratum,
-  eval_out.step1_pass AS rule0_pass,
-  COALESCE(metric_row.explanation, 'Managed AI.EVALUATE_AGENT verdict') AS reasoning_trace,
-  CAST(ROUND(LEAST(4.0, GREATEST(1.0, COALESCE(metric_row.score, 0.0) * 3.0 + 1.0))) AS INT64) AS ordinal_score,
-  (COALESCE(metric_row.score, 0.0) >= 0.75) AS binary_pass,
-  0 AS judge_input_tokens,
-  0 AS judge_output_tokens,
+  rule0_pass,
+  reasoning_trace,
+  ordinal_score,
+  (ordinal_score >= 3) AS binary_pass,
+  judge_input_tokens,
+  judge_output_tokens,
   0 AS judge_thinking_tokens,
   CURRENT_TIMESTAMP() AS evaluated_at
-FROM AI.EVALUATE_AGENT(
-  TABLE (
-    SELECT cand.*
-    FROM `agent_eval.v_bqaa_eval_turn_filtered` AS cand
-    LEFT JOIN `agent_eval.eval_results` AS existing
-      ON cand.trace_id = existing.trace_id
-      AND existing.eval_run_id = 'run_2026_11_06_bqaa_managed'
-    WHERE MOD(ABS(FARM_FINGERPRINT(cand.trace_id)), 100) < 10
-      AND existing.eval_id IS NULL
-  ),
-  trace_col => 'trace',
-  managed_metrics => [
-    'tool_use_quality_v1',
-    'final_response_quality_v1',
-    'hallucination_v1',
-    'safety_v1'
-  ]
-) AS eval_out,
-UNNEST(eval_out.evaluation_results) AS metric_row;
+FROM evaluated;
 ```
 
 ---

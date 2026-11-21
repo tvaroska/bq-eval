@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import warnings
 from collections.abc import Sequence
 from datetime import datetime
@@ -194,11 +195,11 @@ class ModelOption(BaseModel):
 
     config_id: str
     model_name: str
-    rule0_pass_rate: float
-    non_fabrication_rate_nfr: float
-    calibrated_pass_rate: float
-    cost_per_verified_outcome_usd: float
-    p95_latency_ms: float
+    rule0_pass_rate: float = Field(..., ge=0.0, le=1.0, allow_inf_nan=False)
+    non_fabrication_rate_nfr: float = Field(..., ge=0.0, le=1.0, allow_inf_nan=False)
+    calibrated_pass_rate: float = Field(..., ge=0.0, le=1.0, allow_inf_nan=False)
+    cost_per_verified_outcome_usd: float = Field(..., ge=0.0, allow_inf_nan=False)
+    p95_latency_ms: float = Field(..., ge=0.0, allow_inf_nan=False)
 
 
 class ParetoEvalResult(BaseModel):
@@ -217,6 +218,8 @@ def compute_pareto_frontier(
     min_rule0_pass_rate: float = 0.98,
 ) -> ParetoEvalResult:
     """Filter candidates by `NFR == 0.0` + `rule0_pass_rate` and return the non-dominated frontier."""
+    if not math.isfinite(min_rule0_pass_rate) or not (0.0 <= min_rule0_pass_rate <= 1.0):
+        raise ValueError("min_rule0_pass_rate must be finite and in [0.0, 1.0].")
     eligible: list[ModelOption] = []
     disqualified: list[ModelOption] = []
 
@@ -274,6 +277,46 @@ class FocusChargebackRow(BaseModel):
     total_allocated_cost_usd: float
 
 
+def _validate_focus_chargeback_inputs(
+    app_burndown_tokens: dict[str, float],
+    reserved_pt_capacity_tokens: float,
+    reserved_pt_fixed_cost_usd: float | None,
+    reserved_pt_fixed_legacy: float | None,
+    payg_overflow_usd_per_1m_weighted: float,
+) -> float:
+    if not math.isfinite(reserved_pt_capacity_tokens) or reserved_pt_capacity_tokens <= 0:
+        raise ValueError("reserved_pt_capacity_tokens must be finite and positive.")
+    if (
+        not math.isfinite(payg_overflow_usd_per_1m_weighted)
+        or payg_overflow_usd_per_1m_weighted < 0.0
+    ):
+        raise ValueError("payg_overflow_usd_per_1m_weighted must be finite and non-negative.")
+    if reserved_pt_fixed_legacy is not None:
+        warnings.warn(
+            "reserved_pt_Fixed_cost_usd is deprecated; use reserved_pt_fixed_cost_usd instead.",
+            DeprecationWarning,
+            stacklevel=3,
+        )
+        if reserved_pt_fixed_cost_usd is not None:
+            raise ValueError(
+                "Specify either reserved_pt_fixed_cost_usd or reserved_pt_Fixed_cost_usd, not both."
+            )
+        fixed_cost_usd = reserved_pt_fixed_legacy
+    elif reserved_pt_fixed_cost_usd is None:
+        raise ValueError("reserved_pt_fixed_cost_usd is required.")
+    else:
+        fixed_cost_usd = reserved_pt_fixed_cost_usd
+
+    if not math.isfinite(fixed_cost_usd) or fixed_cost_usd < 0.0:
+        raise ValueError("reserved_pt_fixed_cost_usd must be finite and non-negative.")
+    for app_id, tokens in app_burndown_tokens.items():
+        if not math.isfinite(tokens) or tokens < 0.0:
+            raise ValueError(
+                f"app_burndown_tokens[{app_id!r}] must be finite and non-negative, got {tokens!r}."
+            )
+    return fixed_cost_usd
+
+
 def allocate_focus_two_pool_chargeback(  # noqa: PLR0913
     app_burndown_tokens: dict[str, float],
     app_cost_centers: dict[str, str],
@@ -293,25 +336,15 @@ def allocate_focus_two_pool_chargeback(  # noqa: PLR0913
     * Overflow (PAYG): When total burndown exceeds `reserved_pt_capacity_tokens`, excess tokens
       are billed at `payg_overflow_usd_per_1m_weighted` proportional to usage share.
     """
-    if reserved_pt_capacity_tokens <= 0:
-        raise ValueError("reserved_pt_capacity_tokens must be positive.")
-    if reserved_pt_Fixed_cost_usd is not None:
-        warnings.warn(
-            "reserved_pt_Fixed_cost_usd is deprecated; use reserved_pt_fixed_cost_usd instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        if reserved_pt_fixed_cost_usd is not None:
-            raise ValueError(
-                "Specify either reserved_pt_fixed_cost_usd or reserved_pt_Fixed_cost_usd, not both."
-            )
-        fixed_cost_usd = reserved_pt_Fixed_cost_usd
-    elif reserved_pt_fixed_cost_usd is None:
-        raise ValueError("reserved_pt_fixed_cost_usd is required.")
-    else:
-        fixed_cost_usd = reserved_pt_fixed_cost_usd
+    fixed_cost_usd = _validate_focus_chargeback_inputs(
+        app_burndown_tokens=app_burndown_tokens,
+        reserved_pt_capacity_tokens=reserved_pt_capacity_tokens,
+        reserved_pt_fixed_cost_usd=reserved_pt_fixed_cost_usd,
+        reserved_pt_fixed_legacy=reserved_pt_Fixed_cost_usd,
+        payg_overflow_usd_per_1m_weighted=payg_overflow_usd_per_1m_weighted,
+    )
 
-    total_demand = sum(max(0.0, v) for v in app_burndown_tokens.values())
+    total_demand = sum(app_burndown_tokens.values())
     utilized_tokens = min(reserved_pt_capacity_tokens, total_demand)
     idle_tokens = max(0.0, reserved_pt_capacity_tokens - total_demand)
     overflow_tokens = max(0.0, total_demand - reserved_pt_capacity_tokens)

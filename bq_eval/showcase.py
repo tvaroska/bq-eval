@@ -149,14 +149,15 @@ def build_showcase_dataset() -> tuple[
 def run_showcase_pipeline() -> ShowcaseRunArtifacts:
     """Execute the full Tier 1-3 SQL evaluation and FinOps optimization pipeline."""
     spans, judge_outcomes, confusion = build_showcase_dataset()
+    rater_a = [4, 4, 3, 4, 3, 4, 1, 2, 4, 3, 4, 4, 3, 2, 4, 4, 3, 4, 1, 4]
+    rater_b = [4, 4, 3, 4, 3, 3, 1, 2, 4, 3, 4, 4, 3, 2, 4, 4, 3, 4, 1, 4]
+    sme_pairs = list(zip(rater_a, rater_b, strict=True))
     summaries = evaluate_traces_in_sqlite(
         spans=spans,
         judge_outcomes=judge_outcomes,
-        sme_confusion=confusion,
+        sme_confusion={"order-support-agent": confusion},
+        sme_ordinal_pairs={"order-support-agent": sme_pairs},
     )
-
-    rater_a = [4, 4, 3, 4, 3, 4, 1, 2, 4, 3, 4, 4, 3, 2, 4, 4, 3, 4, 1, 4]
-    rater_b = [4, 4, 3, 4, 3, 3, 1, 2, 4, 3, 4, 4, 3, 2, 4, 4, 3, 4, 1, 4]
     ac2 = compute_gwet_ac2(rater_a, rater_b)
 
     eval_roi = compute_eval_finops_roi(

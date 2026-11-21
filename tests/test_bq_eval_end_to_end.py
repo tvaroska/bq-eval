@@ -300,7 +300,13 @@ def test_gwet_ac2_and_confusion_matrix_helpers() -> None:
         [4, 4, 3, 4, 3, 4, 2, 1, 4, 4],
         [4, 4, 3, 4, 3, 4, 2, 1, 4, 3],
     )
-    assert 0.85 <= ac2 <= 1.0
+    # Exact hand-computed quadratic Gwet's AC2:
+    # p_a = (9*1 + 1*(1 - (1/3)^2)) / 10 = 89/90
+    # pi = (0.10, 0.10, 0.25, 0.55) -> sum pi_k*(1-pi_k) = 0.09 + 0.09 + 0.1875 + 0.2475 = 0.615
+    # p_e = (26/27) * 0.615 = 15.99/27; AC2 = (89/90 - 15.99/27) / (1 - 15.99/27)
+    expected_pe = (26.0 / 27.0) * 0.615
+    expected_ac2 = ((89.0 / 90.0) - expected_pe) / (1.0 - expected_pe)
+    assert ac2 == pytest.approx(expected_ac2, abs=1e-12)
 
 
 def test_finops_roi_prefix_cache_pareto_and_focus_chargeback() -> None:
@@ -311,8 +317,9 @@ def test_finops_roi_prefix_cache_pareto_and_focus_chargeback() -> None:
         canary_sample_rate=0.05,
         judge_cost_per_trace_usd=0.0025,
     )
-    assert 90.0 <= roi.savings_pct <= 95.0
-    assert roi.net_savings_usd > 200.0
+    assert roi.savings_pct == pytest.approx(92.15, abs=1e-6)
+    assert roi.net_savings_usd == pytest.approx(230.375, abs=1e-6)
+    assert roi.stratified_3tier_judge_usd == pytest.approx(19.625, abs=1e-6)
 
     # 2. Prefix-cache 1/N dilution diagnostics
     now = datetime(2026, 11, 5, 12, 0, 0, tzinfo=UTC)
@@ -353,9 +360,22 @@ def test_finops_roi_prefix_cache_pareto_and_focus_chargeback() -> None:
                 cost_per_verified_outcome_usd=0.0008,
                 p95_latency_ms=500.0,
             ),
+            ModelOption(
+                config_id="low-rule0-cheap",
+                model_name="gemini-3.5-flash-lite",
+                rule0_pass_rate=0.97,
+                non_fabrication_rate_nfr=0.0,
+                calibrated_pass_rate=0.95,
+                cost_per_verified_outcome_usd=0.0005,
+                p95_latency_ms=400.0,
+            ),
         ]
     )
-    assert len(pareto.disqualified_for_fabrication) == 1
+    assert len(pareto.disqualified_for_fabrication) == 2
+    assert {c.config_id for c in pareto.disqualified_for_fabrication} == {
+        "cheap-fabricator",
+        "low-rule0-cheap",
+    }
     assert pareto.recommended_default is not None
     assert pareto.recommended_default.config_id == "safe-fast"
 
@@ -367,6 +387,12 @@ def test_finops_roi_prefix_cache_pareto_and_focus_chargeback() -> None:
         reserved_pt_fixed_cost_usd=100.0,
     )
     assert len(rows) == 3  # app-a, app-b, plus platform-shared-reservation idle pool
+    by_owner = {r.apphub_application_id: r for r in rows}
+    assert by_owner["app-a"].utilized_pt_cost_usd == pytest.approx(60.0, abs=1e-12)
+    assert by_owner["app-b"].utilized_pt_cost_usd == pytest.approx(20.0, abs=1e-12)
+    assert by_owner[
+        "platform-shared-reservation"
+    ].unutilized_idle_capacity_tax_usd == pytest.approx(20.0, abs=1e-12)
     total_allocated = sum(r.total_allocated_cost_usd for r in rows)
     assert total_allocated == pytest.approx(100.0)
 
@@ -419,6 +445,30 @@ def test_showcase_demo_and_cli_html_favicon(tmp_path: Path) -> None:
         build_ai_generate_table_judge_sql(project_id="test-proj", run_id="bad' OR 1=1--")
     assert "groundedness_4pt_v1" in CANONICAL_RUBRICS
     artifacts = run_showcase_pipeline()
+    order = artifacts.summaries["order-support-agent"]
+    # Pin headline README values (`F4`) and non-null SQLite `gwet_ac2` (`M6-2`).
+    assert order.calibrated_pass_rate is not None
+    assert order.cost_per_verified_outcome_usd is not None
+    assert order.calibrated_pass_rate == pytest.approx(0.873711340206, abs=1e-6)
+    assert order.calibrated_ci_95_lower == pytest.approx(0.647415, abs=1e-4)
+    assert order.calibrated_ci_95_upper == pytest.approx(1.0, abs=1e-12)
+    # 37 Flash spans: (9k*0.15 + 3k*0.015 + 800*0.60)/1e6 = 0.001875 each -> 0.069375
+    assert order.production_inference_usd == pytest.approx(37 * 0.001875, abs=1e-12)
+    # 2 standard Argon spans + 1 >200K Argon span
+    expected_escalation = (
+        2 * ((9_000 * 1.25 + 3_000 * 0.125 + 1_000 * 5.00) / 1e6)
+        + (237_600 * 2.50 + 2_400 * 0.25 + 1_000 * 18.75) / 1e6
+    )
+    assert order.conflict_escalation_usd == pytest.approx(expected_escalation, abs=1e-12)
+    assert order.autorater_judge_usd == pytest.approx(22 * 0.0025, abs=1e-12)
+    expected_total = order.production_inference_usd + expected_escalation + 22 * 0.0025
+    assert order.total_spend_usd == pytest.approx(expected_total, abs=1e-12)
+    expected_cpvo = expected_total / (40 * 0.95 * order.calibrated_pass_rate)
+    assert order.cost_per_verified_outcome_usd == pytest.approx(expected_cpvo, abs=1e-12)
+    assert f"${order.cost_per_verified_outcome_usd:.4f}" == "$0.0232"
+    assert order.gwet_ac2 is not None
+    assert order.gwet_ac2 == pytest.approx(artifacts.gwet_ac2, abs=1e-12)
+    assert order.passes_irr_gate is True
     out = write_html_scorecard(artifacts, tmp_path / "direct.html")
     assert out.exists()
 
@@ -437,9 +487,11 @@ def test_progressive_step1_step2_step25_step3_pack() -> None:
     csv_path = REPO_ROOT / "sql" / "step2_rubrics.csv"
     with csv_path.open("r", encoding="utf-8", newline="") as f:
         rows = list(csv.DictReader(f))
-    assert len(rows) == 6
+    assert len(rows) == 8
     rubric_ids = {r["rubric_id"] for r in rows}
     assert rubric_ids == set(CANONICAL_RUBRICS)
+    assert "contradiction_grounding_4pt_v1" in rubric_ids
+    assert "pii_perturbation_invariance_4pt_v1" in rubric_ids
     step2_sql = (REPO_ROOT / "sql" / "step2_stateless_eval.sql").read_text(encoding="utf-8")
     for r in rows:
         spec = CANONICAL_RUBRICS[r["rubric_id"]]
@@ -517,6 +569,21 @@ def test_time_shift_loadgen_sql_and_cli_parity(tmp_path: Path) -> None:
     assert report.total_traces == 800
     assert report.last_1h_traces == 15 * 16  # 240 traces inside the last 1 hour
     assert len(report.step1_rows) == 4
+
+    # F20: >19 last-hour replicas must still fit inside the last 1 hour window.
+    hi_spans, hi_payloads, _ = generate_time_shifted_corpus(
+        reference_time=now,
+        total_replicas=30,
+        last_hour_replicas=25,
+    )
+    hi_report = evaluate_time_shifted_corpus(
+        spans=hi_spans,
+        payloads=hi_payloads,
+        reference_time=now,
+        total_replicas=30,
+        last_hour_replicas=25,
+    )
+    assert hi_report.last_1h_traces == 25 * 16
 
     by_app = {r.apphub_application_id: r for r in report.step1_rows}
     assert set(by_app) == {

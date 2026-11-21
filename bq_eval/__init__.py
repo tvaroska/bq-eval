@@ -14,6 +14,8 @@ from bq_eval.calibration import (
     compute_confusion_matrix,
     compute_gwet_ac2,
     rogan_gladen_calibrate,
+    rogan_gladen_wilson_ci,
+    stratified_rogan_gladen_calibrate,
 )
 from bq_eval.finops import (
     EvalFinOpsROI,
@@ -69,11 +71,13 @@ from bq_eval.sql_eval import (
     SQLTraceEvalSummary,
     build_ai_evaluate_agent_sql,
     build_ai_generate_table_judge_sql,
+    compute_default_span_cost_usd,
     escape_sql_xml_expr,
     evaluate_traces_in_sqlite,
+    normalize_model_name,
 )
 
-__version__ = "0.2.2"
+__version__ = "0.2.3"
 
 __all__ = [
     "CACHED_INPUT_BURNDOWN_WEIGHT",
@@ -117,6 +121,7 @@ __all__ = [
     "build_calibration_result",
     "build_golden_seed_templates",
     "compute_confusion_matrix",
+    "compute_default_span_cost_usd",
     "compute_eval_finops_roi",
     "compute_gwet_ac2",
     "compute_pareto_frontier",
@@ -129,9 +134,12 @@ __all__ = [
     "evaluate_traces_in_sqlite",
     "export_time_shifted_jsonl",
     "generate_time_shifted_corpus",
+    "normalize_model_name",
     "plan_off_peak_eval_schedule",
     "render_loadgen_markdown_report",
     "resolve_application_id",
     "rogan_gladen_calibrate",
+    "rogan_gladen_wilson_ci",
+    "stratified_rogan_gladen_calibrate",
     "wrap_untrusted_text",
 ]

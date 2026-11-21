@@ -16,6 +16,7 @@ DETERMINISTIC_CORE_MODULES = (
     "rubrics.py",
     "calibration.py",
     "sql_eval.py",
+    "sqlite_views.py",
     "finops.py",
     "loadgen.py",
     "loadgen_seeds.py",

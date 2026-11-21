@@ -29,12 +29,13 @@ class GenAISpanKind(StrEnum):
 
 
 class FinOpsTrafficType(StrEnum):
-    """4-Bucket FinOps cost attribution taxonomy."""
+    """4-Bucket FinOps cost attribution taxonomy plus explicit unclassified fallback."""
 
     PRODUCTION_INFERENCE = "production_inference"
     CONFLICT_ESCALATION = "conflict_escalation"
     AGENT_GYM_EVAL = "agent_gym_eval"
     AUTORATER_JUDGE = "autorater_judge"
+    UNCLASSIFIED = "unclassified"
 
 
 def resolve_application_id(

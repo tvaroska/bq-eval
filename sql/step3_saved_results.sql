@@ -78,56 +78,114 @@ CLUSTER BY apphub_application_id, rubric_id, trace_id;
 -- -----------------------------------------------------------------------------
 -- 2B. Idempotent Step-3 Persistence Adapter — Engine B (`AI.EVALUATE_AGENT`)
 --     Persists managed BQAA `AI.EVALUATE_AGENT` verdicts into `eval_results` so
---     Engine B runs join seamlessly into Step-3 trends, paired diffs, and CPVO.
+--     Engine B runs join seamlessly into Step-3 trends, paired diffs, quota
+--     accounting, and CPVO.
+--     * Per-metric `UNNEST(eval_out.evaluation_results)` fan-out attributes 1x
+--       trace-prompt input tokens per managed metric call and output tokens from
+--       `metric_row.explanation`.
+--     * Skips rows where `metric_row.score IS NULL` (fail-closed) and derives
+--       `binary_pass` strictly from `ordinal_score >= 3`.
+--     * Deduplicates on `(eval_run_id, trace_id, metric_row.metric_name)` so
+--       partial-metric backfills persist only missing metrics.
 -- -----------------------------------------------------------------------------
 -- INSERT INTO `agent_eval.eval_results` (
 --   eval_id, eval_run_id, trace_id, outcome_id, apphub_application_id, rubric_id, judge_model,
 --   sampling_stratum, rule0_pass, reasoning_trace, ordinal_score, binary_pass,
 --   judge_input_tokens, judge_output_tokens, judge_thinking_tokens, evaluated_at
 -- )
+-- WITH evaluated AS (
+--   SELECT
+--     eval_out.trace_id,
+--     eval_out.outcome_id,
+--     eval_out.apphub_application_id,
+--     metric_row.metric_name AS rubric_id,
+--     eval_out.step1_pass AS rule0_pass,
+--     COALESCE(metric_row.explanation, 'Managed AI.EVALUATE_AGENT verdict') AS reasoning_trace,
+--     CAST(ROUND(LEAST(4.0, GREATEST(1.0, metric_row.score * 3.0 + 1.0))) AS INT64) AS ordinal_score,
+--     DIV(CHAR_LENGTH(TO_JSON_STRING(eval_out.trace)), 4) AS judge_input_tokens,
+--     DIV(CHAR_LENGTH(COALESCE(metric_row.explanation, '')), 4) AS judge_output_tokens
+--   FROM AI.EVALUATE_AGENT(
+--     TABLE (
+--       SELECT cand.*
+--       FROM `agent_eval.v_bqaa_eval_turn_filtered` AS cand
+--       LEFT JOIN (
+--         SELECT trace_id, COUNT(DISTINCT rubric_id) AS scored_metrics
+--         FROM `agent_eval.eval_results`
+--         WHERE eval_run_id = 'run_2026_11_06_bqaa_managed'
+--           AND rubric_id IN (
+--             'tool_use_quality_v1',
+--             'final_response_quality_v1',
+--             'hallucination_v1',
+--             'safety_v1'
+--           )
+--         GROUP BY trace_id
+--       ) AS completed
+--         ON cand.trace_id = completed.trace_id
+--       WHERE MOD(ABS(FARM_FINGERPRINT(cand.trace_id)), 100) < 10
+--         AND COALESCE(completed.scored_metrics, 0) < 4
+--     ),
+--     trace_col => 'trace',
+--     managed_metrics => [
+--       'tool_use_quality_v1',
+--       'final_response_quality_v1',
+--       'hallucination_v1',
+--       'safety_v1'
+--     ]
+--   ) AS eval_out,
+--   UNNEST(eval_out.evaluation_results) AS metric_row
+--   LEFT JOIN `agent_eval.eval_results` AS existing
+--     ON eval_out.trace_id = existing.trace_id
+--     AND metric_row.metric_name = existing.rubric_id
+--     AND existing.eval_run_id = 'run_2026_11_06_bqaa_managed'
+--   WHERE metric_row.score IS NOT NULL
+--     AND existing.eval_id IS NULL
+-- )
 -- SELECT
 --   GENERATE_UUID() AS eval_id,
 --   'run_2026_11_06_bqaa_managed' AS eval_run_id,
---   eval_out.trace_id,
---   eval_out.outcome_id,
---   eval_out.apphub_application_id,
---   metric_row.metric_name AS rubric_id,
+--   trace_id,
+--   outcome_id,
+--   apphub_application_id,
+--   rubric_id,
 --   'ai_evaluate_agent_managed' AS judge_model,
 --   'SAMPLE_10PCT' AS sampling_stratum,
---   eval_out.step1_pass AS rule0_pass,
---   COALESCE(metric_row.explanation, 'Managed AI.EVALUATE_AGENT verdict') AS reasoning_trace,
---   CAST(ROUND(LEAST(4.0, GREATEST(1.0, COALESCE(metric_row.score, 0.0) * 3.0 + 1.0))) AS INT64) AS ordinal_score,
---   (COALESCE(metric_row.score, 0.0) >= 0.75) AS binary_pass,
---   0 AS judge_input_tokens,
---   0 AS judge_output_tokens,
+--   rule0_pass,
+--   reasoning_trace,
+--   ordinal_score,
+--   (ordinal_score >= 3) AS binary_pass,
+--   judge_input_tokens,
+--   judge_output_tokens,
 --   0 AS judge_thinking_tokens,
 --   CURRENT_TIMESTAMP() AS evaluated_at
--- FROM AI.EVALUATE_AGENT(
---   TABLE (
---     SELECT cand.*
---     FROM `agent_eval.v_bqaa_eval_turn_filtered` AS cand
---     LEFT JOIN `agent_eval.eval_results` AS existing
---       ON cand.trace_id = existing.trace_id
---       AND existing.eval_run_id = 'run_2026_11_06_bqaa_managed'
---     WHERE MOD(ABS(FARM_FINGERPRINT(cand.trace_id)), 100) < 10
---       AND existing.eval_id IS NULL
---   ),
---   trace_col => 'trace',
---   managed_metrics => [
---     'tool_use_quality_v1',
---     'final_response_quality_v1',
---     'hallucination_v1',
---     'safety_v1'
---   ]
--- ) AS eval_out,
--- UNNEST(eval_out.evaluation_results) AS metric_row;
+-- FROM evaluated;
 
 -- -----------------------------------------------------------------------------
--- 3. View 3A: Saved Run-Level Summary (`v_step3_eval_runs`)
+-- 3. View 3A: Deduplicated Saved Run-Level Summary (`v_step3_eval_runs`)
 -- -----------------------------------------------------------------------------
 CREATE OR REPLACE VIEW `agent_eval.v_step3_eval_runs` AS
+WITH normalized_results AS (
+  SELECT
+    COALESCE(e.eval_run_id, FORMAT_TIMESTAMP('%Y-%m-%d', e.evaluated_at)) AS eval_run_id,
+    e.trace_id,
+    e.apphub_application_id,
+    e.rubric_id,
+    e.judge_model,
+    e.sampling_stratum,
+    e.rule0_pass,
+    e.binary_pass,
+    e.evaluated_at
+  FROM `agent_eval.eval_results` AS e
+),
+deduped_results AS (
+  SELECT *
+  FROM normalized_results
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY eval_run_id, trace_id, rubric_id
+    ORDER BY evaluated_at DESC
+  ) = 1
+)
 SELECT
-  COALESCE(e.eval_run_id, FORMAT_TIMESTAMP('%Y-%m-%d', e.evaluated_at)) AS eval_run_id,
+  e.eval_run_id,
   e.apphub_application_id,
   e.rubric_id,
   e.judge_model,
@@ -138,18 +196,48 @@ SELECT
   AVG(IF(e.rule0_pass AND e.binary_pass, 1.0, 0.0)) AS verified_outcome_rate,
   MIN(e.evaluated_at) AS started_at,
   MAX(e.evaluated_at) AS completed_at
-FROM `agent_eval.eval_results` AS e
+FROM deduped_results AS e
 GROUP BY
-  eval_run_id,
+  e.eval_run_id,
   e.apphub_application_id,
   e.rubric_id,
   e.judge_model,
   e.sampling_stratum;
 
 -- -----------------------------------------------------------------------------
--- 4. View 3B: Paired Run Comparison for 0% Negative-Flip Regression Gates
+-- 4. View 3B: Temporal Paired Run Comparison for 0% Negative-Flip Gates
+--    * Deduplicates append-only eval_results on (eval_run_id, trace_id, rubric_id)
+--    * Orders baseline -> candidate temporally by MIN(evaluated_at) (with
+--      deterministic eval_run_id tie-break when timestamps match)
 -- -----------------------------------------------------------------------------
 CREATE OR REPLACE VIEW `agent_eval.v_step3_paired_run_comparison` AS
+WITH normalized_results AS (
+  SELECT
+    COALESCE(e.eval_run_id, FORMAT_TIMESTAMP('%Y-%m-%d', e.evaluated_at)) AS eval_run_id,
+    e.apphub_application_id,
+    e.rubric_id,
+    e.trace_id,
+    e.ordinal_score,
+    e.binary_pass,
+    e.reasoning_trace,
+    e.evaluated_at
+  FROM `agent_eval.eval_results` AS e
+),
+deduped_results AS (
+  SELECT *
+  FROM normalized_results
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY eval_run_id, trace_id, rubric_id
+    ORDER BY evaluated_at DESC
+  ) = 1
+),
+run_starts AS (
+  SELECT
+    eval_run_id,
+    MIN(evaluated_at) AS run_started_at
+  FROM deduped_results
+  GROUP BY eval_run_id
+)
 SELECT
   base.apphub_application_id,
   base.rubric_id,
@@ -163,8 +251,17 @@ SELECT
   (base.binary_pass AND NOT cand.binary_pass) AS is_negative_flip,
   (NOT base.binary_pass AND cand.binary_pass) AS is_positive_flip,
   cand.reasoning_trace AS candidate_reasoning
-FROM `agent_eval.eval_results` AS base
-INNER JOIN `agent_eval.eval_results` AS cand
+FROM deduped_results AS base
+INNER JOIN run_starts AS base_start
+  ON base.eval_run_id = base_start.eval_run_id
+INNER JOIN deduped_results AS cand
   ON base.trace_id = cand.trace_id
   AND base.rubric_id = cand.rubric_id
-  AND base.eval_run_id < cand.eval_run_id;
+  AND base.eval_run_id != cand.eval_run_id
+INNER JOIN run_starts AS cand_start
+  ON cand.eval_run_id = cand_start.eval_run_id
+WHERE base_start.run_started_at < cand_start.run_started_at
+  OR (
+    base_start.run_started_at = cand_start.run_started_at
+    AND base.eval_run_id < cand.eval_run_id
+  );

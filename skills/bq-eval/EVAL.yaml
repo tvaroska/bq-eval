@@ -1,0 +1,58 @@
+schema_version: "1.0"
+skill: bq-eval
+skill_file: SKILL.md
+standard_version: "v2026.11.3"
+fail_closed_on_zero_scored: true
+min_scored_cases: 1
+pass_threshold: 1.0
+
+principles:
+  - EVAL-P01
+  - EVAL-P02
+  - EVAL-P03
+  - EVAL-P04
+  - EVAL-P08
+  - EVAL-P10
+  - EVAL-P11
+
+cases:
+  - id: define-4pt-rubric-merge
+    workflow: Workflow 1
+    prompt: "Add a 4-point ordinal rubric checking contradiction-aware multi-source grounding."
+    required_fragments:
+      - "MERGE INTO agent_eval.rubrics"
+      - "<untrusted_text>"
+      - "reasoning_trace"
+      - "ordinal_score"
+      - "Score 1"
+      - "Score 4"
+    forbidden_fragments:
+      - "Score 5"
+
+  - id: slice-last-1h-5pct-engine-a
+    workflow: Workflow 2
+    prompt: "Run groundedness_4pt_v1 on 5% of the last 1 hour of traces using Engine A."
+    required_fragments:
+      - "v_step2_trace_rubric_prompts"
+      - "TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR)"
+      - "MOD(ABS(FARM_FINGERPRINT(trace_id)), 100) < 5"
+      - "'reasoning_trace STRING NOT NULL, ordinal_score INT64 NOT NULL' AS output_schema"
+      - "model_params"
+
+  - id: engine-b-prefiltered-managed-metrics
+    workflow: Workflow 2
+    prompt: "Evaluate 10% of BQAA turns using Engine B AI.EVALUATE_AGENT with Step-1 pre-filtering."
+    required_fragments:
+      - "AI.EVALUATE_AGENT"
+      - "v_bqaa_eval_turn_filtered"
+      - "MOD(ABS(FARM_FINGERPRINT(trace_id)), 100) < 10"
+      - "trace_col => 'trace'"
+
+  - id: promote-step3-idempotent-insert
+    workflow: Workflow 3
+    prompt: "Persist Step-2 verdicts into agent_eval.eval_results with idempotent deduplication."
+    required_fragments:
+      - "INSERT INTO `agent_eval.eval_results`"
+      - "LEFT JOIN `agent_eval.eval_results` AS existing"
+      - "existing.eval_id IS NULL"
+      - "outcome_id"

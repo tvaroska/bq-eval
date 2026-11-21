@@ -6,8 +6,8 @@
 
 2. **Fail-Closed Calibration & Prevalence Debiasing (`No Unjudged 100% Defaults`)**:
    - Never report raw uncalibrated LLM judge pass rates ($\hat{p}_{\text{judge}}$) as ground truth when SME calibration labels exist, and **never** default unjudged workloads (`judged_samples == 0`) or degenerate calibration slices (`youden_j <= 1e-6`) to `calibrated_pass_rate = 1.0`.
-   - Unjudged or uncalibrated applications must evaluate fail-closed to `None` / SQL `NULL` (`calibration_status = "UNJUDGED"` or `"UNCALIBRATED"`).
-   - Estimate conditional semantic pass rate $\hat{\theta}_{\text{RG}} = \hat{P}(\text{Semantic Pass} \mid \text{Rule 0 Pass})$ strictly over `rule0_pass = TRUE` judged traces using the **Rogan-Gladen / PPI** estimator (`rogan_gladen_calibrate()`) with delta-method 95% confidence intervals, paired with prevalence-robust **Gwet's AC2 $\ge 0.80$** (`compute_gwet_ac2()`).
+   - Unjudged or uncalibrated applications evaluate fail-closed to SQL `NULL` / `None` in BigQuery views and `evaluate_traces_in_sqlite()` (`calibration_status = "UNJUDGED"` or `"UNCALIBRATED"`), while direct `rogan_gladen_calibrate()` raises `ValueError` when `youden_j <= 1e-6`.
+   - Estimate conditional semantic pass rate $\hat{\theta}_{\text{RG}} = \hat{P}(\text{Semantic Pass} \mid \text{Rule 0 Pass})$ strictly over `rule0_pass = TRUE` judged traces with `StratPPI` population stratum weighting (`w_s = N_s / N`) and Delta-method / Lang & Reiczigel (2014) Wilson plug-in 95% confidence intervals, paired with prevalence-robust **Gwet's AC2 $\ge 0.80$** (`compute_gwet_ac2()`).
 
 3. **Prompt-Injection Escaping & Verdict Field Ordering**:
    - Escape `&`, `<`, and `>` in all untrusted user prompts, retrieved RAG chunks, and candidate outputs (`wrap_untrusted_text()` in Python and `escape_sql_xml_expr()` / nested `REPLACE()` in `build_ai_generate_table_judge_sql()` and `v_step2_trace_rubric_prompts`) before wrapping in `<untrusted_text>`.

@@ -79,30 +79,31 @@ SELECT
   CASE
     WHEN s.model_name IS NULL OR s.model_name = 'none' OR (s.input_tokens = 0 AND s.output_tokens = 0 AND s.thinking_tokens = 0) THEN
       0.0
-    WHEN s.model_name = 'gemini-4-argon' AND s.input_tokens > 200000 THEN
+    WHEN REGEXP_REPLACE(s.model_name, r'-(?:\d{3}|ga|rc|qcd|preview)$', '') = 'gemini-4-argon' AND s.input_tokens > 200000 THEN
       (GREATEST(0, s.input_tokens - s.cached_input_tokens) / 1e6) * 2.50
       + (s.cached_input_tokens / 1e6) * 0.250
       + ((s.output_tokens + s.thinking_tokens) / 1e6) * 18.75
-    WHEN s.model_name = 'gemini-4-argon' THEN
+    WHEN REGEXP_REPLACE(s.model_name, r'-(?:\d{3}|ga|rc|qcd|preview)$', '') = 'gemini-4-argon' THEN
       (GREATEST(0, s.input_tokens - s.cached_input_tokens) / 1e6) * 1.25
       + (s.cached_input_tokens / 1e6) * 0.125
       + ((s.output_tokens + s.thinking_tokens) / 1e6) * 5.00
-    WHEN s.model_name = 'gemini-3.5-flash-lite' AND s.input_tokens > 200000 THEN
+    WHEN REGEXP_REPLACE(s.model_name, r'-(?:\d{3}|ga|rc|qcd|preview)$', '') = 'gemini-3.5-flash-lite' AND s.input_tokens > 200000 THEN
       (GREATEST(0, s.input_tokens - s.cached_input_tokens) / 1e6) * 0.15
       + (s.cached_input_tokens / 1e6) * 0.015
       + ((s.output_tokens + s.thinking_tokens) / 1e6) * 1.125
-    WHEN s.model_name = 'gemini-3.5-flash-lite' THEN
+    WHEN REGEXP_REPLACE(s.model_name, r'-(?:\d{3}|ga|rc|qcd|preview)$', '') = 'gemini-3.5-flash-lite' THEN
       (GREATEST(0, s.input_tokens - s.cached_input_tokens) / 1e6) * 0.075
       + (s.cached_input_tokens / 1e6) * 0.0075
       + ((s.output_tokens + s.thinking_tokens) / 1e6) * 0.30
-    WHEN s.input_tokens > 200000 THEN
+    WHEN REGEXP_REPLACE(s.model_name, r'-(?:\d{3}|ga|rc|qcd|preview)$', '') IN ('gemini-3.8-flash', 'ai_evaluate_agent_managed') AND s.input_tokens > 200000 THEN
       (GREATEST(0, s.input_tokens - s.cached_input_tokens) / 1e6) * 0.30
       + (s.cached_input_tokens / 1e6) * 0.030
       + ((s.output_tokens + s.thinking_tokens) / 1e6) * 2.25
-    ELSE
+    WHEN REGEXP_REPLACE(s.model_name, r'-(?:\d{3}|ga|rc|qcd|preview)$', '') IN ('gemini-3.8-flash', 'ai_evaluate_agent_managed') THEN
       (GREATEST(0, s.input_tokens - s.cached_input_tokens) / 1e6) * 0.15
       + (s.cached_input_tokens / 1e6) * 0.015
       + ((s.output_tokens + s.thinking_tokens) / 1e6) * 0.60
+    ELSE NULL
   END AS span_cost_usd,
   s.attributes
 FROM `agent_eval.otel_spans` AS s;
@@ -363,8 +364,18 @@ SELECT
   COUNT(DISTINCT IF(w.outcome_id IS NOT NULL AND w.outcome_id != '', w.trace_id, NULL)) AS attributed_traces,
   COUNT(DISTINCT IF(w.outcome_id IS NULL OR w.outcome_id = '', w.trace_id, NULL)) AS unattributed_traces,
   SUM(IF(w.outcome_id IS NOT NULL AND w.outcome_id != '', w.span_cost_usd, 0.0)) AS attributed_spend_usd,
-  SUM(IF(w.outcome_id IS NULL OR w.outcome_id = '', w.span_cost_usd, 0.0)) AS unattributed_spend_usd,
-  SUM(w.span_cost_usd) AS total_spend_usd,
+  SUM(IF(w.outcome_id IS NULL OR w.outcome_id = '', COALESCE(w.span_cost_usd, 0.0), 0.0)) AS unattributed_spend_usd,
+  COUNTIF(
+    w.finops_traffic_type NOT IN ('production_inference', 'conflict_escalation', 'agent_gym_eval', 'autorater_judge')
+  ) AS unclassified_traffic_spans,
+  SUM(
+    IF(
+      w.finops_traffic_type NOT IN ('production_inference', 'conflict_escalation', 'agent_gym_eval', 'autorater_judge'),
+      COALESCE(w.span_cost_usd, 0.0),
+      0.0
+    )
+  ) AS unclassified_traffic_spend_usd,
+  SUM(COALESCE(w.span_cost_usd, 0.0)) AS total_spend_usd,
   100.0 * COALESCE(
     SAFE_DIVIDE(
       SUM(IF(w.outcome_id IS NOT NULL AND w.outcome_id != '', w.span_cost_usd, 0.0)),

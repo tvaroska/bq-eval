@@ -4,9 +4,10 @@ build-backend = "hatchling.build"
 
 [project]
 name = "bq-eval"
-version = "0.2.2"
+version = "0.2.3"
 description = "Evaluate AI agents where traces land: screen every trace with rules, calibrate sampled LLM judge scores, and track cost per verified outcome, as a reference implementation on BigQuery."
 readme = "README.md"
+license = "Apache-2.0"
 requires-python = ">=3.12"
 dependencies = [
   "pydantic>=2.7.0",
@@ -64,3 +65,6 @@ python_version = "3.12"
 strict = true
 explicit_package_bases = true
 exclude = ["^\\.venv/"]
+
+[tool.uv]
+required-version = ">=0.12.24"

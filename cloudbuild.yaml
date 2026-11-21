@@ -1,5 +1,5 @@
 steps:
-  - name: "ghcr.io/astral-sh/uv:python3.12-bookworm-slim"
+  - name: "ghcr.io/astral-sh/uv:0.12.24-python3.12-bookworm-slim"
     id: "lint-and-test"
     entrypoint: "bash"
     args:
@@ -12,7 +12,7 @@ steps:
         .venv/bin/ruff format --check --no-cache bq_eval tests examples scripts
         .venv/bin/ruff check --no-cache bq_eval tests examples scripts
         .venv/bin/mypy --strict --cache-dir=/dev/null bq_eval tests examples scripts
-        .venv/bin/pytest -p no:cacheprovider -v
+        .venv/bin/pytest -p no:cacheprovider -v -rs
         .venv/bin/bq-eval demo --html-out /tmp/scorecard.html >/dev/null
         .venv/bin/bq-eval loadgen --replicas 5 --last-hour-replicas 2 >/dev/null
         .venv/bin/bq-eval judge-sql --project-id demo-proj >/dev/null

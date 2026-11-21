@@ -91,7 +91,7 @@ def _resolve_traffic_type(meta: dict[str, Any]) -> FinOpsTrafficType:
     try:
         return FinOpsTrafficType(raw_traffic)
     except ValueError:
-        return FinOpsTrafficType.PRODUCTION_INFERENCE
+        return FinOpsTrafficType.UNCLASSIFIED
 
 
 def _bqaa_event_to_span(ev: BQAAAgentEvent) -> OTelGenAISpanRecord | None:

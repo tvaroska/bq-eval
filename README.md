@@ -6,7 +6,7 @@ Token dashboards show what an agent spent, not whether it finished the job. Judg
 
 ## Verified Receipts
 
-Local math passes `54/54` tests (`0.0` mock ratio, `< 1e-12` SQLite-vs-Python parity). Live receipts come from a generated-document Google Cloud fleet (`343` labeled cases, `443` closed outcomes, `28,752` spans, `_AllSpans` lag `p50 = 87 ms`, `p95 = 11.4 s`).
+Local math passes `67/67` tests (`0.0` mock ratio, `< 1e-12` SQLite-vs-Python parity). Live receipts come from a generated-document Google Cloud fleet (`343` labeled cases, `443` closed outcomes, `28,752` spans, `_AllSpans` lag `p50 = 87 ms`, `p95 = 11.4 s`).
 
 | Scope | Measured Result | Proof |
 | :--- | :--- | :--- |
@@ -28,16 +28,16 @@ If you want prompt-iteration UIs, annotation queues, or single-team tracing outs
 ## Where This Breaks
 
 1. **Model-vs-model calibration today, not blind human SMEs:** Live `AC2 = 0.8605` compares `gemini-3.8-flash` to `gemini-4-argon` (`30/30` cases). Regulated calibration still requires `~100` blind human labels in `sme_labels`.
-2. **Tail-sampling bias and small live slices:** Mixing `100%` error tails with a `5%` canary overweights errors (`~20:1`) in unstratified pass rates, and the skill drop (`N = 10`) omits human reviewer wages.
-3. **BigQuery-only SQL and regional limits:** Core queries use `AI.GENERATE_TABLE` and `FARM_FINGERPRINT`. `AI.EVALUATE_AGENT` requires single regions and currently logs `0` tokens against the daily quota guard.
+2. **Small live slices and reviewer wages:** `StratPPI` population stratum weighting debiases `ERROR_OR_SLA_TAIL` vs. canary sampling in SQL and SQLite, but the live skill comparison (`N = 10`) remains small and excludes human reviewer wages.
+3. **BigQuery-only SQL and regional limits:** Core queries use `AI.GENERATE_TABLE` and `FARM_FINGERPRINT`. `AI.EVALUATE_AGENT` requires single regions (and its Step-3 token accounting uses `CHAR_LENGTH / 4` estimates).
 4. **No one-click IaC deploy yet:** Offline mode uses a SQLite twin; live BigQuery views assume existing `agent_events` or `_AllSpans` datasets and manual `bq query` runs.
 
 ## Quick Start
 
-Run the zero-credential SQLite twin and full 54-test suite locally:
+Run the zero-credential SQLite twin and full test suite locally:
 
 ```bash
-uv sync
+uv sync --extra dev
 uv run python -m bq_eval.cli demo
 uv run pytest -p no:cacheprovider -v
 ```
