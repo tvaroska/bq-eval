@@ -4,68 +4,70 @@
 
   <rect x="24" y="24" width="1552" height="104" rx="14" fill="#0F172A"/>
   <rect x="24" y="96" width="1552" height="32" fill="#0F172A"/>
-  <text x="64" y="88" font-family="'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="38" font-weight="800" fill="#FFFFFF">BQ Eval</text>
-  <text x="256" y="87" font-family="'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="26" font-weight="600" fill="#CBD5E1">Lakehouse SQL Evals</text>
+  <text x="64" y="90" font-family="'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="42" font-weight="800" fill="#FFFFFF">BQ Eval</text>
+  <text x="268" y="89" font-family="'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="28" font-weight="600" fill="#E2E8F0">In-Warehouse Views</text>
 
-  <rect x="64" y="176" width="320" height="390" rx="14" fill="#F0F9FF" stroke="#0284C7" stroke-width="3"/>
-  <rect x="64" y="176" width="320" height="76" rx="12" fill="#E0F2FE"/>
-  <rect x="64" y="228" width="320" height="24" fill="#E0F2FE"/>
-  <rect x="64" y="251" width="320" height="3" fill="#0284C7"/>
-  <text x="224" y="226" text-anchor="middle" font-family="'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="28" font-weight="800" fill="#0C4A6E">Agent Traces</text>
-  <rect x="84" y="288" width="280" height="104" rx="12" fill="#FFFFFF" stroke="#38BDF8" stroke-width="2.5"/>
-  <text x="224" y="349" text-anchor="middle" font-family="'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="24" font-weight="700" fill="#0369A1">ADK, LangGraph</text>
-  <rect x="84" y="416" width="280" height="104" rx="12" fill="#E0F2FE" stroke="#0284C7" stroke-width="2.5"/>
-  <text x="224" y="477" text-anchor="middle" font-family="'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="24" font-weight="700" fill="#0C4A6E">OpenTelemetry</text>
+  <rect x="56" y="196" width="440" height="632" rx="16" fill="#F0F9FF" stroke="#0284C7" stroke-width="3"/>
+  <rect x="56" y="196" width="440" height="88" rx="14" fill="#E0F2FE"/>
+  <rect x="56" y="256" width="440" height="28" fill="#E0F2FE"/>
+  <rect x="56" y="283" width="440" height="3" fill="#0284C7"/>
+  <text x="276" y="252" text-anchor="middle" font-family="'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="31" font-weight="800" fill="#0C4A6E">Warehouse Traces</text>
 
-  <rect x="392" y="368" width="36" height="6" fill="#2563EB"/>
-  <polygon points="424,358 444,371 424,384" fill="#2563EB"/>
+  <rect x="84" y="330" width="384" height="208" rx="14" fill="#FFFFFF" stroke="#38BDF8" stroke-width="3"/>
+  <text x="276" y="446" text-anchor="middle" font-family="'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="32" font-weight="800" fill="#0369A1">Agent events</text>
 
-  <rect x="448" y="176" width="320" height="390" rx="14" fill="#EFF6FF" stroke="#2563EB" stroke-width="3"/>
-  <rect x="448" y="176" width="320" height="76" rx="12" fill="#DBEAFE"/>
-  <rect x="448" y="228" width="320" height="24" fill="#DBEAFE"/>
-  <rect x="448" y="251" width="320" height="3" fill="#2563EB"/>
-  <text x="608" y="226" text-anchor="middle" font-family="'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="28" font-weight="800" fill="#1E3A8A">SQL Gate</text>
-  <rect x="468" y="288" width="280" height="104" rx="12" fill="#FFFFFF" stroke="#93C5FD" stroke-width="2.5"/>
-  <text x="608" y="349" text-anchor="middle" font-family="'JetBrains Mono', 'Fira Code', 'Courier New', monospace" font-size="24" font-weight="700" fill="#1D4ED8">100% checked</text>
-  <rect x="468" y="416" width="280" height="104" rx="12" fill="#ECFDF5" stroke="#10B981" stroke-width="2.5"/>
-  <text x="608" y="477" text-anchor="middle" font-family="'JetBrains Mono', 'Fira Code', 'Courier New', monospace" font-size="26" font-weight="700" fill="#047857">$0 judge</text>
+  <rect x="84" y="576" width="384" height="208" rx="14" fill="#E0F2FE" stroke="#0284C7" stroke-width="3"/>
+  <text x="276" y="692" text-anchor="middle" font-family="'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="30" font-weight="800" fill="#0C4A6E">OpenTelemetry spans</text>
 
-  <rect x="776" y="368" width="36" height="6" fill="#D97706"/>
-  <polygon points="808,358 828,371 808,384" fill="#D97706"/>
+  <rect x="496" y="508" width="34" height="8" fill="#0284C7"/>
+  <rect x="526" y="332" width="8" height="376" fill="#0284C7"/>
+  <rect x="526" y="332" width="24" height="8" fill="#2563EB"/>
+  <polygon points="546,322 568,336 546,350" fill="#2563EB"/>
+  <rect x="526" y="700" width="24" height="8" fill="#D97706"/>
+  <polygon points="546,690 568,704 546,718" fill="#D97706"/>
 
-  <rect x="832" y="176" width="320" height="390" rx="14" fill="#FFFBEB" stroke="#D97706" stroke-width="3.5"/>
-  <rect x="832" y="176" width="320" height="76" rx="12" fill="#FEF3C7"/>
-  <rect x="832" y="228" width="320" height="24" fill="#FEF3C7"/>
-  <rect x="832" y="251" width="320" height="3" fill="#D97706"/>
-  <text x="992" y="226" text-anchor="middle" font-family="'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="28" font-weight="800" fill="#92400E">Sampled Judge</text>
-  <rect x="852" y="288" width="280" height="104" rx="12" fill="#FFFFFF" stroke="#F59E0B" stroke-width="2.5"/>
-  <text x="992" y="349" text-anchor="middle" font-family="'JetBrains Mono', 'Fira Code', 'Courier New', monospace" font-size="24" font-weight="700" fill="#B45309">5-10% judged</text>
-  <rect x="852" y="416" width="280" height="104" rx="12" fill="#ECFDF5" stroke="#059669" stroke-width="2.5"/>
-  <text x="992" y="477" text-anchor="middle" font-family="'JetBrains Mono', 'Fira Code', 'Courier New', monospace" font-size="24" font-weight="700" fill="#047857">92.2% saved</text>
+  <rect x="568" y="164" width="464" height="344" rx="16" fill="#EFF6FF" stroke="#2563EB" stroke-width="3"/>
+  <rect x="568" y="164" width="464" height="80" rx="14" fill="#DBEAFE"/>
+  <rect x="568" y="218" width="464" height="26" fill="#DBEAFE"/>
+  <rect x="568" y="243" width="464" height="3" fill="#2563EB"/>
+  <text x="800" y="216" text-anchor="middle" font-family="'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="30" font-weight="800" fill="#1E3A8A">Tiered Evaluation</text>
 
-  <rect x="1160" y="368" width="36" height="6" fill="#059669"/>
-  <polygon points="1192,358 1212,371 1192,384" fill="#059669"/>
+  <rect x="594" y="264" width="412" height="102" rx="12" fill="#ECFDF5" stroke="#10B981" stroke-width="3"/>
+  <text x="800" y="326" text-anchor="middle" font-family="'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="29" font-weight="800" fill="#047857">100% rules ($0 LLM)</text>
 
-  <rect x="1216" y="176" width="320" height="390" rx="14" fill="#ECFDF5" stroke="#059669" stroke-width="3"/>
-  <rect x="1216" y="176" width="320" height="76" rx="12" fill="#D1FAE5"/>
-  <rect x="1216" y="228" width="320" height="24" fill="#D1FAE5"/>
-  <rect x="1216" y="251" width="320" height="3" fill="#059669"/>
-  <text x="1376" y="226" text-anchor="middle" font-family="'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="28" font-weight="800" fill="#065F46">Outcome Cost</text>
-  <rect x="1236" y="288" width="280" height="104" rx="12" fill="#FFFFFF" stroke="#34D399" stroke-width="2.5"/>
-  <text x="1376" y="349" text-anchor="middle" font-family="'JetBrains Mono', 'Fira Code', 'Courier New', monospace" font-size="24" font-weight="700" fill="#047857">USD/outcome</text>
-  <rect x="1236" y="416" width="280" height="104" rx="12" fill="#FFFBEB" stroke="#F59E0B" stroke-width="2.5"/>
-  <text x="1376" y="477" text-anchor="middle" font-family="'JetBrains Mono', 'Fira Code', 'Courier New', monospace" font-size="23" font-weight="700" fill="#B45309">Fail-closed NULL</text>
+  <rect x="594" y="384" width="412" height="102" rx="12" fill="#F5F3FF" stroke="#7C3AED" stroke-width="3"/>
+  <text x="800" y="446" text-anchor="middle" font-family="'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="28" font-weight="800" fill="#5B21B6">5-10% vs. labeled cases</text>
 
-  <rect x="989" y="566" width="6" height="68" fill="#7C3AED"/>
-  <polygon points="980,630 992,652 1004,630" fill="#7C3AED"/>
+  <rect x="796" y="508" width="8" height="30" fill="#7C3AED"/>
+  <polygon points="786,534 800,556 814,534" fill="#7C3AED"/>
 
-  <rect x="1373" y="588" width="6" height="68" fill="#7C3AED"/>
-  <polygon points="1364,592 1376,570 1388,592" fill="#7C3AED"/>
+  <rect x="568" y="556" width="464" height="296" rx="16" fill="#FFFBEB" stroke="#D97706" stroke-width="3"/>
+  <rect x="568" y="556" width="464" height="78" rx="14" fill="#FEF3C7"/>
+  <rect x="568" y="608" width="464" height="26" fill="#FEF3C7"/>
+  <rect x="568" y="633" width="464" height="3" fill="#D97706"/>
+  <text x="800" y="606" text-anchor="middle" font-family="'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="30" font-weight="800" fill="#92400E">Spend Rollup</text>
 
-  <rect x="448" y="656" width="1088" height="168" rx="14" fill="#F5F3FF" stroke="#7C3AED" stroke-width="3"/>
-  <text x="594" y="750" text-anchor="middle" font-family="'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="28" font-weight="800" fill="#5B21B6">Calibration</text>
-  <rect x="740" y="694" width="360" height="92" rx="12" fill="#FFFFFF" stroke="#8B5CF6" stroke-width="2.5"/>
-  <text x="920" y="749" text-anchor="middle" font-family="'JetBrains Mono', 'Fira Code', 'Courier New', monospace" font-size="25" font-weight="700" fill="#5B21B6">Debiased CI</text>
-  <rect x="1136" y="694" width="360" height="92" rx="12" fill="#ECFDF5" stroke="#10B981" stroke-width="2.5"/>
-  <text x="1316" y="749" text-anchor="middle" font-family="'JetBrains Mono', 'Fira Code', 'Courier New', monospace" font-size="25" font-weight="700" fill="#047857">AC2 &gt;= 0.80</text>
+  <rect x="594" y="652" width="412" height="84" rx="12" fill="#FFFFFF" stroke="#F59E0B" stroke-width="3"/>
+  <text x="800" y="705" text-anchor="middle" font-family="'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="29" font-weight="800" fill="#B45309">Agent + judge USD</text>
+
+  <rect x="594" y="750" width="412" height="84" rx="12" fill="#FEF2F2" stroke="#EA580C" stroke-width="3"/>
+  <text x="800" y="803" text-anchor="middle" font-family="'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="29" font-weight="800" fill="#C2410C">&gt;200K token cliffs</text>
+
+  <rect x="1032" y="332" width="36" height="8" fill="#7C3AED"/>
+  <rect x="1032" y="700" width="36" height="8" fill="#D97706"/>
+  <rect x="1064" y="332" width="8" height="376" fill="#059669"/>
+  <rect x="1064" y="508" width="22" height="8" fill="#059669"/>
+  <polygon points="1082,498 1104,512 1082,526" fill="#059669"/>
+
+  <rect x="1104" y="196" width="440" height="632" rx="16" fill="#ECFDF5" stroke="#059669" stroke-width="3"/>
+  <rect x="1104" y="196" width="440" height="88" rx="14" fill="#D1FAE5"/>
+  <rect x="1104" y="256" width="440" height="28" fill="#D1FAE5"/>
+  <rect x="1104" y="283" width="440" height="3" fill="#059669"/>
+  <text x="1324" y="252" text-anchor="middle" font-family="'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="31" font-weight="800" fill="#065F46">Verified Outcome</text>
+
+  <rect x="1132" y="330" width="384" height="208" rx="14" fill="#FFFFFF" stroke="#34D399" stroke-width="3"/>
+  <text x="1324" y="446" text-anchor="middle" font-family="'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="34" font-weight="800" fill="#047857">USD/outcome</text>
+
+  <rect x="1132" y="576" width="384" height="208" rx="14" fill="#FFFBEB" stroke="#D97706" stroke-width="3"/>
+  <text x="1324" y="692" text-anchor="middle" font-family="'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="32" font-weight="800" fill="#B45309">Unjudged: NULL</text>
 </svg>

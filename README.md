@@ -1,8 +1,8 @@
-# BQ Eval & FinOps
+# BQ Eval: Stop Mistaking Token Spend for Working Agents
 
-Token dashboards show what an agent spent, not whether it finished the job. Judging every trace with an LLM rivals production spend, uncalibrated judges skew pass rates, and prompts past 200K tokens hit a 2x context cliff. I built `bq-eval` to filter 100% of lakehouse traces in `$0` SQL first, judge a 5% to 10% slice, and report calibrated Cost per Verified Outcome.
+Agents don't fail loudly on monitoring dashboards: a looping tool or 200K-token PDF burns budget without finishing the job. Judging every trace with LLMs rivals production spend, and oversampling failed runs skews raw pass rates. I built BQ Eval so Day-1 BigQuery views need zero new tables, mirror in SQLite, and return NULL when unjudged.
 
-![BQ Eval SQL-First Agent Evaluation and Cost per Verified Outcome](docs/assets/architecture_card.svg)
+![BQ Eval In-Warehouse Evaluation and Outcome Cost Views](docs/assets/architecture_card.svg)
 
 ## Verified Receipts
 
