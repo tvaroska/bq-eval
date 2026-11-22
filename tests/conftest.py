@@ -1,0 +1,100 @@
+"""Shared test fixtures, span factories, and view column contracts (`F18`)."""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta
+
+from bq_eval.contract.otel import FinOpsTrafficType, GenAISpanKind, OTelGenAISpanRecord
+
+REQUIRED_OTEL_SPANS_VIEW_COLUMNS: tuple[str, ...] = (
+    "trace_id",
+    "span_id",
+    "parent_span_id",
+    "span_name",
+    "start_time",
+    "end_time",
+    "latency_ms",
+    "status_code",
+    "span_kind",
+    "service_name",
+    "gcp_apphub_application_id",
+    "gcp_apphub_service_id",
+    "gcp_apphub_workload_id",
+    "agent_name",
+    "model_name",
+    "input_tokens",
+    "cached_input_tokens",
+    "output_tokens",
+    "thinking_tokens",
+    "tool_name",
+    "tool_call_status",
+    "rule0_pass",
+    "finops_traffic_type",
+    "outcome_id",
+    "attributes",
+)
+
+
+def make_span(  # noqa: PLR0913
+    trace_id: str = "trace-001",
+    span_id: str = "span-001",
+    *,
+    parent_span_id: str | None = None,
+    span_name: str = "invoke_agent",
+    app_id: str | None = "critical-app",
+    service_name: str = "agent-service",
+    agent_name: str = "default-agent",
+    span_kind: GenAISpanKind = GenAISpanKind.INVOKE_AGENT,
+    status_code: str = "OK",
+    model_name: str = "gemini-3.8-flash",
+    tool_name: str | None = None,
+    tool_call_status: str | None = None,
+    rule0_pass: bool = True,
+    finops_traffic_type: FinOpsTrafficType = FinOpsTrafficType.PRODUCTION_INFERENCE,
+    input_tokens: int = 10_000,
+    cached_input_tokens: int = 2_000,
+    output_tokens: int = 500,
+    thinking_tokens: int = 100,
+    latency_ms: float = 400.0,
+    offset_s: int = 0,
+    offset_ms: int = 0,
+    outcome_id: str | None = None,
+    outcome_owner: str | None = None,
+    source_mode: str | None = None,
+    skill_id: str | None = None,
+    skill_version: str | None = None,
+    attributes: dict[str, str] | None = None,
+    base_time: datetime | None = None,
+) -> OTelGenAISpanRecord:
+    """Canonical `OTelGenAISpanRecord` test factory shared across the test suite (`F18`)."""
+    anchor = base_time or datetime(2026, 11, 14, 12, 0, 0, tzinfo=UTC)
+    start = anchor + timedelta(seconds=offset_s, milliseconds=offset_ms)
+    return OTelGenAISpanRecord(
+        trace_id=trace_id,
+        span_id=span_id,
+        parent_span_id=parent_span_id,
+        span_name=span_name,
+        start_time=start,
+        end_time=start + timedelta(milliseconds=latency_ms),
+        latency_ms=latency_ms,
+        status_code=status_code,
+        span_kind=span_kind,
+        service_name=service_name,
+        gcp_apphub_application_id=app_id,
+        agent_name=agent_name,
+        model_name=model_name,
+        input_tokens=input_tokens,
+        cached_input_tokens=cached_input_tokens,
+        output_tokens=output_tokens,
+        thinking_tokens=thinking_tokens,
+        tool_name=tool_name,
+        tool_call_status=tool_call_status,
+        rule0_pass=rule0_pass,
+        finops_traffic_type=finops_traffic_type,
+        outcome_id=outcome_id,
+        outcome_owner=outcome_owner,
+        source_mode=source_mode,
+        skill_id=skill_id,
+        skill_version=skill_version,
+        attributes=attributes or {},
+    )

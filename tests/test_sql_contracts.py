@@ -18,15 +18,24 @@ import pytest
 import sqlglot
 from sqlglot import exp
 
-from bq_eval.calibration import ConfusionMatrix, rogan_gladen_calibrate
-from bq_eval.loadgen import export_time_shifted_jsonl, generate_time_shifted_corpus
-from bq_eval.otel import FinOpsTrafficType, GenAISpanKind, OTelGenAISpanRecord
-from bq_eval.sql_eval import (
+from bq_eval.contract.otel import (
+    BQAAAgentEvent,
+    FinOpsTrafficType,
+    GenAISpanKind,
+    OTelGenAISpanRecord,
+)
+from bq_eval.contract.pricing import DEFAULT_MODEL_SKUS
+from bq_eval.contract.results import ConfusionMatrix
+from bq_eval.engine.bqaa import bqaa_events_to_trace_payloads
+from bq_eval.engine.calibration import rogan_gladen_calibrate
+from bq_eval.engine.finops import compute_default_span_cost_usd
+from bq_eval.engine.sql_eval import (
     build_ai_evaluate_agent_sql,
     build_ai_generate_table_judge_sql,
-    compute_default_span_cost_usd,
     evaluate_traces_in_sqlite,
 )
+from bq_eval.showcase.loadgen import export_time_shifted_jsonl, generate_time_shifted_corpus
+from scripts.bq_dry_run import split_sql_statements
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SQL_DIR = REPO_ROOT / "sql"
@@ -509,6 +518,27 @@ def _sqlite_format_timestamp(fmt: str, ts: str | None) -> str | None:
     return dt.strftime(fmt)
 
 
+def _sqlite_timestamp_trunc_hour(ts: str | None) -> str | None:
+    if ts is None:
+        return None
+    dt = datetime.fromisoformat(ts.replace("Z", "+00:00")).replace(
+        minute=0, second=0, microsecond=0
+    )
+    return dt.isoformat()
+
+
+def _sqlite_pack_asc2(val: str | None, k1: str | None, k2: str | None) -> str | None:
+    if val is None:
+        return None
+    return f"{k1 or ''}\x1f{k2 or ''}\x1f{val}"
+
+
+def _sqlite_unpack_asc2(packed: str | None) -> str | None:
+    if packed is None:
+        return None
+    return packed.split("\x1f", 2)[2]
+
+
 def _new_sqlite_bq_conn(current_date_utc: str = "2026-11-21") -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
@@ -519,8 +549,12 @@ def _new_sqlite_bq_conn(current_date_utc: str = "2026-11-21") -> sqlite3.Connect
     conn.create_function("CEIL", 1, math.ceil)
     conn.create_function("TIMESTAMP_DIFF_MS", 2, _sqlite_timestamp_diff_ms)
     conn.create_function("FORMAT_TIMESTAMP", 2, _sqlite_format_timestamp)
+    conn.create_function("BQ_TIMESTAMP_TRUNC_HOUR", 1, _sqlite_timestamp_trunc_hour)
     conn.create_function("BQ_CURRENT_DATE", 0, lambda: current_date_utc)
     conn.create_function("BQ_DATE", 1, lambda ts: str(ts)[:10] if ts is not None else None)
+    conn.create_function("BQ_PACK_ASC2", 3, _sqlite_pack_asc2)
+    conn.create_function("BQ_UNPACK_ASC2", 1, _sqlite_unpack_asc2)
+    conn.create_function("JSON_FORMAT", 1, lambda v: None if v is None else str(v))
     return conn
 
 
@@ -539,8 +573,20 @@ def _rewrite_bq_bracket(node: exp.Bracket) -> exp.Expr:
         target = target.this
     if isinstance(target, exp.ArrayAgg):
         inner = target.this.copy()
+        order_node: exp.Order | None = None
         while isinstance(inner, (exp.Limit, exp.Order, exp.IgnoreNulls)):
+            if isinstance(inner, exp.Order):
+                order_node = inner
             inner = inner.this
+        if (
+            order_node is not None
+            and len(order_node.expressions) == 2
+            and all(not o.args.get("desc") for o in order_node.expressions)
+        ):
+            k1 = order_node.expressions[0].this.copy()
+            k2 = order_node.expressions[1].this.copy()
+            packed = exp.Anonymous(this="BQ_PACK_ASC2", expressions=[inner, k1, k2])
+            return exp.Anonymous(this="BQ_UNPACK_ASC2", expressions=[exp.Min(this=packed)])
         return exp.Max(this=inner)
     return node
 
@@ -560,6 +606,8 @@ def _rewrite_bq_qualify(node: exp.Select) -> exp.Expr:
 
 
 def _rewrite_bq_temporal(node: exp.Expr) -> exp.Expr | None:
+    if isinstance(node, exp.TimestampTrunc):
+        return exp.Anonymous(this="BQ_TIMESTAMP_TRUNC_HOUR", expressions=[node.this.copy()])
     if isinstance(node, exp.TimestampDiff):
         return exp.Anonymous(
             this="TIMESTAMP_DIFF_MS",
@@ -881,7 +929,8 @@ def _create_enterprise_sqlite_fixture(conn: sqlite3.Connection) -> None:
             apphub_application_id TEXT,
             business_unit TEXT,
             sla_latency_ms REAL,
-            cost_center TEXT
+            cost_center TEXT,
+            is_external_counterparty INTEGER DEFAULT 0
         );
         CREATE TABLE eval_results (
             eval_id TEXT,
@@ -925,7 +974,9 @@ def _install_enterprise_views(conn: sqlite3.Connection) -> None:
         (views_path, "agent_eval.v_trace_waterfall"),
         (views_path, "agent_eval.v_trace_sql_evaluation"),
         (views_path, "agent_eval.v_enterprise_cost_per_verified_outcome"),
+        (views_path, "agent_eval.v_counterparty_spend"),
         (views_path, "agent_eval.v_agent_eval_and_finops_summary"),
+        (views_path, "agent_eval.v_capacity_hourly_burndown_export"),
     ):
         short_name = name.split(".", 1)[1]
         sql = _transpile_bq_view_to_sqlite(_extract_view_sql_text(path, name))
@@ -1474,3 +1525,508 @@ def test_daily_quota_guard_no_config_fanout_and_engine_b_quota_trip() -> None:
     assert int(tripped["tokens_remaining_today"]) == 0
     assert bool(tripped["quota_available"]) is False
     conn.close()
+
+
+def test_f11_deterministic_traffic_type_unjudged_rubric_and_multi_rubric_filter() -> None:
+    """F11 (ADR-009 Option B): `MAX(w.finops_traffic_type)`, `'groundedness_4pt_v1'` unjudged label, and multi-rubric filtering."""
+    views_text = (SQL_DIR / "views.sql").read_text(encoding="utf-8")
+    assert "ANY_VALUE(w.finops_traffic_type)" not in views_text
+    assert "MAX(w.finops_traffic_type) AS primary_traffic_type" in views_text
+
+    conn = _new_sqlite_bq_conn()
+    _create_enterprise_sqlite_fixture(conn)
+    _install_enterprise_views(conn)
+    t0 = "2026-11-21T12:00:00+00:00"
+    t1 = "2026-11-21T12:00:01+00:00"
+    conn.executemany(
+        "INSERT INTO otel_spans VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        [
+            (
+                "tr-unjudged",
+                "sp-u1",
+                None,
+                "invoke_agent",
+                "unjudged-parity-app",
+                "svc",
+                "agent",
+                "SPAN_KIND_SERVER",
+                "invoke_agent",
+                "gemini-3.8-flash",
+                None,
+                None,
+                "OK",
+                1,
+                "production_inference",
+                None,
+                "unjudged-parity-app",
+                None,
+                None,
+                None,
+                None,
+                t0,
+                t1,
+                t1,
+                500.0,
+                4_000,
+                1_000,
+                200,
+                0,
+                "{}",
+            ),
+            (
+                "tr-multi",
+                "sp-m1",
+                None,
+                "invoke_agent",
+                "multi-rubric-app",
+                "svc",
+                "agent",
+                "SPAN_KIND_SERVER",
+                "invoke_agent",
+                "gemini-3.8-flash",
+                None,
+                None,
+                "OK",
+                1,
+                "production_inference",
+                None,
+                "multi-rubric-app",
+                None,
+                None,
+                None,
+                None,
+                t0,
+                t1,
+                t1,
+                500.0,
+                4_000,
+                1_000,
+                200,
+                0,
+                "{}",
+            ),
+        ],
+    )
+    conn.executemany(
+        "INSERT INTO eval_results VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        [
+            (
+                "ev-m-g",
+                "run-1",
+                "tr-multi",
+                None,
+                "multi-rubric-app",
+                "groundedness_4pt_v1",
+                "gemini-3.8-flash",
+                "CANARY_5PCT",
+                1,
+                "ok",
+                4,
+                1,
+                500,
+                50,
+                0,
+                t1,
+            ),
+            (
+                "ev-m-e",
+                "run-1",
+                "tr-multi",
+                None,
+                "multi-rubric-app",
+                "escalation_policy_4pt_v1",
+                "gemini-3.8-flash",
+                "CANARY_5PCT",
+                1,
+                "failed escalation",
+                1,
+                0,
+                500,
+                50,
+                0,
+                t1,
+            ),
+        ],
+    )
+
+    bq_unjudged = conn.execute(
+        "SELECT rubric_id, calibration_status FROM v_agent_eval_and_finops_summary "
+        "WHERE apphub_application_id = 'unjudged-parity-app'"
+    ).fetchone()
+    bq_multi_esc = conn.execute(
+        "SELECT raw_judge_pass_rate FROM v_agent_eval_and_finops_summary "
+        "WHERE apphub_application_id = 'multi-rubric-app' AND rubric_id = 'escalation_policy_4pt_v1'"
+    ).fetchone()
+    conn.close()
+
+    base_dt = datetime(2026, 11, 21, 12, 0, 0, tzinfo=UTC)
+    py_spans = [
+        OTelGenAISpanRecord(
+            trace_id="tr-unjudged",
+            span_id="sp-u1",
+            start_time=base_dt,
+            end_time=base_dt + timedelta(seconds=1),
+            latency_ms=500.0,
+            gcp_apphub_application_id="unjudged-parity-app",
+            input_tokens=4_000,
+            cached_input_tokens=1_000,
+            output_tokens=200,
+        ),
+        OTelGenAISpanRecord(
+            trace_id="tr-multi",
+            span_id="sp-m1",
+            start_time=base_dt,
+            end_time=base_dt + timedelta(seconds=1),
+            latency_ms=500.0,
+            gcp_apphub_application_id="multi-rubric-app",
+            input_tokens=4_000,
+            cached_input_tokens=1_000,
+            output_tokens=200,
+        ),
+    ]
+    twin_esc = evaluate_traces_in_sqlite(
+        spans=py_spans,
+        judge_outcomes={"tr-multi": False},
+        extra_rubric_outcomes={"groundedness_4pt_v1": {"tr-multi": True}},
+        rubric_id="escalation_policy_4pt_v1",
+    )
+    twin_unjudged = evaluate_traces_in_sqlite(spans=py_spans[:1])["unjudged-parity-app"]
+
+    assert bq_unjudged["rubric_id"] == twin_unjudged.rubric_id == "groundedness_4pt_v1"
+    assert bq_unjudged["calibration_status"] == twin_unjudged.calibration_status == "UNJUDGED"
+    assert float(bq_multi_esc["raw_judge_pass_rate"]) == pytest.approx(0.0)
+    assert twin_esc["multi-rubric-app"].raw_judge_pass_rate == pytest.approx(0.0)
+
+
+def test_f12_sql_pricing_constants_match_python_default_model_skus() -> None:
+    """F12: Parse SQL pricing constants across `sql/*.sql` and verify single Python cost implementation."""
+    cost_defs = [
+        p.relative_to(REPO_ROOT).as_posix()
+        for p in sorted((REPO_ROOT / "bq_eval").rglob("*.py"))
+        if "def compute_span_cost_usd(" in p.read_text(encoding="utf-8")
+    ]
+    assert cost_defs == ["bq_eval/engine/finops.py"]
+
+    ddl_text = (SQL_DIR / "ddl.sql").read_text(encoding="utf-8")
+    select_sku_re = re.compile(
+        r"SELECT\s+'([^']+)'(?:\s+AS\s+model_name)?,\s*"
+        r"TIMESTAMP\s+'[^']+'(?:\s+AS\s+effective_start)?,\s*"
+        r"TIMESTAMP\s+'[^']+'(?:\s+AS\s+effective_end)?,\s*"
+        r"([0-9.]+)(?:\s+AS\s+input_usd_per_1m)?,\s*"
+        r"([0-9.]+)(?:\s+AS\s+cached_input_usd_per_1m)?,\s*"
+        r"([0-9.]+)(?:\s+AS\s+output_usd_per_1m)?,\s*"
+        r"(\d+)(?:\s+AS\s+long_context_threshold_tokens)?,\s*"
+        r"([0-9.]+)(?:\s+AS\s+long_context_input_usd_per_1m)?,\s*"
+        r"([0-9.]+)(?:\s+AS\s+long_context_cached_usd_per_1m)?,\s*"
+        r"([0-9.]+)(?:\s+AS\s+long_context_output_usd_per_1m)?",
+        re.DOTALL,
+    )
+    parsed_ddl: dict[str, tuple[float, ...]] = {}
+    for m in select_sku_re.finditer(ddl_text):
+        parsed_ddl[m.group(1)] = tuple(float(m.group(idx)) for idx in range(2, 9))
+    assert set(parsed_ddl) == set(DEFAULT_MODEL_SKUS)
+    for model_id, sku in DEFAULT_MODEL_SKUS.items():
+        assert parsed_ddl[model_id] == pytest.approx(
+            (
+                sku.input_usd_per_1m,
+                sku.cached_input_usd_per_1m,
+                sku.output_usd_per_1m,
+                float(sku.long_context_threshold_tokens),
+                sku.long_context_input_usd_per_1m,
+                sku.long_context_cached_usd_per_1m,
+                sku.long_context_output_usd_per_1m,
+            ),
+            abs=1e-12,
+        )
+
+    when_rate_re = re.compile(r"WHEN\s+'([a-z0-9_.-]+)'\s+THEN\s+([0-9.]+)")
+    allowed_rates_by_model = {
+        model_id: {
+            sku.input_usd_per_1m,
+            sku.cached_input_usd_per_1m,
+            sku.output_usd_per_1m,
+            sku.long_context_input_usd_per_1m,
+            sku.long_context_cached_usd_per_1m,
+            sku.long_context_output_usd_per_1m,
+        }
+        for model_id, sku in DEFAULT_MODEL_SKUS.items()
+    }
+    for sql_name in ("views.sql", "demo_docubridge_extensions.sql"):
+        sql_text = (SQL_DIR / sql_name).read_text(encoding="utf-8")
+        matches = list(when_rate_re.finditer(sql_text))
+        assert matches, f"Expected model WHEN pricing clauses in {sql_name}"
+        for m in matches:
+            model_id, rate = m.group(1), float(m.group(2))
+            if model_id in allowed_rates_by_model:
+                assert any(
+                    abs(rate - exp_r) < 1e-12 for exp_r in allowed_rates_by_model[model_id]
+                ), f"{sql_name} rate {rate} for {model_id} drifted from DEFAULT_MODEL_SKUS"
+
+    step1_wf = _transpile_bq_view_to_sqlite(
+        _extract_view_sql_text(
+            SQL_DIR / "step1_trace_views.sql", "agent_eval.v_step1_trace_waterfall"
+        )
+    )
+    ent_wf = _transpile_bq_view_to_sqlite(
+        _extract_view_sql_text(SQL_DIR / "views.sql", "agent_eval.v_trace_waterfall")
+    )
+    conn = _new_sqlite_bq_conn()
+    _create_enterprise_sqlite_fixture(conn)
+    conn.execute(f"CREATE VIEW v_step1_wf AS {step1_wf}")
+    conn.execute(f"CREATE VIEW v_ent_wf AS {ent_wf}")
+    base_dt = datetime(2026, 11, 21, 12, 0, 0, tzinfo=UTC)
+    for idx, model_id in enumerate(DEFAULT_MODEL_SKUS):
+        for cliff_idx, in_tok in enumerate((100_000, 250_000)):
+            tid = f"tr-p-{idx}-{cliff_idx}"
+            py_span = OTelGenAISpanRecord(
+                trace_id=tid,
+                span_id=f"sp-p-{idx}-{cliff_idx}",
+                start_time=base_dt,
+                end_time=base_dt + timedelta(seconds=1),
+                latency_ms=1000.0,
+                model_name=model_id,
+                input_tokens=in_tok,
+                cached_input_tokens=20_000,
+                output_tokens=5_000,
+                thinking_tokens=1_000,
+            )
+            conn.execute(
+                "INSERT INTO otel_spans VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    tid,
+                    py_span.span_id,
+                    None,
+                    "chat",
+                    "app-p",
+                    "svc",
+                    "agent",
+                    "SPAN_KIND_SERVER",
+                    "chat",
+                    model_id,
+                    None,
+                    None,
+                    "OK",
+                    1,
+                    "production_inference",
+                    None,
+                    "app-p",
+                    None,
+                    None,
+                    None,
+                    None,
+                    base_dt.isoformat(),
+                    (base_dt + timedelta(seconds=1)).isoformat(),
+                    (base_dt + timedelta(seconds=1)).isoformat(),
+                    1000.0,
+                    in_tok,
+                    20_000,
+                    5_000,
+                    1_000,
+                    "{}",
+                ),
+            )
+            py_cost = compute_default_span_cost_usd(py_span)
+            s1_cost = conn.execute(
+                "SELECT span_cost_usd FROM v_step1_wf WHERE trace_id = ?", (tid,)
+            ).fetchone()[0]
+            ent_cost = conn.execute(
+                "SELECT span_cost_usd FROM v_ent_wf WHERE trace_id = ?", (tid,)
+            ).fetchone()[0]
+            assert float(s1_cost) == pytest.approx(py_cost, abs=1e-12)
+            assert float(ent_cost) == pytest.approx(py_cost, abs=1e-12)
+    conn.close()
+
+
+def test_f14_counterparty_classification_uses_explicit_flag_not_app_id_substring() -> None:
+    """F14: An internal app named `external-facing-chat` stays in CPVO; explicit flags route to `v_counterparty_spend`."""
+    views_text = (SQL_DIR / "views.sql").read_text(encoding="utf-8")
+    assert "LIKE '%external%'" not in views_text
+
+    conn = _new_sqlite_bq_conn()
+    _create_enterprise_sqlite_fixture(conn)
+    _install_enterprise_views(conn)
+    conn.executemany(
+        "INSERT INTO app_registry VALUES (?, ?, ?, ?, ?)",
+        [
+            ("external-facing-chat", "retail_banking", 3000.0, "CC-CHAT", 0),
+            ("partner-carrier-hub", "external_b2b", 5000.0, "CC-EXT", 1),
+        ],
+    )
+    t0 = "2026-11-21T12:00:00+00:00"
+    t1 = "2026-11-21T12:00:01+00:00"
+    for app_id, out_id, attrs in (
+        ("external-facing-chat", "out-chat-1", "{}"),
+        ("partner-carrier-hub", "out-ext-1", "{}"),
+        ("attr-marked-partner", "out-ext-2", '{"apphub.external": "true"}'),
+    ):
+        conn.executemany(
+            "INSERT INTO otel_spans VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            [
+                (
+                    f"tr-{out_id}",
+                    f"sp-{out_id}",
+                    None,
+                    "invoke_agent",
+                    app_id,
+                    "svc",
+                    "agent",
+                    "SPAN_KIND_SERVER",
+                    "invoke_agent",
+                    "gemini-3.8-flash",
+                    None,
+                    None,
+                    "OK",
+                    1,
+                    "production_inference",
+                    out_id,
+                    app_id,
+                    "A2A",
+                    None,
+                    None,
+                    None,
+                    t0,
+                    t1,
+                    t1,
+                    500.0,
+                    10_000,
+                    0,
+                    500,
+                    0,
+                    attrs,
+                ),
+                (
+                    f"tr-{out_id}",
+                    f"sp-close-{out_id}",
+                    f"sp-{out_id}",
+                    "outcome.closed",
+                    app_id,
+                    "svc",
+                    "agent",
+                    "SPAN_KIND_INTERNAL",
+                    "invoke_agent",
+                    "none",
+                    None,
+                    None,
+                    "OK",
+                    1,
+                    "production_inference",
+                    out_id,
+                    app_id,
+                    "A2A",
+                    None,
+                    None,
+                    None,
+                    t1,
+                    t1,
+                    t1,
+                    0.0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    '{"outcome.status": "succeeded", "outcome.verified": "true"}',
+                ),
+            ],
+        )
+
+    cpvo_apps = {
+        str(r["apphub_application_id"])
+        for r in conn.execute(
+            "SELECT apphub_application_id FROM v_enterprise_cost_per_verified_outcome"
+        ).fetchall()
+    }
+    counterparty_apps = {
+        str(r["apphub_application_id"])
+        for r in conn.execute("SELECT apphub_application_id FROM v_counterparty_spend").fetchall()
+    }
+    conn.close()
+
+    assert "external-facing-chat" in cpvo_apps
+    assert "external-facing-chat" not in counterparty_apps
+    assert counterparty_apps == {"partner-carrier-hub", "attr-marked-partner"}
+
+
+def test_f21_bq_dry_run_sqlglot_splitter_and_bqaa_chronological_app_id() -> None:
+    """F21: `split_sql_statements` handles block comments/double quotes; `v_bqaa_trace_payloads` matches Python chronological app ID."""
+    tricky_sql = (
+        "/* block comment with ; inside */\n"
+        "SELECT \"col;semi\" AS c1, 'single;semi' AS c2 FROM `proj.ds.tbl`;\n"
+        "-- line comment with ; inside\n"
+        "CREATE OR REPLACE VIEW `proj.ds.v` AS SELECT 1 AS x;\n"
+    )
+    parts = split_sql_statements(tricky_sql)
+    assert len(parts) == 2
+    assert '"col;semi"' in parts[0]
+    assert "CREATE OR REPLACE VIEW" in parts[1]
+
+    bqaa_sql = (SQL_DIR / "bqaa_adapter_views.sql").read_text(encoding="utf-8")
+    assert "IGNORE NULLS ORDER BY timestamp ASC, event_id ASC LIMIT 1" in bqaa_sql
+    assert (
+        "REGEXP_CONTAINS(LOWER(COALESCE(error_message, '')), r'timeout|timed\\s*out|503|504')"
+        in bqaa_sql
+    )
+
+    t0 = datetime(2026, 11, 21, 12, 0, 0, tzinfo=UTC)
+    events = [
+        BQAAAgentEvent(
+            event_id="ev-1-unreg",
+            timestamp=t0,
+            event_type="USER_MESSAGE_RECEIVED",
+            agent="intake",
+            invocation_id="inv-det-1",
+            trace_id="trace-det-1",
+            content={"text": "Hello"},
+            attributes={},
+        ),
+        BQAAAgentEvent(
+            event_id="ev-2-first-explicit",
+            timestamp=t0 + timedelta(seconds=1),
+            event_type="TOOL_COMPLETED",
+            agent="intake",
+            invocation_id="inv-det-1",
+            trace_id="trace-det-1",
+            content={"response": "ctx"},
+            attributes={"custom_metadata": {"apphub.application.id": "alpha-chronological-first"}},
+        ),
+        BQAAAgentEvent(
+            event_id="ev-3-second-explicit",
+            timestamp=t0 + timedelta(seconds=2),
+            event_type="AGENT_RESPONSE",
+            agent="intake",
+            invocation_id="inv-det-1",
+            trace_id="trace-det-1",
+            content={"text": "Done"},
+            attributes={"custom_metadata": {"apphub.application.id": "zzz-later-app"}},
+        ),
+    ]
+    py_payloads = bqaa_events_to_trace_payloads(events)
+    assert len(py_payloads) == 1
+    assert py_payloads[0].apphub_application_id == "alpha-chronological-first"
+
+    payload_view_sql = _transpile_bq_view_to_sqlite(
+        _extract_view_sql_text(
+            SQL_DIR / "bqaa_adapter_views.sql", "agent_eval.v_bqaa_trace_payloads"
+        )
+    )
+    conn = _new_sqlite_bq_conn()
+    conn.execute(
+        "CREATE TABLE agent_events (event_id TEXT, timestamp TEXT, event_type TEXT, "
+        "invocation_id TEXT, trace_id TEXT, content TEXT, attributes TEXT)"
+    )
+    for ev in reversed(events):
+        conn.execute(
+            "INSERT INTO agent_events VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                ev.event_id,
+                ev.timestamp.isoformat(),
+                ev.event_type,
+                ev.invocation_id,
+                ev.trace_id,
+                json.dumps(ev.content),
+                json.dumps(ev.attributes),
+            ),
+        )
+    conn.execute(f"CREATE VIEW v_bqaa_trace_payloads AS {payload_view_sql}")
+    sql_row = conn.execute("SELECT apphub_application_id FROM v_bqaa_trace_payloads").fetchone()
+    conn.close()
+    assert sql_row["apphub_application_id"] == "alpha-chronological-first"

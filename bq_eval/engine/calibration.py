@@ -1,4 +1,4 @@
-"""Rogan-Gladen Prevalence Correction, 95% Delta-Method CI, and Quadratic Gwet's AC2."""
+"""Rogan-Gladen Prevalence Correction, 95% Delta/Wilson CIs, and Quadratic Gwet's AC2."""
 
 from __future__ import annotations
 
@@ -6,66 +6,7 @@ import math
 from collections.abc import Sequence
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict
-
-
-class ConfusionMatrix(BaseModel):
-    """Binary autorater vs. human SME confusion matrix on Rule-0-passing traces."""
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    tp: int
-    fn: int
-    tn: int
-    fp: int
-
-    @property
-    def total(self) -> int:
-        return self.tp + self.fn + self.tn + self.fp
-
-    @property
-    def sensitivity_tpr(self) -> float:
-        denom = self.tp + self.fn
-        if denom == 0:
-            raise ValueError("Cannot compute sensitivity (TPR) with zero positive human labels.")
-        return self.tp / denom
-
-    @property
-    def specificity_tnr(self) -> float:
-        denom = self.tn + self.fp
-        if denom == 0:
-            raise ValueError("Cannot compute specificity (TNR) with zero negative human labels.")
-        return self.tn / denom
-
-    @property
-    def youden_j(self) -> float:
-        return self.sensitivity_tpr + self.specificity_tnr - 1.0
-
-
-class RoganGladenResult(BaseModel):
-    """Bias-corrected true pass rate and 95% confidence interval (EVAL-P04)."""
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    raw_pass_rate: float
-    calibrated_pass_rate: float
-    ci_95_lower: float
-    ci_95_upper: float
-    sensitivity_tpr: float
-    specificity_tnr: float
-    youden_j: float
-    sample_size: int
-
-
-class CalibrationResult(BaseModel):
-    """Combined IRR (Gwet's AC2) + Rogan-Gladen calibration summary."""
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    gwet_ac2: float
-    passes_irr_gate: bool
-    confusion_matrix: ConfusionMatrix
-    rogan_gladen: RoganGladenResult
+from bq_eval.contract.results import CalibrationResult, ConfusionMatrix, RoganGladenResult
 
 
 def compute_confusion_matrix(
@@ -82,17 +23,7 @@ def compute_confusion_matrix(
     return ConfusionMatrix(tp=tp, fn=fn, tn=tn, fp=fp)
 
 
-def rogan_gladen_wilson_ci(
-    observed_pass_rate: float,
-    sample_size: int,
-    confusion: ConfusionMatrix,
-    z_value: float = 1.959963984540054,
-) -> tuple[float, float]:
-    """Compute Lang & Reiczigel (2014) Wilson plug-in Rogan-Gladen CI (boundary-safe).
-
-    Applies Wilson/Agresti-Coull shrinkage to the observed rate and calibration Se/Sp so
-    intervals remain non-degenerate when observed_pass_rate, TPR, or TNR hit 0.0 or 1.0.
-    """
+def _validate_rg_inputs(observed_pass_rate: float, sample_size: int, z_value: float) -> None:
     if sample_size <= 0:
         raise ValueError("sample_size must be positive for Rogan-Gladen calibration.")
     if not math.isfinite(observed_pass_rate) or not (0.0 <= observed_pass_rate <= 1.0):
@@ -100,6 +31,15 @@ def rogan_gladen_wilson_ci(
     if not math.isfinite(z_value) or z_value <= 0.0:
         raise ValueError("z_value must be finite and positive.")
 
+
+def rogan_gladen_wilson_ci(
+    observed_pass_rate: float,
+    sample_size: int,
+    confusion: ConfusionMatrix,
+    z_value: float = 1.959963984540054,
+) -> tuple[float, float]:
+    """Compute Lang & Reiczigel (2014) Wilson plug-in Rogan-Gladen CI (boundary-safe)."""
+    _validate_rg_inputs(observed_pass_rate, sample_size, z_value)
     n_pos = confusion.tp + confusion.fn
     n_neg = confusion.tn + confusion.fp
     if n_pos == 0 or n_neg == 0:
@@ -142,17 +82,8 @@ def rogan_gladen_calibrate(  # noqa: PLR0913
     ci_method: Literal["delta", "wilson_plugin"] = "delta",
     stratified_var_p_obs: float | None = None,
 ) -> RoganGladenResult:
-    """Apply Rogan-Gladen prevalence adjustment with Delta-method or Wilson plug-in 95% CI.
-
-    Formula:
-        theta_RG = clip((p_obs + TNR - 1) / (TPR + TNR - 1), 0, 1)
-    """
-    if sample_size <= 0:
-        raise ValueError("sample_size must be positive for Rogan-Gladen calibration.")
-    if not math.isfinite(observed_pass_rate) or not (0.0 <= observed_pass_rate <= 1.0):
-        raise ValueError("observed_pass_rate must be finite and in [0.0, 1.0].")
-    if not math.isfinite(z_value) or z_value <= 0.0:
-        raise ValueError("z_value must be finite and positive.")
+    """Apply Rogan-Gladen prevalence adjustment with Delta-method or Wilson plug-in 95% CI."""
+    _validate_rg_inputs(observed_pass_rate, sample_size, z_value)
 
     tpr = confusion.sensitivity_tpr
     tnr = confusion.specificity_tnr
@@ -163,8 +94,7 @@ def rogan_gladen_calibrate(  # noqa: PLR0913
             "cannot apply Rogan-Gladen division."
         )
 
-    raw_theta = (observed_pass_rate + tnr - 1.0) / j_stat
-    theta_rg = min(1.0, max(0.0, raw_theta))
+    theta_rg = min(1.0, max(0.0, (observed_pass_rate + tnr - 1.0) / j_stat))
 
     if ci_method == "wilson_plugin":
         ci_lower, ci_upper = rogan_gladen_wilson_ci(
@@ -184,7 +114,6 @@ def rogan_gladen_calibrate(  # noqa: PLR0913
         n_neg = confusion.tn + confusion.fp
         var_tpr = (tpr * (1.0 - tpr)) / n_pos
         var_tnr = (tnr * (1.0 - tnr)) / n_neg
-
         se_theta = (
             math.sqrt(var_p_obs + (theta_rg**2) * var_tpr + ((1.0 - theta_rg) ** 2) * var_tnr)
             / j_stat
@@ -252,10 +181,7 @@ def compute_gwet_ac2(
     rater_b: Sequence[int],
     categories: Sequence[int] = (1, 2, 3, 4),
 ) -> float:
-    """Compute quadratic-weighted Gwet's AC2 inter-rater reliability (EVAL-P03).
-
-    Resistant to the high-prevalence Cohen's Kappa paradox on skewed production distributions.
-    """
+    """Compute quadratic-weighted Gwet's AC2 inter-rater reliability (EVAL-P03)."""
     if len(rater_a) != len(rater_b) or not rater_a:
         raise ValueError("Rater sequences must be non-empty and equal length.")
 
@@ -271,25 +197,19 @@ def compute_gwet_ac2(
             f"Rater scores {sorted(set(invalid_scores))} outside allowed categories {tuple(categories)}."
         )
 
-    cat_min = min(categories)
-    cat_max = max(categories)
-    span = float(cat_max - cat_min)
+    span = float(max(categories) - min(categories))
 
     def weight(c1: int, c2: int) -> float:
         return 1.0 - ((float(c1 - c2) / span) ** 2)
 
     p_a = sum(weight(a, b) for a, b in zip(rater_a, rater_b, strict=True)) / n
-
-    pi_k: dict[int, float] = {}
-    for k in categories:
-        count_a = sum(1 for a in rater_a if a == k)
-        count_b = sum(1 for b in rater_b if b == k)
-        pi_k[k] = ((count_a / n) + (count_b / n)) / 2.0
+    pi_k = {
+        k: ((sum(1 for a in rater_a if a == k) / n) + (sum(1 for b in rater_b if b == k) / n)) / 2.0
+        for k in categories
+    }
 
     t_w = sum(weight(k, m) for k in categories for m in categories)
-    denom_norm = q * (q - 1)
-    p_e = (t_w / denom_norm) * sum(pi_k[k] * (1.0 - pi_k[k]) for k in categories)
-
+    p_e = (t_w / (q * (q - 1))) * sum(pi_k[k] * (1.0 - pi_k[k]) for k in categories)
     if abs(1.0 - p_e) < 1e-12:
         return 1.0
     return (p_a - p_e) / (1.0 - p_e)

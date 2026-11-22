@@ -177,7 +177,7 @@ WITH trace_agg AS (
     ) AS rule0_pass,
     LOGICAL_OR(w.finops_traffic_type = 'conflict_escalation') AS escalated_to_high_reasoning,
     LOGICAL_OR(w.is_long_context_cliff) AS hit_long_context_cliff,
-    ANY_VALUE(w.finops_traffic_type) AS primary_traffic_type,
+    MAX(w.finops_traffic_type) AS primary_traffic_type,
     SUM(w.input_tokens) AS total_input_tokens,
     SUM(w.cached_input_tokens) AS total_cached_input_tokens,
     SUM(w.uncached_input_tokens) AS total_uncached_input_tokens,
@@ -318,9 +318,11 @@ outcome_spans AS (
     ON w.outcome_id = o.outcome_id
   LEFT JOIN step2_judge_by_outcome AS j
     ON w.outcome_id = j.outcome_id
+  LEFT JOIN `agent_eval.app_registry` AS r
+    ON COALESCE(o.outcome_owner, w.outcome_owner, w.apphub_application_id, 'unregistered_app') = r.apphub_application_id
   WHERE w.outcome_id IS NOT NULL
-    AND COALESCE(w.apphub_application_id, '') NOT LIKE '%external%'
-    AND COALESCE(JSON_VALUE(w.attributes, '$."apphub.external"'), 'false') != 'true'
+    AND NOT COALESCE(r.is_external_counterparty, FALSE)
+    AND LOWER(COALESCE(JSON_VALUE(w.attributes, '$."apphub.external"'), 'false')) != 'true'
   GROUP BY 1, 2, 3, 4, 5, 6
 ),
 weighted_outcome_spans AS (
@@ -389,8 +391,10 @@ SELECT
   SUM(w.thinking_tokens) AS total_thinking_tokens,
   SUM(w.span_cost_usd) AS external_model_cost_usd
 FROM `agent_eval.v_trace_waterfall` AS w
-WHERE w.apphub_application_id LIKE '%external%'
-   OR COALESCE(JSON_VALUE(w.attributes, '$."apphub.external"'), 'false') = 'true'
+LEFT JOIN `agent_eval.app_registry` AS r
+  ON w.apphub_application_id = r.apphub_application_id
+WHERE COALESCE(r.is_external_counterparty, FALSE)
+   OR LOWER(COALESCE(JSON_VALUE(w.attributes, '$."apphub.external"'), 'false')) = 'true'
 GROUP BY
   w.apphub_application_id,
   w.service_name,
@@ -766,22 +770,29 @@ FROM calibrated AS c;
 CREATE OR REPLACE VIEW `agent_eval.v_capacity_hourly_burndown_export` AS
 SELECT
   TIMESTAMP_TRUNC(w.start_time, HOUR) AS usage_hour,
+  FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%SZ', TIMESTAMP_TRUNC(w.start_time, HOUR)) AS timestamp,
   w.apphub_application_id,
+  w.apphub_application_id AS tenant,
   w.model_name,
+  w.model_name AS model,
   w.finops_traffic_type,
   COUNT(DISTINCT w.trace_id) AS distinct_traces,
   COUNT(*) AS span_count,
   SUM(w.input_tokens) AS input_tokens,
   SUM(w.cached_input_tokens) AS cached_input_tokens,
+  SUM(w.cached_input_tokens) AS cached_tokens,
   SUM(w.uncached_input_tokens) AS uncached_input_tokens,
   SUM(w.output_tokens) AS output_tokens,
   SUM(w.thinking_tokens) AS thinking_tokens,
+  SUM(w.thinking_tokens) AS thoughts_tokens,
   COUNTIF(w.is_long_context_cliff) AS long_context_cliff_spans,
   SUM(w.weighted_burndown_tokens) AS weighted_burndown_tokens,
+  SUM(w.weighted_burndown_tokens) AS precomputed_weighted_burndown_tokens,
   SUM(w.span_cost_usd) AS total_cost_usd
 FROM `agent_eval.v_trace_waterfall` AS w
 GROUP BY
   usage_hour,
+  timestamp,
   w.apphub_application_id,
   w.model_name,
   w.finops_traffic_type;

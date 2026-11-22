@@ -1,25 +1,20 @@
-"""Light Capture (`BQAA`) event contracts and deterministic Python adapter twin (`M5`).
-
-Maps BigQuery Agent Analytics (`BigQueryAgentAnalyticsPlugin` / `BigQueryCallbackHandler`)
-`agent_events` rows onto `OTelGenAISpanRecord` and `TracePayloadRecord` with exact parity
-against `sql/bqaa_adapter_views.sql`:
-- Deduplicates BigQuery Storage Write API retry rows by `event_id` (latest `timestamp` wins).
-- Enforces `ADR-003` / `EVAL-P08` strict `'unregistered_app'` fallback when explicit
-  `custom_metadata` App Hub identifiers are absent (never collapsing into `adk.app_name` or `agent`).
-- Converts `usage_metadata` token counts for span-level `<=200K` and `>200K` burndown cliffs.
-"""
+"""Light Capture (`BQAA`) deterministic Python adapter twin (`M5`, `F13`, `F17`, `F21`)."""
 
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Sequence
-from datetime import datetime, timedelta
+from datetime import timedelta
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
-
-from bq_eval.loadgen import TracePayloadRecord
-from bq_eval.otel import FinOpsTrafficType, GenAISpanKind, OTelGenAISpanRecord
+from bq_eval.contract.otel import (
+    BQAAAgentEvent,
+    FinOpsTrafficType,
+    GenAISpanKind,
+    OTelGenAISpanRecord,
+    TracePayloadRecord,
+)
 
 SPAN_EVENT_TYPES: frozenset[str] = frozenset(
     {
@@ -33,26 +28,9 @@ SPAN_EVENT_TYPES: frozenset[str] = frozenset(
     }
 )
 
-
-class BQAAAgentEvent(BaseModel):
-    """Pydantic v2 contract for BigQuery Agent Analytics (`BQAA`) `agent_events` rows."""
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    event_id: str = Field(..., min_length=4)
-    timestamp: datetime
-    event_type: str = Field(..., min_length=2)
-    agent: str | None = None
-    session_id: str | None = None
-    invocation_id: str = Field(..., min_length=4)
-    trace_id: str | None = None
-    span_id: str | None = None
-    parent_span_id: str | None = None
-    status: str | None = "OK"
-    error_message: str | None = None
-    latency_ms: dict[str, Any] = Field(default_factory=dict)
-    content: dict[str, Any] = Field(default_factory=dict)
-    attributes: dict[str, Any] = Field(default_factory=dict)
+_TIMEOUT_RE = re.compile(r"timeout|timed\s*out|503|504", re.IGNORECASE)
+_RATE_LIMIT_RE = re.compile(r"rate[_\s-]?limit|429", re.IGNORECASE)
+_VALIDATION_RE = re.compile(r"validat|schema|invalid", re.IGNORECASE)
 
 
 def _first_non_empty(*candidates: object) -> str | None:
@@ -60,6 +38,16 @@ def _first_non_empty(*candidates: object) -> str | None:
         if isinstance(val, str) and val.strip():
             return val.strip()
     return None
+
+
+def resolve_bqaa_trace_id(ev: BQAAAgentEvent) -> str:
+    """Resolve canonical trace ID (`attributes.otel.trace_id` -> `trace_id` -> `invocation_id`)."""
+    otel_ctx = ev.attributes.get("otel")
+    otel_map = otel_ctx if isinstance(otel_ctx, dict) else {}
+    return (
+        _first_non_empty(otel_map.get("trace_id"), ev.trace_id, ev.invocation_id)
+        or ev.invocation_id
+    )
 
 
 def _resolve_strict_apphub_id(custom_metadata: dict[str, Any]) -> str | None:
@@ -94,6 +82,43 @@ def _resolve_traffic_type(meta: dict[str, Any]) -> FinOpsTrafficType:
         return FinOpsTrafficType.UNCLASSIFIED
 
 
+def _resolve_tool_call_status(ev: BQAAAgentEvent) -> str | None:
+    """Classify `TOOL_COMPLETED` / `TOOL_ERROR` matching `sql/bqaa_adapter_views.sql` (`F21`)."""
+    if ev.event_type == "TOOL_COMPLETED":
+        return "SUCCESS"
+    if ev.event_type != "TOOL_ERROR":
+        return None
+
+    explicit = _first_non_empty(
+        ev.attributes.get("tool.call.status"),
+        ev.attributes.get("error.type"),
+        ev.attributes.get("error_type"),
+        ev.content.get("error_type"),
+    )
+    if explicit is not None and explicit.upper() not in {"OK", "SUCCESS"}:
+        return explicit.upper()
+
+    raw_code = ev.content.get("code")
+    code_int = int(raw_code) if isinstance(raw_code, (int, float)) else None
+    msg = ev.error_message or ""
+    status = "TOOL_ERROR"
+    if code_int in {408, 503, 504} or _TIMEOUT_RE.search(msg):
+        status = "TIMEOUT"
+    elif code_int == 429 or _RATE_LIMIT_RE.search(msg):
+        status = "RATE_LIMITED"
+    elif code_int in {400, 422} or _VALIDATION_RE.search(msg):
+        status = "VALIDATION_ERROR"
+    return status
+
+
+def _resolve_span_kind(ev: BQAAAgentEvent) -> GenAISpanKind:
+    if ev.event_type in ("LLM_RESPONSE", "LLM_ERROR"):
+        return GenAISpanKind.CHAT
+    if ev.event_type in ("TOOL_COMPLETED", "TOOL_ERROR"):
+        return GenAISpanKind.EXECUTE_TOOL
+    return GenAISpanKind.INVOKE_AGENT
+
+
 def _bqaa_event_to_span(ev: BQAAAgentEvent) -> OTelGenAISpanRecord | None:
     attrs = ev.attributes
     custom_meta = attrs.get("custom_metadata")
@@ -106,10 +131,7 @@ def _bqaa_event_to_span(ev: BQAAAgentEvent) -> OTelGenAISpanRecord | None:
 
     otel_ctx = attrs.get("otel")
     otel_map = otel_ctx if isinstance(otel_ctx, dict) else {}
-    resolved_trace_id = (
-        _first_non_empty(otel_map.get("trace_id"), ev.trace_id, ev.invocation_id)
-        or ev.invocation_id
-    )
+    resolved_trace_id = resolve_bqaa_trace_id(ev)
     resolved_span_id = (
         _first_non_empty(otel_map.get("span_id"), ev.span_id, ev.event_id) or ev.event_id
     )
@@ -117,12 +139,6 @@ def _bqaa_event_to_span(ev: BQAAAgentEvent) -> OTelGenAISpanRecord | None:
     raw_lat = ev.latency_ms.get("total_ms", 0.0)
     total_ms = max(0.0, float(raw_lat)) if isinstance(raw_lat, (int, float)) else 0.0
     is_error = (ev.status or "OK").upper() == "ERROR" or ev.event_type.endswith("_ERROR")
-    if ev.event_type in ("LLM_RESPONSE", "LLM_ERROR"):
-        span_kind = GenAISpanKind.CHAT
-    elif ev.event_type in ("TOOL_COMPLETED", "TOOL_ERROR"):
-        span_kind = GenAISpanKind.EXECUTE_TOOL
-    else:
-        span_kind = GenAISpanKind.INVOKE_AGENT
 
     adk_block = attrs.get("adk")
     adk_map = adk_block if isinstance(adk_block, dict) else {}
@@ -132,11 +148,6 @@ def _bqaa_event_to_span(ev: BQAAAgentEvent) -> OTelGenAISpanRecord | None:
     )
     apphub_app_id = _resolve_strict_apphub_id(meta)
     input_tokens, cached_tokens, output_tokens, thinking_tokens = _extract_usage_tokens(attrs)
-    tool_status: str | None = (
-        "VALIDATION_ERROR"
-        if ev.event_type == "TOOL_ERROR"
-        else ("SUCCESS" if ev.event_type == "TOOL_COMPLETED" else None)
-    )
     promoted_attrs: dict[str, Any] = dict(attrs)
     for pass_key in (
         "business_unit",
@@ -145,6 +156,8 @@ def _bqaa_event_to_span(ev: BQAAAgentEvent) -> OTelGenAISpanRecord | None:
         "outcome.verified",
         "outcome.subject",
         "outcome.parent_id",
+        "hitl.review",
+        "apphub.external",
     ):
         if pass_key in meta and pass_key not in promoted_attrs:
             promoted_attrs[pass_key] = meta[pass_key]
@@ -160,7 +173,7 @@ def _bqaa_event_to_span(ev: BQAAAgentEvent) -> OTelGenAISpanRecord | None:
         latency_ms=total_ms,
         status_code="ERROR" if is_error else "OK",
         otel_span_kind="SPAN_KIND_INTERNAL",
-        span_kind=span_kind,
+        span_kind=_resolve_span_kind(ev),
         service_name=service_name,
         gcp_apphub_application_id=apphub_app_id,
         gcp_apphub_service_id=_first_non_empty(meta.get("apphub.service.id")),
@@ -174,7 +187,7 @@ def _bqaa_event_to_span(ev: BQAAAgentEvent) -> OTelGenAISpanRecord | None:
         tool_name=_first_non_empty(
             attrs.get("tool_name"), ev.content.get("tool_name"), ev.content.get("name")
         ),
-        tool_call_status=tool_status,
+        tool_call_status=_resolve_tool_call_status(ev),
         rule0_pass=not is_error,
         finops_traffic_type=_resolve_traffic_type(meta),
         outcome_id=_first_non_empty(meta.get("outcome.id"), ev.trace_id, ev.invocation_id),
@@ -264,14 +277,7 @@ def bqaa_events_to_trace_payloads(
     """Aggregate `BQAA` `agent_events` into 1 `TracePayloadRecord` per `trace_id`."""
     grouped: dict[str, list[BQAAAgentEvent]] = {}
     for ev in deduplicate_bqaa_events(events):
-        otel_ctx = ev.attributes.get("otel")
-        otel_map = otel_ctx if isinstance(otel_ctx, dict) else {}
-        tid = (
-            _first_non_empty(otel_map.get("trace_id"), ev.trace_id, ev.invocation_id)
-            or ev.invocation_id
-        )
-        grouped.setdefault(tid, []).append(ev)
-
+        grouped.setdefault(resolve_bqaa_trace_id(ev), []).append(ev)
     return [
         _aggregate_trace_payload(tid, trace_events) for tid, trace_events in sorted(grouped.items())
     ]

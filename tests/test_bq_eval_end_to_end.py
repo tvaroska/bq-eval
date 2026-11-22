@@ -1,47 +1,50 @@
-"""End-to-End Verification Suite for BigQuery Agent Evaluation & FinOps (`bq-eval`)."""
+"""End-to-End Verification Suite for BigQuery Agent Evaluation & FinOps (`bq-eval`, `F7`, `F18`)."""
 
 from __future__ import annotations
 
 import csv
 import re
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
-from bq_eval.calibration import (
+from bq_eval.cli import main as cli_main
+from bq_eval.contract.otel import (
+    compute_weighted_burndown_tokens,
+    resolve_application_id,
+)
+from bq_eval.contract.results import (
     ConfusionMatrix,
+    ModelOption,
+    ShowcaseRunArtifacts,
+    SQLTraceEvalSummary,
+)
+from bq_eval.contract.rubrics import CANONICAL_RUBRICS, wrap_untrusted_text
+from bq_eval.engine.calibration import (
     compute_confusion_matrix,
     compute_gwet_ac2,
     rogan_gladen_calibrate,
 )
-from bq_eval.cli import main as cli_main
-from bq_eval.finops import (
-    ModelOption,
+from bq_eval.engine.finops import (
     allocate_focus_two_pool_chargeback,
     compute_eval_finops_roi,
     compute_pareto_frontier,
     diagnose_prefix_cache_dilution,
     plan_off_peak_eval_schedule,
 )
-from bq_eval.loadgen import (
+from bq_eval.engine.sql_eval import (
+    build_ai_generate_table_judge_sql,
+    evaluate_traces_in_sqlite,
+)
+from bq_eval.showcase.loadgen import (
     build_golden_seed_templates,
     evaluate_time_shifted_corpus,
     generate_time_shifted_corpus,
 )
-from bq_eval.otel import (
-    FinOpsTrafficType,
-    GenAISpanKind,
-    OTelGenAISpanRecord,
-    compute_weighted_burndown_tokens,
-    resolve_application_id,
-)
-from bq_eval.rubrics import CANONICAL_RUBRICS, wrap_untrusted_text
-from bq_eval.showcase import run_showcase_pipeline, write_html_scorecard
-from bq_eval.sql_eval import (
-    build_ai_generate_table_judge_sql,
-    evaluate_traces_in_sqlite,
-)
+from bq_eval.showcase.pipeline import render_markdown_report, run_showcase_pipeline
+from bq_eval.showcase.renderer import render_html_scorecard, write_html_scorecard
+from tests.conftest import make_span
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -103,8 +106,6 @@ def test_ddl_and_views_table_parity() -> None:
 
 def test_weighted_burndown_standard_and_long_context_cliff() -> None:
     """Verify <=200K (1.0x/0.1x/4.0x) and >200K (2.0x/0.2x/7.5x) serving-physics cliffs."""
-    # Standard <= 200K: 10,000 total input (8,000 cached, 2,000 uncached), 500 output, 250 thinking
-    # Expected: 1.0*2000 + 0.1*8000 + 4.0*750 = 2000 + 800 + 3000 = 5800.0
     std_burndown = compute_weighted_burndown_tokens(
         input_tokens=10_000,
         cached_input_tokens=8_000,
@@ -113,8 +114,6 @@ def test_weighted_burndown_standard_and_long_context_cliff() -> None:
     )
     assert std_burndown == pytest.approx(5_800.0)
 
-    # Long-context > 200K: 250,000 total input (200,000 cached, 50,000 uncached), 1,000 output, 1,000 thinking
-    # Expected: 2.0*50000 + 0.2*200000 + 7.5*2000 = 100000 + 40000 + 15000 = 155000.0
     long_burndown = compute_weighted_burndown_tokens(
         input_tokens=250_000,
         cached_input_tokens=200_000,
@@ -125,12 +124,11 @@ def test_weighted_burndown_standard_and_long_context_cliff() -> None:
 
 
 def test_portable_application_id_coalesce_precedence() -> None:
-    """Verify EVAL-P08 COALESCE fallback precedence to unregistered_app."""
+    """Verify EVAL-P08 / ADR-003 COALESCE fallback precedence to unregistered_app (`F17`)."""
     assert (
         resolve_application_id(
             gcp_apphub_application_id="apphub-Explicit",
             attributes={"gcp.apphub.application.id": "attr-app"},
-            service_name="custom-svc",
         )
         == "apphub-Explicit"
     )
@@ -138,7 +136,6 @@ def test_portable_application_id_coalesce_precedence() -> None:
         resolve_application_id(
             gcp_apphub_application_id=None,
             attributes={"gcp.apphub.application.id": "apphub-from-gcp-attr"},
-            service_name="custom-svc",
         )
         == "apphub-from-gcp-attr"
     )
@@ -146,7 +143,6 @@ def test_portable_application_id_coalesce_precedence() -> None:
         resolve_application_id(
             gcp_apphub_application_id=None,
             attributes={"apphub.application.id": "apphub-from-otel-attr"},
-            service_name="agent-service",
         )
         == "apphub-from-otel-attr"
     )
@@ -154,17 +150,11 @@ def test_portable_application_id_coalesce_precedence() -> None:
         resolve_application_id(
             gcp_apphub_application_id=None,
             attributes={"gcp.agent.id": "langgraph-agent-01"},
-            service_name="checkout-concierge-svc",
         )
         == "unregistered_app"
     )
     assert (
-        resolve_application_id(
-            gcp_apphub_application_id=None,
-            attributes={},
-            service_name="agent-service",
-        )
-        == "unregistered_app"
+        resolve_application_id(gcp_apphub_application_id=None, attributes={}) == "unregistered_app"
     )
 
 
@@ -203,57 +193,37 @@ def test_rogan_gladen_and_sqlite_exact_parity_and_fail_closed_guard() -> None:
     confusion = ConfusionMatrix(tp=87, fn=2, tn=7, fp=4)
     base_time = datetime(2026, 11, 5, 12, 0, 0, tzinfo=UTC)
 
-    spans: list[OTelGenAISpanRecord] = []
-    judge_outcomes: dict[str, bool] = {}
-
-    # 20 Rule-0-passing traces for calibrated-app (18 pass judge, 2 fail -> p_obs = 0.90)
-    # Plus 2 Rule-0-failing traces that also get judged by Tier 2 error-tail sampling
-    for i in range(22):
-        tid = f"trace-cal-{i:03d}"
-        r0_pass = i < 20
-        spans.append(
-            OTelGenAISpanRecord(
-                trace_id=tid,
-                span_id=f"span-{i:03d}",
-                start_time=base_time + timedelta(seconds=i),
-                end_time=base_time + timedelta(seconds=i, milliseconds=500),
-                latency_ms=500.0,
-                status_code="OK" if r0_pass else "ERROR",
-                span_kind=GenAISpanKind.INVOKE_AGENT,
-                gcp_apphub_application_id="calibrated-app",
-                model_name="gemini-3.8-flash",
-                input_tokens=10_000,
-                cached_input_tokens=5_000,
-                output_tokens=400,
-                thinking_tokens=100,
-                rule0_pass=r0_pass,
-                finops_traffic_type=FinOpsTrafficType.PRODUCTION_INFERENCE,
-            )
+    spans = [
+        make_span(
+            f"trace-cal-{i:03d}",
+            f"span-{i:03d}",
+            app_id="calibrated-app",
+            status_code="OK" if i < 20 else "ERROR",
+            rule0_pass=(i < 20),
+            input_tokens=10_000,
+            cached_input_tokens=5_000,
+            output_tokens=400,
+            thinking_tokens=100,
+            latency_ms=500.0,
+            offset_s=i,
+            base_time=base_time,
         )
-        if i < 20:
-            judge_outcomes[tid] = i < 18  # 18/20 = 0.90 on Rule-0-passing traces
-        else:
-            judge_outcomes[tid] = False  # Error-tail judge call (billed, excluded from p_obs)
-
-    # Unjudged app: must fail closed to None (never 1.0)
+        for i in range(22)
+    ]
     spans.append(
-        OTelGenAISpanRecord(
-            trace_id="trace-unjudged-001",
-            span_id="span-u-001",
-            start_time=base_time,
-            end_time=base_time + timedelta(milliseconds=300),
-            latency_ms=300.0,
-            status_code="OK",
-            span_kind=GenAISpanKind.INVOKE_AGENT,
-            gcp_apphub_application_id="unjudged-app",
-            model_name="gemini-3.8-flash",
+        make_span(
+            "trace-unjudged-001",
+            "span-u-001",
+            app_id="unjudged-app",
             input_tokens=4_000,
             cached_input_tokens=2_000,
             output_tokens=200,
             thinking_tokens=0,
-            rule0_pass=True,
+            latency_ms=300.0,
+            base_time=base_time,
         )
     )
+    judge_outcomes = {f"trace-cal-{i:03d}": (i < 18) for i in range(22)}
 
     summaries = evaluate_traces_in_sqlite(
         spans=spans,
@@ -277,7 +247,6 @@ def test_rogan_gladen_and_sqlite_exact_parity_and_fail_closed_guard() -> None:
     )
     assert cal_summary.calibrated_ci_95_lower == pytest.approx(direct_rg.ci_95_lower, abs=1e-15)
     assert cal_summary.calibrated_ci_95_upper == pytest.approx(direct_rg.ci_95_upper, abs=1e-15)
-    # All 22 judge calls (20 canary + 2 error-tail) are billed in autorater_judge_usd
     assert cal_summary.autorater_judge_usd == pytest.approx(22 * 0.0025, abs=1e-12)
 
     unjudged = summaries["unjudged-app"]
@@ -300,17 +269,13 @@ def test_gwet_ac2_and_confusion_matrix_helpers() -> None:
         [4, 4, 3, 4, 3, 4, 2, 1, 4, 4],
         [4, 4, 3, 4, 3, 4, 2, 1, 4, 3],
     )
-    # Exact hand-computed quadratic Gwet's AC2:
-    # p_a = (9*1 + 1*(1 - (1/3)^2)) / 10 = 89/90
-    # pi = (0.10, 0.10, 0.25, 0.55) -> sum pi_k*(1-pi_k) = 0.09 + 0.09 + 0.1875 + 0.2475 = 0.615
-    # p_e = (26/27) * 0.615 = 15.99/27; AC2 = (89/90 - 15.99/27) / (1 - 15.99/27)
     expected_pe = (26.0 / 27.0) * 0.615
     expected_ac2 = ((89.0 / 90.0) - expected_pe) / (1.0 - expected_pe)
     assert ac2 == pytest.approx(expected_ac2, abs=1e-12)
 
 
-def test_finops_roi_prefix_cache_pareto_and_focus_chargeback() -> None:
-    # 1. 3-Tier Eval FinOps ROI (90-95% savings)
+def test_eval_finops_roi_savings_math() -> None:
+    """3-Tier Eval FinOps ROI saves 92.15% vs. 100% LLM judging (`F18`)."""
     roi = compute_eval_finops_roi(
         total_production_traces=100_000,
         error_or_sla_tail_rate=0.03,
@@ -321,32 +286,33 @@ def test_finops_roi_prefix_cache_pareto_and_focus_chargeback() -> None:
     assert roi.net_savings_usd == pytest.approx(230.375, abs=1e-6)
     assert roi.stratified_3tier_judge_usd == pytest.approx(19.625, abs=1e-6)
 
-    # 2. Prefix-cache 1/N dilution diagnostics
-    now = datetime(2026, 11, 5, 12, 0, 0, tzinfo=UTC)
-    span = OTelGenAISpanRecord(
-        trace_id="trace-dil-001",
-        span_id="span-dil-001",
-        start_time=now,
-        end_time=now + timedelta(milliseconds=400),
-        latency_ms=400.0,
-        gcp_apphub_application_id="diluted-app",
+
+def test_prefix_cache_dilution_1_over_n_ceiling() -> None:
+    """Prefix-cache 1/N dilution computes ceiling and recoverable burndown (`F18`)."""
+    span = make_span(
+        "trace-dil-001",
+        "span-dil-001",
+        app_id="diluted-app",
         input_tokens=1_000_000,
         cached_input_tokens=200_000,
         output_tokens=10_000,
+        thinking_tokens=0,
     )
     dilution = diagnose_prefix_cache_dilution([span], distinct_prompt_variants=5)
     assert dilution.dilution_detected is True
     assert dilution.theoretical_dilution_ceiling == pytest.approx(0.20)
     assert dilution.recoverable_weighted_burndown_tokens > 0.0
 
-    # 3. NFR = 0.0% Pareto frontier
+
+def test_pareto_frontier_disqualifies_fabrication_and_low_rule0() -> None:
+    """Zero-fabrication Pareto frontier disqualifies fabrication > 0% and Rule-0 < 98% (`F17`, `F18`)."""
     pareto = compute_pareto_frontier(
         [
             ModelOption(
                 config_id="safe-fast",
                 model_name="gemini-3.8-flash",
                 rule0_pass_rate=0.99,
-                non_fabrication_rate_nfr=0.0,
+                fabrication_rate=0.0,
                 calibrated_pass_rate=0.92,
                 cost_per_verified_outcome_usd=0.0020,
                 p95_latency_ms=900.0,
@@ -355,7 +321,7 @@ def test_finops_roi_prefix_cache_pareto_and_focus_chargeback() -> None:
                 config_id="cheap-fabricator",
                 model_name="gemini-3.5-flash-lite",
                 rule0_pass_rate=0.99,
-                non_fabrication_rate_nfr=0.01,
+                fabrication_rate=0.01,
                 calibrated_pass_rate=0.90,
                 cost_per_verified_outcome_usd=0.0008,
                 p95_latency_ms=500.0,
@@ -364,38 +330,42 @@ def test_finops_roi_prefix_cache_pareto_and_focus_chargeback() -> None:
                 config_id="low-rule0-cheap",
                 model_name="gemini-3.5-flash-lite",
                 rule0_pass_rate=0.97,
-                non_fabrication_rate_nfr=0.0,
+                fabrication_rate=0.0,
                 calibrated_pass_rate=0.95,
                 cost_per_verified_outcome_usd=0.0005,
                 p95_latency_ms=400.0,
             ),
         ]
     )
-    assert len(pareto.disqualified_for_fabrication) == 2
-    assert {c.config_id for c in pareto.disqualified_for_fabrication} == {
+    assert len(pareto.disqualified_options) == 2
+    assert {c.config_id for c in pareto.disqualified_options} == {
         "cheap-fabricator",
         "low-rule0-cheap",
     }
     assert pareto.recommended_default is not None
     assert pareto.recommended_default.config_id == "safe-fast"
 
-    # 4. FOCUS 1.2 Two-Pool Chargeback + Off-Peak PT Water-Filling
+
+def test_focus_two_pool_chargeback_idle_capacity_pool() -> None:
+    """FOCUS 1.2 Two-Pool Chargeback isolates unutilized idle capacity tax (`F18`)."""
     rows = allocate_focus_two_pool_chargeback(
         app_burndown_tokens={"app-a": 60_000_000.0, "app-b": 20_000_000.0},
         app_cost_centers={"app-a": "CC-A", "app-b": "CC-B"},
         reserved_pt_capacity_tokens=100_000_000.0,
         reserved_pt_fixed_cost_usd=100.0,
     )
-    assert len(rows) == 3  # app-a, app-b, plus platform-shared-reservation idle pool
+    assert len(rows) == 3
     by_owner = {r.apphub_application_id: r for r in rows}
     assert by_owner["app-a"].utilized_pt_cost_usd == pytest.approx(60.0, abs=1e-12)
     assert by_owner["app-b"].utilized_pt_cost_usd == pytest.approx(20.0, abs=1e-12)
     assert by_owner[
         "platform-shared-reservation"
     ].unutilized_idle_capacity_tax_usd == pytest.approx(20.0, abs=1e-12)
-    total_allocated = sum(r.total_allocated_cost_usd for r in rows)
-    assert total_allocated == pytest.approx(100.0)
+    assert sum(r.total_allocated_cost_usd for r in rows) == pytest.approx(100.0)
 
+
+def test_off_peak_pt_valley_water_filling_schedule() -> None:
+    """Off-peak PT valley scheduler achieves 100% valley coverage when headroom suffices (`F18`)."""
     schedule = plan_off_peak_eval_schedule(
         hourly_production_burndown=[1_000_000.0, 2_000_000.0, 5_000_000.0],
         hourly_reserved_pt_capacity=5_000_000.0,
@@ -405,17 +375,21 @@ def test_finops_roi_prefix_cache_pareto_and_focus_chargeback() -> None:
     assert schedule.remaining_payg_spillover_tokens == pytest.approx(0.0)
 
 
-def test_showcase_demo_and_cli_html_favicon(tmp_path: Path) -> None:
-    """Verify `bq-eval demo` and `bq-eval judge-sql` execute cleanly and include SVG favicon."""
+def test_cli_demo_html_scorecard_and_favicon(tmp_path: Path) -> None:
+    """Verify `bq-eval demo` writes a self-contained GM3 HTML scorecard with SVG favicon (`F18`)."""
     html_out = tmp_path / "scorecard.html"
     rc_demo = cli_main(["demo", "--html-out", str(html_out)])
     assert rc_demo == 0
     assert html_out.exists()
     html_content = html_out.read_text(encoding="utf-8")
     assert '<link rel="icon" type="image/svg+xml"' in html_content
+    assert "kyc-address-verification" in html_content
     assert "order-support-agent" in html_content
     assert "NULL (Fail-Closed)" in html_content
 
+
+def test_cli_judge_sql_run_id_and_injection_rejection() -> None:
+    """Verify `bq-eval judge-sql` run-id filtering and SQL injection rejection (`F18`)."""
     rc_sql = cli_main(["judge-sql", "--project-id", "test-proj", "--canary-pct", "5"])
     assert rc_sql == 0
     rc_m2 = cli_main(
@@ -443,18 +417,18 @@ def test_showcase_demo_and_cli_html_favicon(tmp_path: Path) -> None:
     assert "MODEL `test-proj.agent_eval.gemini_3_8_flash_judge`" in m2_sql
     with pytest.raises(ValueError, match="Invalid run_id"):
         build_ai_generate_table_judge_sql(project_id="test-proj", run_id="bad' OR 1=1--")
-    assert "groundedness_4pt_v1" in CANONICAL_RUBRICS
-    artifacts = run_showcase_pipeline()
+
+
+def test_retail_2app_twin_headline_numeric_pins(tmp_path: Path) -> None:
+    """Pin exact 50-trace `retail-2app` Rogan-Gladen, CPVO, and spend bucket math (`F4`, `F18`)."""
+    artifacts = run_showcase_pipeline(corpus="retail-2app")
     order = artifacts.summaries["order-support-agent"]
-    # Pin headline README values (`F4`) and non-null SQLite `gwet_ac2` (`M6-2`).
     assert order.calibrated_pass_rate is not None
     assert order.cost_per_verified_outcome_usd is not None
     assert order.calibrated_pass_rate == pytest.approx(0.873711340206, abs=1e-6)
     assert order.calibrated_ci_95_lower == pytest.approx(0.647415, abs=1e-4)
     assert order.calibrated_ci_95_upper == pytest.approx(1.0, abs=1e-12)
-    # 37 Flash spans: (9k*0.15 + 3k*0.015 + 800*0.60)/1e6 = 0.001875 each -> 0.069375
     assert order.production_inference_usd == pytest.approx(37 * 0.001875, abs=1e-12)
-    # 2 standard Argon spans + 1 >200K Argon span
     expected_escalation = (
         2 * ((9_000 * 1.25 + 3_000 * 0.125 + 1_000 * 5.00) / 1e6)
         + (237_600 * 2.50 + 2_400 * 0.25 + 1_000 * 18.75) / 1e6
@@ -467,15 +441,66 @@ def test_showcase_demo_and_cli_html_favicon(tmp_path: Path) -> None:
     assert order.cost_per_verified_outcome_usd == pytest.approx(expected_cpvo, abs=1e-12)
     assert f"${order.cost_per_verified_outcome_usd:.4f}" == "$0.0232"
     assert order.gwet_ac2 is not None
+    assert artifacts.gwet_ac2 is not None
     assert order.gwet_ac2 == pytest.approx(artifacts.gwet_ac2, abs=1e-12)
     assert order.passes_irr_gate is True
     out = write_html_scorecard(artifacts, tmp_path / "direct.html")
     assert out.exists()
 
 
+def test_unjudged_and_low_ac2_scorecard_renders_fail_closed_without_pass_or_zero_cpvo() -> None:
+    """F7 regression test: UNJUDGED summary + AC2 0.42 must never print PASS, Exceeds, or $0.0000."""
+    base_artifacts = run_showcase_pipeline(corpus="retail-2app")
+    unjudged_summary = SQLTraceEvalSummary(
+        apphub_application_id="unjudged-only-app",
+        rubric_id="groundedness_4pt_v1",
+        total_traces=12,
+        production_traces=12,
+        rule0_pass_rate=1.0,
+        tool_success_rate=1.0,
+        p95_latency_ms=410.0,
+        avg_cache_hit_ratio=0.5,
+        total_weighted_burndown_tokens=48_000.0,
+        judged_samples=0,
+        calibration_status="UNJUDGED",
+        raw_judge_pass_rate=None,
+        calibrated_pass_rate=None,
+        calibrated_ci_95_lower=None,
+        calibrated_ci_95_upper=None,
+        gwet_ac2=0.42,
+        passes_irr_gate=False,
+        production_inference_usd=0.0144,
+        conflict_escalation_usd=0.0,
+        agent_gym_eval_usd=0.0,
+        autorater_judge_usd=0.0,
+        total_spend_usd=0.0144,
+        cost_per_verified_outcome_usd=None,
+    )
+    failing_artifacts = ShowcaseRunArtifacts(
+        corpus_id="unjudged-f7-probe",
+        summaries={"unjudged-only-app": unjudged_summary},
+        gwet_ac2=0.42,
+        eval_roi=base_artifacts.eval_roi,
+        cache_dilution=base_artifacts.cache_dilution,
+        pareto=base_artifacts.pareto,
+        focus_chargeback=base_artifacts.focus_chargeback,
+        off_peak_plan=base_artifacts.off_peak_plan,
+    )
+
+    md = render_markdown_report(failing_artifacts)
+    html_doc = render_html_scorecard(failing_artifacts)
+
+    for rendered in (md, html_doc):
+        assert "PASS" not in rendered
+        assert "Exceeds" not in rendered
+        assert "$0.0000" not in rendered
+        assert "95% CI: [0.0%" not in rendered
+        assert "FAIL" in rendered
+        assert "NULL (Fail-Closed)" in rendered
+
+
 def test_progressive_step1_step2_step25_step3_pack() -> None:
     """Verify the progressive Step 1 -> Step 2 -> Step 2.5 Skill -> Step 3 SQL and CSV pack."""
-    # Step 1: 0 new tables, static SQL views and queries
     step1_sql = (REPO_ROOT / "sql" / "step1_trace_views.sql").read_text(encoding="utf-8")
     assert "CREATE OR REPLACE VIEW `agent_eval.v_step1_trace_waterfall`" in step1_sql
     assert "CREATE OR REPLACE VIEW `agent_eval.v_step1_trace_eval`" in step1_sql
@@ -483,7 +508,6 @@ def test_progressive_step1_step2_step25_step3_pack() -> None:
     assert "step1_cost_per_outcome_usd" in step1_sql
     assert "unassigned_bu" in step1_sql
 
-    # Step 2: 1 Rubric Table / CSV + static SQL for 100% full traces and 10% sample
     csv_path = REPO_ROOT / "sql" / "step2_rubrics.csv"
     with csv_path.open("r", encoding="utf-8", newline="") as f:
         rows = list(csv.DictReader(f))
@@ -509,7 +533,6 @@ def test_progressive_step1_step2_step25_step3_pack() -> None:
     assert "MOD(ABS(FARM_FINGERPRINT(trace_id)), 100) < 10" in step2_sql
     assert "AI.GENERATE_TABLE(" in step2_sql
 
-    # Step 2.5: Agentic Skill (define new rubrics, run on 5%, run on last 1 hour of traces)
     skill_md = (REPO_ROOT / "skills" / "bq-eval" / "SKILL.md").read_text(encoding="utf-8")
     recipes_md = (REPO_ROOT / "skills" / "bq-eval" / "references" / "sql_recipes.md").read_text(
         encoding="utf-8"
@@ -530,7 +553,6 @@ def test_progressive_step1_step2_step25_step3_pack() -> None:
         assert skills_link.is_symlink()
         assert skills_link.readlink().as_posix() == "../skills"
 
-    # Step 3: Saved results table (`eval_results`) and paired run comparison
     step3_sql = (REPO_ROOT / "sql" / "step3_saved_results.sql").read_text(encoding="utf-8")
     assert "CREATE TABLE IF NOT EXISTS `agent_eval.eval_results`" in step3_sql
     assert "CREATE OR REPLACE VIEW `agent_eval.v_step3_eval_runs`" in step3_sql
@@ -550,39 +572,27 @@ def test_time_shift_loadgen_sql_and_cli_parity(tmp_path: Path) -> None:
         last_hour_replicas=15,
     )
     assert ref_time == now
-    assert len(payloads) == 50 * 16  # 800 traces
-    assert len(spans) > len(payloads)  # Multi-span waterfalls
+    assert len(payloads) == 50 * 16
+    assert len(spans) > len(payloads)
 
-    # Verify parent-child span waterfall integrity
     span_ids = {s.span_id for s in spans}
     for s in spans:
         if s.parent_span_id is not None:
             assert s.parent_span_id in span_ids
 
-    report = evaluate_time_shifted_corpus(
-        spans=spans,
-        payloads=payloads,
-        reference_time=now,
-        total_replicas=50,
-        last_hour_replicas=15,
-    )
+    report = evaluate_time_shifted_corpus(spans=spans, reference_time=now)
+    assert report.total_replicas == 50
+    assert report.last_hour_replicas == 15
     assert report.total_traces == 800
-    assert report.last_1h_traces == 15 * 16  # 240 traces inside the last 1 hour
+    assert report.last_1h_traces == 15 * 16
     assert len(report.step1_rows) == 4
 
-    # F20: >19 last-hour replicas must still fit inside the last 1 hour window.
-    hi_spans, hi_payloads, _ = generate_time_shifted_corpus(
+    hi_spans, _, _ = generate_time_shifted_corpus(
         reference_time=now,
         total_replicas=30,
         last_hour_replicas=25,
     )
-    hi_report = evaluate_time_shifted_corpus(
-        spans=hi_spans,
-        payloads=hi_payloads,
-        reference_time=now,
-        total_replicas=30,
-        last_hour_replicas=25,
-    )
+    hi_report = evaluate_time_shifted_corpus(spans=hi_spans, reference_time=now)
     assert hi_report.last_1h_traces == 25 * 16
 
     by_app = {r.apphub_application_id: r for r in report.step1_rows}
@@ -592,7 +602,6 @@ def test_time_shift_loadgen_sql_and_cli_parity(tmp_path: Path) -> None:
         "claims-triage-langgraph",
         "unregistered_app",
     }
-    # docubridge-underwriting must have the highest cost per trace and outcome (>10x higher)
     docu = by_app["docubridge-underwriting"]
     quote = by_app["quoting-concierge-adk"]
     audit = by_app["unregistered_app"]
@@ -600,10 +609,8 @@ def test_time_shift_loadgen_sql_and_cli_parity(tmp_path: Path) -> None:
     assert docu.step1_cost_per_outcome_usd is not None
     assert quote.step1_cost_per_outcome_usd is not None
     assert docu.step1_cost_per_outcome_usd > quote.step1_cost_per_outcome_usd * 10.0
-    # Unregistered renewal-auditor-svc falls back to unregistered_app and unassigned_bu
     assert audit.business_unit == "unassigned_bu"
 
-    # Verify CLI loadgen command and JSONL export
     jsonl_dir = tmp_path / "seed_jsonl"
     rc_loadgen = cli_main(
         [
@@ -620,7 +627,6 @@ def test_time_shift_loadgen_sql_and_cli_parity(tmp_path: Path) -> None:
     assert (jsonl_dir / "otel_spans.jsonl").is_file()
     assert (jsonl_dir / "trace_payloads.jsonl").is_file()
 
-    # Verify SQL time-shift file (isolated to agent_eval_seed)
     loadgen_sql = (REPO_ROOT / "sql" / "demo_time_shift_loadgen.sql").read_text(encoding="utf-8")
     assert "CREATE OR REPLACE TABLE `agent_eval_seed.seed_otel_spans`" in loadgen_sql
     assert "CREATE OR REPLACE TABLE `agent_eval_seed.seed_trace_payloads`" in loadgen_sql

@@ -1,20 +1,4 @@
-"""M5 Dual-Path (`Light Capture BQAA` + `Full Capture OTel`) verification tests.
-
-Verifies:
-1. `sql/bqaa_adapter_views.sql` defines `v_bqaa_otel_spans`, `v_bqaa_trace_payloads`, and
-   `v_bqaa_eval_turn_filtered`, projects all 25 required `otel_spans` contract columns,
-   deduplicates Storage Write API retries by `event_id`, and preserves `ADR-003` strict
-   `'unregistered_app'` fallback (never collapsing `gcp_apphub_application_id` or
-   `outcome_owner` into self-reported `adk.app_name` or `agent`).
-2. `bq_eval/bqaa.py` deduplicates retry events, maps `usage_metadata` (`<=200K` and `>200K`
-   context cliffs), honors `attributes.otel.{trace_id, span_id}`, maps `OUTCOME_CLOSED` to
-   `outcome.closed`, and feeds `evaluate_traces_in_sqlite()` with strict `'unregistered_app'`
-   resolution for unregistered shadow agents.
-3. Engine B (`AI.EVALUATE_AGENT`) SQL builder and `bq-eval judge-sql --engine evaluate-agent`
-   pre-filter through `v_bqaa_eval_turn_filtered` and `FARM_FINGERPRINT` sampling.
-4. Public portability & terminology hygiene: zero hardcoded scratchpad bucket IDs in `sql/`
-   and zero `"Path A"` / `"Path B"` capture-lane naming collisions in docs.
-"""
+"""M5 Dual-Path (`Light Capture BQAA` + `Full Capture OTel`) verification tests."""
 
 from __future__ import annotations
 
@@ -24,19 +8,19 @@ from pathlib import Path
 
 import pytest
 
-from bq_eval.bqaa import (
-    BQAAAgentEvent,
+from bq_eval.cli import main as cli_main
+from bq_eval.contract.otel import BQAAAgentEvent
+from bq_eval.contract.results import ConfusionMatrix
+from bq_eval.engine.bqaa import (
     bqaa_events_to_otel_spans,
     bqaa_events_to_trace_payloads,
     deduplicate_bqaa_events,
 )
-from bq_eval.calibration import ConfusionMatrix
-from bq_eval.cli import main as cli_main
-from bq_eval.sql_eval import (
+from bq_eval.engine.sql_eval import (
     build_ai_evaluate_agent_sql,
     evaluate_traces_in_sqlite,
 )
-from tests.test_m1_allspans_compat_views import REQUIRED_OTEL_SPANS_VIEW_COLUMNS
+from tests.conftest import REQUIRED_OTEL_SPANS_VIEW_COLUMNS
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -94,7 +78,6 @@ def test_bqaa_python_twin_dedup_strict_fallback_and_sqlite_eval() -> None:
     t0 = datetime(2026, 11, 11, 14, 0, 0, tzinfo=UTC)
 
     events = [
-        # Registered app turn: user prompt -> tool -> stale LLM_RESPONSE -> retried LLM_RESPONSE (>200K) -> response -> outcome.closed
         BQAAAgentEvent(
             event_id="ev-user-01",
             timestamp=t0,
@@ -133,7 +116,6 @@ def test_bqaa_python_twin_dedup_strict_fallback_and_sqlite_eval() -> None:
                 },
             },
         ),
-        # Duplicate older retry row for ev-llm-01 (should be superseded by newer timestamp)
         BQAAAgentEvent(
             event_id="ev-llm-01",
             timestamp=t0 + timedelta(milliseconds=500),
@@ -158,7 +140,6 @@ def test_bqaa_python_twin_dedup_strict_fallback_and_sqlite_eval() -> None:
                 },
             },
         ),
-        # Canonical newer Storage Write API retry row for ev-llm-01 (>200K cliff)
         BQAAAgentEvent(
             event_id="ev-llm-01",
             timestamp=t0 + timedelta(milliseconds=900),
@@ -217,7 +198,6 @@ def test_bqaa_python_twin_dedup_strict_fallback_and_sqlite_eval() -> None:
                 }
             },
         ),
-        # Unregistered shadow ADK agent: sets adk.app_name and agent, but NO custom_metadata apphub ID
         BQAAAgentEvent(
             event_id="ev-shadow-01",
             timestamp=t0 + timedelta(seconds=2),
@@ -243,10 +223,10 @@ def test_bqaa_python_twin_dedup_strict_fallback_and_sqlite_eval() -> None:
     assert len(deduped) == 6
 
     spans = bqaa_events_to_otel_spans(events)
-    assert len(spans) == 4  # tool + deduped llm + outcome.closed + shadow llm
+    assert len(spans) == 4
 
     tool_span = next(s for s in spans if s.tool_name == "fetch_payoff_ledger")
-    assert tool_span.span_id == "fedcba9876543210"  # preferred attributes.otel.span_id
+    assert tool_span.span_id == "fedcba9876543210"
 
     llm_span = next(s for s in spans if s.span_id == "span-llm-01")
     assert llm_span.is_long_context_cliff is True
@@ -282,8 +262,10 @@ def test_bqaa_python_twin_dedup_strict_fallback_and_sqlite_eval() -> None:
     assert summaries["unregistered_app"].calibrated_pass_rate is None
 
 
-def test_ai_evaluate_agent_sql_builder_and_cli(capsys: pytest.CaptureFixture[str]) -> None:
-    """Verify Engine B (`AI.EVALUATE_AGENT`) SQL builder and CLI flag."""
+def test_ai_evaluate_agent_sql_builder_and_cli_engine_b_default_canary(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Verify Engine B (`AI.EVALUATE_AGENT`) SQL builder and CLI default canary (`10%`, `F17`)."""
     sql = build_ai_evaluate_agent_sql(
         project_id="demo-proj",
         dataset_id="agent_eval",
@@ -300,7 +282,21 @@ def test_ai_evaluate_agent_sql_builder_and_cli(capsys: pytest.CaptureFixture[str
             managed_metrics=("invalid_metric_v99",),
         )
 
-    rc = cli_main(
+    rc_default = cli_main(
+        [
+            "judge-sql",
+            "--engine",
+            "evaluate-agent",
+            "--project-id",
+            "demo-proj",
+        ]
+    )
+    assert rc_default == 0
+    default_out = capsys.readouterr().out
+    assert "AI.EVALUATE_AGENT(" in default_out
+    assert "MOD(ABS(FARM_FINGERPRINT(trace_id)), 100) < 10" in default_out
+
+    rc_override = cli_main(
         [
             "judge-sql",
             "--engine",
@@ -311,9 +307,8 @@ def test_ai_evaluate_agent_sql_builder_and_cli(capsys: pytest.CaptureFixture[str
             "5",
         ]
     )
-    assert rc == 0
+    assert rc_override == 0
     captured = capsys.readouterr().out
-    assert "AI.EVALUATE_AGENT(" in captured
     assert "MOD(ABS(FARM_FINGERPRINT(trace_id)), 100) < 5" in captured
 
 

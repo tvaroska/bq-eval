@@ -139,7 +139,7 @@ flowchart TB
 | **Candidate Tool Declarations** | Full OpenAPI tool schemas in `attributes.tools` on `LLM_REQUEST` (enables `AgentData` reconstruction) | Not captured in standard OTel spans (only invoked `gen_ai.tool.name` is recorded) |
 | **Multi-Agent Outcome Attribution (`EVAL-P11`)** | `COALESCE(attributes.custom_metadata."outcome.id", trace_id, invocation_id)` + `OUTCOME_CLOSED` event | Cross-service W3C `baggage` (`outcome.id`, `outcome.owner`) + zero-duration `outcome.closed` span |
 
-See [`sql/bqaa_adapter_views.sql`](../sql/bqaa_adapter_views.sql) for the production SQL definitions (`v_bqaa_otel_spans`, `v_bqaa_trace_payloads`, `v_bqaa_eval_turn_filtered`, and the Light / Full / Hybrid mode switchboard) and [`bq_eval/bqaa.py`](../bq_eval/bqaa.py) for the deterministic Python twin.
+See [`sql/bqaa_adapter_views.sql`](../sql/bqaa_adapter_views.sql) for the production SQL definitions (`v_bqaa_otel_spans`, `v_bqaa_trace_payloads`, `v_bqaa_eval_turn_filtered`, and the Light / Full / Hybrid mode switchboard) and [`bq_eval/engine/bqaa.py`](../bq_eval/engine/bqaa.py) for the deterministic Python twin.
 
 ---
 

@@ -65,7 +65,7 @@ When teams expand beyond Step 3 into multi-BU chargeback and calibrated Model Ri
 
 ## 4. Portable Application & Agent Identity Resolution (`EVAL-P08`)
 
-Workloads registered in App Hub (on GKE, Cloud Run, Agent Runtime, or via WIF collector resource stamping — see [`examples/otel-collector-wif.yaml`](../examples/otel-collector-wif.yaml)) carry `gcp_apphub_application_id` or `apphub.application.id`, whereas unregistered workloads have `NULL` App Hub attributes and must be flagged rather than masked by self-reported service names. Both `sql/step1_trace_views.sql`, `sql/views.sql`, `sql/bqaa_adapter_views.sql`, and `bq_eval.otel.resolve_application_id()` normalize application identity via the same deterministic precedence chain (`ADR-003`):
+Workloads registered in App Hub (on GKE, Cloud Run, Agent Runtime, or via WIF collector resource stamping — see [`examples/otel-collector-wif.yaml`](../examples/otel-collector-wif.yaml)) carry `gcp_apphub_application_id` or `apphub.application.id`, whereas unregistered workloads have `NULL` App Hub attributes and must be flagged rather than masked by self-reported service names. Both `sql/step1_trace_views.sql`, `sql/views.sql`, `sql/bqaa_adapter_views.sql`, and `bq_eval.contract.otel.resolve_application_id()` normalize application identity via the same deterministic precedence chain (`ADR-003`):
 
 ```sql
 COALESCE(
@@ -82,7 +82,7 @@ COALESCE(
 
 Untrusted user prompts (`p.user_prompt`), retrieved chunks (`p.retrieved_context`), and model responses (`p.final_response`) could contain literal `</untrusted_text>` tags designed to break out of the judge's XML boundary and spoof `<score>4</score>`.
 
-`v_step2_all_trace_rubric_prompts`, `v_step2_trace_rubric_prompts`, and `bq_eval.sql_eval.build_ai_generate_table_judge_sql()` enforce two hard safeguards:
+`v_step2_all_trace_rubric_prompts`, `v_step2_trace_rubric_prompts`, and `bq_eval.engine.sql_eval.build_ai_generate_table_judge_sql()` enforce two hard safeguards:
 1. **SQL-Level XML Entity Escaping (`EVAL-P02`):** Wraps `p.user_prompt`, `p.retrieved_context`, and `p.final_response` in nested `REPLACE(REPLACE(REPLACE(COALESCE(col, ''), '&', '&amp;'), '<', '&lt;'), '>', '&gt;')` before interpolating into `<untrusted_text>` blocks.
 2. **Deterministic Hash Sampling (`FARM_FINGERPRINT`, `EVAL-P08`):** Supports `10%` (`< 10`), `5%` (`< 5`), or `100%` error/SLA-tail sampling (`NOT t.rule0_pass OR t.tool_error_count > 0 OR t.trace_latency_ms > t.sla_latency_ms`), cutting judge token spend by `90–95%`.
 

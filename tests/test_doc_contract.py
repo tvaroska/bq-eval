@@ -1,42 +1,57 @@
-"""Documentation-to-code contract tests (`F19`, `M6-4`, `M6-5`).
-
-Pins the headline README KPI row, canonical rubric count, fail-closed `EVAL.yaml`,
-cold-clone quickstart commands, and license presence against live code.
-"""
+"""Documentation-to-code contract tests (`F19`, `M6-4`, `M6-5`, `M7-2`)."""
 
 from __future__ import annotations
 
 import csv
+import json
 import re
 import subprocess
 import sys
 from pathlib import Path
 
-from bq_eval.rubrics import CANONICAL_RUBRICS
-from bq_eval.showcase import run_showcase_pipeline
+from bq_eval.contract.rubrics import CANONICAL_RUBRICS
+from bq_eval.showcase.pipeline import format_demo_json, run_showcase_pipeline
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
-def test_readme_kpi_row_matches_showcase_pipeline() -> None:
-    """README offline twin KPI row matches `run_showcase_pipeline()` outputs."""
+def test_readme_kpi_rows_match_demo_json_and_offline_twin() -> None:
+    """`bq-eval demo --format json` deterministically reproduces the `README.md` KPI table (`M7-2`, `F19`)."""
     readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
-    artifacts = run_showcase_pipeline()
-    order = artifacts.summaries["order-support-agent"]
-    assert order.calibrated_pass_rate is not None
-    assert order.calibrated_ci_95_lower is not None
-    assert order.calibrated_ci_95_upper is not None
-    assert order.cost_per_verified_outcome_usd is not None
+    artifacts = run_showcase_pipeline(corpus="m2-live")
+    parsed = json.loads(format_demo_json(artifacts))
+    kpi = parsed["kpi_table"]
 
-    cal_pct = f"{order.calibrated_pass_rate * 100:.1f}%"
-    ci_low = f"{order.calibrated_ci_95_lower * 100:.1f}%"
-    ci_high = f"{order.calibrated_ci_95_upper * 100:.0f}%"
-    cpvo = f"${order.cost_per_verified_outcome_usd:.4f}"
-    savings = f"{artifacts.eval_roi.savings_pct:.1f}%"
+    twin_order = kpi["offline_twin_50_traces"]["order_support_agent"]
+    cal_pct = f"{twin_order['calibrated_pass_rate'] * 100:.1f}%"
+    ci_low = f"{twin_order['calibrated_ci_95'][0] * 100:.1f}%"
+    ci_high = f"{twin_order['calibrated_ci_95'][1] * 100:.0f}%"
+    cpvo = f"${twin_order['cost_per_verified_outcome_usd']:.4f}"
+    savings = f"{kpi['offline_twin_50_traces']['judge_spend_savings_pct']:.1f}%"
 
     assert f"`{cal_pct}` calibrated `[{ci_low}, {ci_high}]`" in readme
     assert f"`{cpvo}`/outcome" in readme
     assert f"`{savings}`" in readme
+
+    kyc = kpi["live_kyc_280_cases"]
+    assert (
+        f"`{kyc['structural_step1_rejects']}/{kyc['structural_step1_rejects']}` structural"
+        in readme
+    )
+    assert (
+        f"`{kyc['po_box_step1_traps_caught']}/{kyc['po_box_step1_traps_caught']}` PO Box" in readme
+    )
+    assert f"`AC2 = {kyc['gwet_ac2']:.4f}`" in readme
+    assert f"calibrated `{kyc['calibrated_pass_rate'] * 100:.2f}%`" in readme
+
+    rfp = kpi["live_rfp_cliff_35_cases"]
+    assert f"`${rfp['PDF_PATH_B_FLASH']['ai_cost_per_verified_outcome_usd']:.5f}` AI" in readme
+    assert f"`${rfp['PDF_PATH_B_ARGON']['ai_cost_per_verified_outcome_usd']:.4f}` AI" in readme
+
+    skill = kpi["live_skill_18_cases_and_shadow_10"]
+    assert f"`${skill['day1_cpvo_usd']:.5f}` to `${skill['day2_cpvo_usd']:.6f}`/outcome" in readme
+    assert f"`{skill['cpvo_reduction_pct']:.1f}%` drop" in readme
+
     assert "uv sync --extra dev" in readme
     assert "rfp_quote_accuracy_4pt_v1" not in readme
 

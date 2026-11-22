@@ -22,6 +22,7 @@ CREATE TABLE otel_spans (
     finops_traffic_type TEXT NOT NULL,
     outcome_status TEXT,
     outcome_verified INTEGER,
+    usage_hour_iso TEXT NOT NULL,
     start_epoch_ms REAL NOT NULL,
     end_epoch_ms REAL NOT NULL,
     latency_ms REAL NOT NULL,
@@ -30,6 +31,7 @@ CREATE TABLE otel_spans (
     uncached_input_tokens INTEGER NOT NULL,
     output_tokens INTEGER NOT NULL,
     thinking_tokens INTEGER NOT NULL,
+    is_long_context_cliff INTEGER NOT NULL,
     weighted_burndown_tokens REAL NOT NULL,
     span_cost_usd REAL NOT NULL
 );
@@ -134,7 +136,8 @@ outcome_judge AS (
     SELECT t.outcome_id, SUM(e.judge_cost_usd) AS outcome_judge_usd
     FROM eval_results AS e
     INNER JOIN v_trace_sql_evaluation AS t ON e.trace_id = t.trace_id
-    WHERE t.outcome_id IS NOT NULL
+    CROSS JOIN eval_config AS cfg
+    WHERE t.outcome_id IS NOT NULL AND e.rubric_id = cfg.rubric_id
     GROUP BY t.outcome_id
 )
 SELECT
@@ -302,6 +305,7 @@ gwet_irr AS (
 rg_base AS (
     SELECT
         a.*,
+        COALESCE(j.rubric_id, 'groundedness_4pt_v1') AS rubric_id,
         p.p95_latency_ms,
         COALESCE(j.judged_samples, 0) AS judged_samples,
         j.raw_judge_pass_rate,
@@ -318,12 +322,13 @@ rg_base AS (
         COALESCE(oc.verified_outcomes, 0) AS outcome_verified_count,
         oc.cost_per_verified_outcome_usd AS outcome_cost_per_verified_usd,
         CASE
-            WHEN COALESCE(j.judged_samples, 0) = 0 THEN 'UNJUDGED'
+            WHEN COALESCE(j.judged_samples, 0) = 0 OR j.raw_judge_pass_rate IS NULL THEN 'UNJUDGED'
             WHEN s.tpr IS NOT NULL AND s.tnr IS NOT NULL AND (s.tpr + s.tnr - 1.0) > 1e-6 THEN 'CALIBRATED'
             ELSE 'UNCALIBRATED'
         END AS calibration_status,
         CASE
             WHEN COALESCE(j.judged_samples, 0) > 0
+                AND j.raw_judge_pass_rate IS NOT NULL
                 AND s.tpr IS NOT NULL
                 AND s.tnr IS NOT NULL
                 AND (s.tpr + s.tnr - 1.0) > 1e-6
@@ -339,10 +344,10 @@ rg_base AS (
         AND j.rubric_id = cfg.rubric_id
     LEFT JOIN sme_rates AS s
         ON a.apphub_application_id = s.apphub_application_id
-        AND s.rubric_id = cfg.rubric_id
+        AND s.rubric_id = j.rubric_id
     LEFT JOIN gwet_irr AS g
         ON a.apphub_application_id = g.apphub_application_id
-        AND g.rubric_id = cfg.rubric_id
+        AND g.rubric_id = j.rubric_id
     LEFT JOIN v_cost_per_verified_outcome AS oc
         ON a.apphub_application_id = oc.apphub_application_id
 ),
@@ -363,6 +368,7 @@ rg_ci AS (
 )
 SELECT
     apphub_application_id,
+    rubric_id,
     total_traces,
     production_traces,
     rule0_pass_rate,
@@ -403,4 +409,30 @@ SELECT
     outcome_cost_per_verified_usd
 FROM rg_ci
 ORDER BY apphub_application_id;
+
+CREATE VIEW v_capacity_hourly_burndown_export AS
+SELECT
+    usage_hour_iso AS usage_hour,
+    usage_hour_iso AS timestamp,
+    apphub_application_id,
+    apphub_application_id AS tenant,
+    model_name,
+    model_name AS model,
+    finops_traffic_type,
+    COUNT(DISTINCT trace_id) AS distinct_traces,
+    COUNT(*) AS span_count,
+    SUM(input_tokens) AS input_tokens,
+    SUM(cached_input_tokens) AS cached_input_tokens,
+    SUM(cached_input_tokens) AS cached_tokens,
+    SUM(uncached_input_tokens) AS uncached_input_tokens,
+    SUM(output_tokens) AS output_tokens,
+    SUM(thinking_tokens) AS thinking_tokens,
+    SUM(thinking_tokens) AS thoughts_tokens,
+    SUM(is_long_context_cliff) AS long_context_cliff_spans,
+    SUM(weighted_burndown_tokens) AS weighted_burndown_tokens,
+    SUM(weighted_burndown_tokens) AS precomputed_weighted_burndown_tokens,
+    SUM(span_cost_usd) AS total_cost_usd
+FROM otel_spans
+GROUP BY usage_hour_iso, apphub_application_id, model_name, finops_traffic_type
+ORDER BY usage_hour_iso, apphub_application_id, model_name, finops_traffic_type;
 """

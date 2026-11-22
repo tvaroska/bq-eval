@@ -263,7 +263,7 @@ WITH server_span_compute AS (
   FROM `agent_eval.v_step1_trace_waterfall` AS w
   WHERE w.outcome_id IS NOT NULL
     AND w.otel_span_kind IN ('2', 'SPAN_KIND_SERVER', 'SPAN_KIND_INTERNAL')
-    AND COALESCE(w.apphub_application_id, '') NOT LIKE '%external%'
+    AND LOWER(COALESCE(JSON_VALUE(w.attributes, '$."apphub.external"'), 'false')) != 'true'
   GROUP BY w.outcome_id
 )
 SELECT
@@ -302,8 +302,7 @@ WITH outcome_spans AS (
   LEFT JOIN `agent_eval.v_outcomes` AS o
     ON w.outcome_id = o.outcome_id
   WHERE w.outcome_id IS NOT NULL
-    AND COALESCE(w.apphub_application_id, '') NOT LIKE '%external%'
-    AND COALESCE(JSON_VALUE(w.attributes, '$."apphub.external"'), 'false') != 'true'
+    AND LOWER(COALESCE(JSON_VALUE(w.attributes, '$."apphub.external"'), 'false')) != 'true'
   GROUP BY 1, 2, 3, 4, 5, 6
 ),
 weighted_outcome_spans AS (

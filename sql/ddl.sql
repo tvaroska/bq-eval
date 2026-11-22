@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS `agent_eval.app_registry` (
   environment STRING NOT NULL OPTIONS (description = 'Deployment environment (prod, staging, eval).'),
   sla_latency_ms FLOAT64 NOT NULL OPTIONS (description = 'Target end-to-end trace SLA latency in milliseconds.'),
   monthly_budget_usd FLOAT64 NOT NULL OPTIONS (description = 'Monthly LLM & evaluation budget cap in USD.'),
+  is_external_counterparty BOOL OPTIONS (description = 'TRUE when the registered application represents an external counterparty excluded from internal CPVO.'),
   owner_email STRING NOT NULL OPTIONS (description = 'Technical owner contact email.'),
   updated_at TIMESTAMP NOT NULL OPTIONS (description = 'Last registry metadata update timestamp.')
 )
@@ -33,6 +34,9 @@ CLUSTER BY apphub_application_id, cost_center
 OPTIONS (
   description = 'Application registry mapping App Hub / agent identifiers to SLA thresholds and FinOps cost centers.'
 );
+
+ALTER TABLE `agent_eval.app_registry`
+  ADD COLUMN IF NOT EXISTS is_external_counterparty BOOL OPTIONS (description = 'TRUE when the registered application represents an external counterparty excluded from internal CPVO.');
 
 -- -----------------------------------------------------------------------------
 -- 1B. BigLake External Table for Uploaded OTel GenAI Completion Payloads

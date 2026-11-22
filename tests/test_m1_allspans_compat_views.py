@@ -23,36 +23,10 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from tests.conftest import REQUIRED_OTEL_SPANS_VIEW_COLUMNS
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SQL_DIR = REPO_ROOT / "sql"
-
-REQUIRED_OTEL_SPANS_VIEW_COLUMNS: tuple[str, ...] = (
-    "trace_id",
-    "span_id",
-    "parent_span_id",
-    "span_name",
-    "start_time",
-    "end_time",
-    "latency_ms",
-    "status_code",
-    "span_kind",
-    "service_name",
-    "gcp_apphub_application_id",
-    "gcp_apphub_service_id",
-    "gcp_apphub_workload_id",
-    "agent_name",
-    "model_name",
-    "input_tokens",
-    "cached_input_tokens",
-    "output_tokens",
-    "thinking_tokens",
-    "tool_name",
-    "tool_call_status",
-    "rule0_pass",
-    "finops_traffic_type",
-    "outcome_id",
-    "attributes",
-)
 
 
 def _all_sql_text() -> str:

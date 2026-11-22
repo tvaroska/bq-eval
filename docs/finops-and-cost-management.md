@@ -7,7 +7,7 @@ Raw token counts (`input_tokens + output_tokens`) fail to reflect accelerator co
 - **Autoregressive Decoding & Reasoning (`4.0x` / `7.5x`):** Output tokens and internal `<thought>` (`thinking_tokens`) are memory-bandwidth bound during decoding and billed at the output multiplier.
 - **`>200K` Context Cliff:** Spans whose total prompt context (`input_tokens`, inclusive of `cached_input_tokens`) exceeds `200,000` tokens trigger higher attention memory footprint and long-context pricing tiers.
 
-Both [`sql/views.sql`](../sql/views.sql), [`bq_eval/otel.py`](../bq_eval/otel.py), and [`bq_eval/finops.py`](../bq_eval/finops.py) (`compute_span_cost_usd()`) compute weighted burndown and cliff-aware USD cost at the **individual span level** before aggregating to the trace:
+Both [`sql/views.sql`](../sql/views.sql), [`bq_eval/contract/otel.py`](../bq_eval/contract/otel.py), and [`bq_eval/engine/finops.py`](../bq_eval/engine/finops.py) (`compute_span_cost_usd()`) compute weighted burndown and cliff-aware USD cost at the **individual span level** before aggregating to the trace:
 
 $$
 W_{\text{span}} = \begin{cases}

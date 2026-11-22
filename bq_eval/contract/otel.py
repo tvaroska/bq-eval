@@ -1,12 +1,15 @@
-"""OpenTelemetry GenAI span contracts, portable App ID resolution, and serving-physics burndown."""
+"""OpenTelemetry GenAI span, payload, and BQAA event contracts with serving-physics burndown."""
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import datetime
 from enum import StrEnum
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from bq_eval.contract.types import NonNegFloat
 
 UNCACHED_INPUT_BURNDOWN_WEIGHT: float = 1.0
 CACHED_INPUT_BURNDOWN_WEIGHT: float = 0.1
@@ -40,10 +43,9 @@ class FinOpsTrafficType(StrEnum):
 
 def resolve_application_id(
     gcp_apphub_application_id: str | None = None,
-    attributes: dict[str, Any] | None = None,
-    service_name: str | None = None,
+    attributes: Mapping[str, Any] | None = None,
 ) -> str:
-    """Resolve portable application ID matching SQL COALESCE precedence (EVAL-P08).
+    """Resolve portable application ID matching SQL COALESCE precedence (EVAL-P08 / ADR-003).
 
     Order of precedence:
     1. Explicit `gcp_apphub_application_id` column
@@ -51,7 +53,6 @@ def resolve_application_id(
     3. `attributes["apphub.application.id"]`
     4. `'unregistered_app'`
     """
-    del service_name
     if gcp_apphub_application_id and gcp_apphub_application_id.strip():
         return gcp_apphub_application_id.strip()
     attrs = attributes or {}
@@ -96,7 +97,7 @@ def compute_weighted_burndown_tokens(
 class OTelGenAISpanRecord(BaseModel):
     """Pydantic v2 contract for `agent_eval.otel_spans` rows."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     trace_id: str = Field(..., min_length=8)
     span_id: str = Field(..., min_length=4)
@@ -105,7 +106,7 @@ class OTelGenAISpanRecord(BaseModel):
     start_time: datetime
     end_time: datetime
     receive_time: datetime | None = None
-    latency_ms: float = Field(..., ge=0.0)
+    latency_ms: NonNegFloat
     status_code: str = Field(default="OK")
     otel_span_kind: str = Field(default="SPAN_KIND_INTERNAL")
     span_kind: GenAISpanKind = Field(default=GenAISpanKind.INVOKE_AGENT)
@@ -143,7 +144,6 @@ class OTelGenAISpanRecord(BaseModel):
         return resolve_application_id(
             self.gcp_apphub_application_id,
             self.attributes,
-            self.service_name,
         )
 
     @property
@@ -162,3 +162,39 @@ class OTelGenAISpanRecord(BaseModel):
             output_tokens=self.output_tokens,
             thinking_tokens=self.thinking_tokens,
         )
+
+
+class TracePayloadRecord(BaseModel):
+    """Prompt, retrieved context, and final response payload row (`agent_eval.trace_payloads`)."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    trace_id: str = Field(..., min_length=4)
+    apphub_application_id: str
+    ingested_at: datetime
+    user_prompt: str
+    retrieved_context: str
+    final_response: str
+    semantic_rubric_id: str = "groundedness_4pt_v1"
+    expected_ordinal_score: int = Field(default=4, ge=1, le=4)
+
+
+class BQAAAgentEvent(BaseModel):
+    """Pydantic v2 contract for BigQuery Agent Analytics (`BQAA`) `agent_events` rows."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    event_id: str = Field(..., min_length=4)
+    timestamp: datetime
+    event_type: str = Field(..., min_length=2)
+    agent: str | None = None
+    session_id: str | None = None
+    invocation_id: str = Field(..., min_length=4)
+    trace_id: str | None = None
+    span_id: str | None = None
+    parent_span_id: str | None = None
+    status: str | None = "OK"
+    error_message: str | None = None
+    latency_ms: dict[str, Any] = Field(default_factory=dict)
+    content: dict[str, Any] = Field(default_factory=dict)
+    attributes: dict[str, Any] = Field(default_factory=dict)

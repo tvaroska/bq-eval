@@ -1,26 +1,180 @@
 # Declarative Structural & Security AST Contract (ast-grep)
-# Enforces library/example boundary isolation, SQLAlchemy 2.0 Core purity,
-# and static security invariants across bq-eval Python modules.
+# Enforces layered Ports, Adapters and Contracts across bq_eval/{contract,engine,showcase,cli}/:
+# 1. bq_eval/** never imports examples/, benchmarks/, dynamic imports, or LLM SDKs.
+# 2. contract/ imports only stdlib, pydantic, and bq_eval.contract.
+# 3. engine/ imports only stdlib, bq_eval.contract, and bq_eval.engine.
+# 4. showcase/ never imports bq_eval.cli; showcase/{view,renderer}.py import zero engine calculations.
+# 5. SQLAlchemy ORM, shell=True subprocesses, and unparameterized SQL execute() are banned.
 
-id: library-never-imports-examples
+id: library-never-imports-examples-or-dynamic
 language: Python
 severity: error
-message: "Hexagonal violation: bq_eval/ library must never import examples/."
+message: "Boundary violation: bq_eval/ must never import examples/, benchmarks/, or dynamic imports."
 files:
   - "bq_eval/**/*.py"
 metadata:
-  test_path: "bq_eval/probe.py"
+  test_path: "bq_eval/engine/probe.py"
   invalid_examples:
     - "import examples"
-    - "from examples.quickstart import run"
+    - "from examples.run_showcase_demo import main"
+    - "import benchmarks"
+    - "from benchmarks import m2_live"
+    - "__import__('bq_eval.cli')"
+    - "importlib.import_module('bq_eval.cli')"
   valid_examples:
-    - "from bq_eval.otel import OTelGenAISpanRecord"
+    - "from bq_eval.contract.otel import OTelGenAISpanRecord"
+    - "import examples_helper"
 rule:
   any:
     - kind: import_statement
-      regex: "^import\\s+examples(\\b|\\.)"
+      regex: "(?s)^import\\s+(.+,\\s*)*(examples|benchmarks)(\\b|\\.)"
     - kind: import_from_statement
-      regex: "^from\\s+examples(\\b|\\.)"
+      regex: "(?s)^from\\s+(examples|benchmarks)(\\b|\\.)"
+    - pattern: __import__($$$)
+    - pattern: importlib.import_module($$$)
+    - pattern: import_module($$$)
+---
+id: no-model-sdk-imports-in-package
+language: Python
+severity: error
+message: "Rule 0 violation: bq_eval/ deterministic package must never import LLM client SDKs."
+files:
+  - "bq_eval/**/*.py"
+metadata:
+  test_path: "bq_eval/cli/probe.py"
+  invalid_examples:
+    - "from google.genai import Client"
+    - "import vertexai.preview"
+    - "import openai"
+    - "from anthropic import Anthropic"
+    - "import langchain"
+    - "from llama_index import VectorStoreIndex"
+  valid_examples:
+    - "from bq_eval.engine.sql_eval import build_ai_generate_table_judge_sql"
+    - "import json"
+rule:
+  any:
+    - kind: import_statement
+      regex: "(?s)^import\\s+(.+,\\s*)*(google\\.genai|vertexai|openai|anthropic|langchain|llama_index)(\\b|\\.)"
+    - kind: import_from_statement
+      regex: "(?s)^from\\s+(google\\.genai|vertexai|openai|anthropic|langchain|llama_index)(\\b|\\.)"
+    - kind: import_from_statement
+      regex: "(?s)^from\\s+google\\s+import\\s+(.*[\\s,(])?genai\\b"
+---
+id: contract-imports-only-contract-and-pydantic
+language: Python
+severity: error
+message: "Layer violation (contract/): bq_eval/contract/ may import only stdlib, pydantic, and bq_eval.contract."
+files:
+  - "bq_eval/contract/**/*.py"
+metadata:
+  test_path: "bq_eval/contract/probe.py"
+  invalid_examples:
+    - "from bq_eval.engine.calibration import rogan_gladen_calibrate"
+    - "from bq_eval.showcase.pipeline import run_showcase_pipeline"
+    - "from bq_eval.cli.app import main"
+    - "from ..engine import finops"
+    - "from .. import showcase"
+  valid_examples:
+    - "from pydantic import BaseModel, ConfigDict"
+    - "from bq_eval.contract.otel import OTelGenAISpanRecord"
+    - "from .types import NonNegFloat"
+rule:
+  any:
+    - kind: import_statement
+      regex: "(?s)^import\\s+(.+,\\s*)*bq_eval\\.(engine|showcase|cli)(\\b|\\.)"
+    - kind: import_from_statement
+      regex: "(?s)^from\\s+(bq_eval\\.|\\.\\.\\s*)(engine|showcase|cli)(\\b|\\.)"
+    - kind: import_from_statement
+      regex: "(?s)^from\\s+(bq_eval|\\.\\.)\\s+import\\s+(.*[\\s,(])?(engine|showcase|cli)\\b"
+---
+id: engine-imports-only-contract-and-engine
+language: Python
+severity: error
+message: "Layer violation (engine/): bq_eval/engine/ may import only stdlib, bq_eval.contract, and bq_eval.engine."
+files:
+  - "bq_eval/engine/**/*.py"
+metadata:
+  test_path: "bq_eval/engine/probe.py"
+  invalid_examples:
+    - "from bq_eval.showcase.pipeline import run_showcase_pipeline"
+    - "from bq_eval.cli.app import main"
+    - "from ..showcase import loadgen"
+    - "from .. import cli"
+    - "from pydantic import BaseModel"
+  valid_examples:
+    - "from bq_eval.contract.otel import OTelGenAISpanRecord"
+    - "from bq_eval.engine.finops import compute_span_cost_usd"
+    - "from .sqlite_views import SQLITE_VIEWS_DDL"
+rule:
+  any:
+    - kind: import_statement
+      regex: "(?s)^import\\s+(.+,\\s*)*(pydantic|bq_eval\\.(showcase|cli))(\\b|\\.)"
+    - kind: import_from_statement
+      regex: "(?s)^from\\s+(pydantic|(bq_eval\\.|\\.\\.\\s*)(showcase|cli))(\\b|\\.)"
+    - kind: import_from_statement
+      regex: "(?s)^from\\s+(bq_eval|\\.\\.)\\s+import\\s+(.*[\\s,(])?(showcase|cli)\\b"
+---
+id: showcase-never-imports-cli
+language: Python
+severity: error
+message: "Layer violation (showcase/): bq_eval/showcase/ must never import bq_eval.cli."
+files:
+  - "bq_eval/showcase/**/*.py"
+metadata:
+  test_path: "bq_eval/showcase/probe.py"
+  invalid_examples:
+    - "from bq_eval.cli.app import main"
+    - "import bq_eval.cli"
+    - "from ..cli import server"
+    - "from .. import cli"
+  valid_examples:
+    - "from bq_eval.contract.results import ShowcaseRunArtifacts"
+    - "from bq_eval.engine.sql_eval import evaluate_traces_in_sqlite"
+rule:
+  any:
+    - kind: import_statement
+      regex: "(?s)^import\\s+(.+,\\s*)*bq_eval\\.cli(\\b|\\.)"
+    - kind: import_from_statement
+      regex: "(?s)^from\\s+(bq_eval\\.|\\.\\.\\s*)cli(\\b|\\.)"
+    - kind: import_from_statement
+      regex: "(?s)^from\\s+(bq_eval|\\.\\.)\\s+import\\s+(.*[\\s,(])?cli\\b"
+---
+id: renderer-imports-no-calculation
+language: Python
+severity: error
+message: "Layer violation (showcase renderer): view/renderer modules may import only stdlib, pydantic, bq_eval.contract, and sibling renderer modules."
+files:
+  - "bq_eval/showcase/**/*.py"
+ignores:
+  - "bq_eval/showcase/__init__.py"
+  - "bq_eval/showcase/loadgen.py"
+  - "bq_eval/showcase/pipeline.py"
+  - "bq_eval/showcase/seeds_banking.py"
+  - "bq_eval/showcase/seeds_claims.py"
+metadata:
+  test_path: "bq_eval/showcase/renderer_probe.py"
+  invalid_examples:
+    - "from bq_eval.engine.finops import compute_pareto_frontier"
+    - "from bq_eval.engine.calibration import compute_gwet_ac2"
+    - "from bq_eval.showcase.pipeline import run_showcase_pipeline"
+    - "from .pipeline import run_showcase_pipeline"
+    - "from . import loadgen"
+    - "from ..engine import sql_eval"
+  valid_examples:
+    - "from bq_eval.contract.results import ShowcaseRunArtifacts"
+    - "from bq_eval.showcase.view import PageView"
+    - "import html"
+rule:
+  any:
+    - kind: import_statement
+      regex: "(?s)^import\\s+(.+,\\s*)*bq_eval\\.(engine|cli|showcase\\.(loadgen|pipeline|seeds_banking|seeds_claims))(\\b|\\.)"
+    - kind: import_from_statement
+      regex: "(?s)^from\\s+((bq_eval\\.|\\.\\.\\s*)(engine|cli)|(bq_eval\\.showcase\\.|\\.\\s*)(loadgen|pipeline|seeds_banking|seeds_claims))(\\b|\\.)"
+    - kind: import_from_statement
+      regex: "(?s)^from\\s+(bq_eval\\.showcase|\\.)\\s+import\\s+(.*[\\s,(])?(loadgen|pipeline|seeds_banking|seeds_claims)\\b"
+    - kind: import_from_statement
+      regex: "(?s)^from\\s+(bq_eval|\\.\\.)\\s+import\\s+(.*[\\s,(])?(engine|cli)\\b"
 ---
 id: no-sqlalchemy-orm
 language: Python
@@ -29,7 +183,7 @@ message: "Persistence violation: sqlalchemy.orm is banned; use SQLAlchemy 2.0 Co
 ignores:
   - "tests/**"
 metadata:
-  test_path: "bq_eval/sql_probe.py"
+  test_path: "bq_eval/engine/sql_probe.py"
   invalid_examples:
     - "from sqlalchemy.orm import relationship"
     - "import sqlalchemy.orm"
@@ -51,7 +205,7 @@ message: "Security violation: subprocess with shell=True or os.system() is forbi
 ignores:
   - "tests/**"
 metadata:
-  test_path: "bq_eval/proc_probe.py"
+  test_path: "bq_eval/cli/proc_probe.py"
   invalid_examples:
     - "subprocess.run(cmd, shell=True)"
     - "subprocess.Popen(cmd, shell=True, text=True)"
@@ -73,7 +227,7 @@ message: "Security violation: dynamic f-string or concatenated SQL passed to .ex
 ignores:
   - "tests/**"
 metadata:
-  test_path: "bq_eval/query_probe.py"
+  test_path: "bq_eval/engine/query_probe.py"
   invalid_examples:
     - 'conn.execute(f"SELECT * FROM spans WHERE trace_id = {tid}")'
     - 'conn.execute("SELECT * FROM spans WHERE trace_id = " + tid, params)'
@@ -82,9 +236,11 @@ metadata:
 constraints:
   QUERY:
     any:
+      - kind: binary_operator
       - has:
           kind: interpolation
-      - kind: binary_operator
+      - has:
+          kind: binary_operator
 rule:
   any:
     - pattern: $DB.execute($QUERY)

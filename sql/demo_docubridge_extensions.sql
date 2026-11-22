@@ -26,9 +26,12 @@ WITH server_span_compute AS (
     ) AS estimated_compute_usd,
     MAX(SAFE_CAST(JSON_VALUE(w.attributes, '$."outcome.storage_usd"') AS FLOAT64)) AS explicit_storage_usd
   FROM `agent_eval.v_trace_waterfall` AS w
+  LEFT JOIN `agent_eval.app_registry` AS r
+    ON w.apphub_application_id = r.apphub_application_id
   WHERE w.outcome_id IS NOT NULL
     AND w.otel_span_kind IN ('2', 'SPAN_KIND_SERVER', 'SPAN_KIND_INTERNAL')
-    AND COALESCE(w.apphub_application_id, '') NOT LIKE '%external%'
+    AND NOT COALESCE(r.is_external_counterparty, FALSE)
+    AND LOWER(COALESCE(JSON_VALUE(w.attributes, '$."apphub.external"'), 'false')) != 'true'
   GROUP BY w.outcome_id
 )
 SELECT
@@ -70,9 +73,10 @@ WITH step2_judge_by_outcome AS (
       (
         (e.judge_input_tokens / 1e6) * COALESCE(
           m.input_usd_per_1m,
-          CASE
-            WHEN e.judge_model = 'gemini-4-argon' THEN 1.25
-            WHEN e.judge_model = 'gemini-3.5-flash-lite' THEN 0.075
+          CASE REGEXP_REPLACE(e.judge_model, r'-(?:\d{3}|ga|rc|qcd|preview)$', '')
+            WHEN 'gemini-4-argon' THEN 1.25
+            WHEN 'gemini-3.5-flash-lite' THEN 0.075
+            WHEN 'ai_evaluate_agent_managed' THEN 0.15
             ELSE 0.15
           END
         )
@@ -80,9 +84,10 @@ WITH step2_judge_by_outcome AS (
       + (
         ((e.judge_output_tokens + e.judge_thinking_tokens) / 1e6) * COALESCE(
           m.output_usd_per_1m,
-          CASE
-            WHEN e.judge_model = 'gemini-4-argon' THEN 5.00
-            WHEN e.judge_model = 'gemini-3.5-flash-lite' THEN 0.30
+          CASE REGEXP_REPLACE(e.judge_model, r'-(?:\d{3}|ga|rc|qcd|preview)$', '')
+            WHEN 'gemini-4-argon' THEN 5.00
+            WHEN 'gemini-3.5-flash-lite' THEN 0.30
+            WHEN 'ai_evaluate_agent_managed' THEN 0.60
             ELSE 0.60
           END
         )
@@ -92,7 +97,7 @@ WITH step2_judge_by_outcome AS (
   LEFT JOIN `agent_eval.v_trace_sql_evaluation` AS t
     ON e.trace_id = t.trace_id
   LEFT JOIN `agent_eval.model_pricing_catalog` AS m
-    ON e.judge_model = m.model_name
+    ON REGEXP_REPLACE(e.judge_model, r'-(?:\d{3}|ga|rc|qcd|preview)$', '') = m.model_name
     AND e.evaluated_at >= m.effective_start
     AND e.evaluated_at < m.effective_end
   WHERE COALESCE(e.outcome_id, t.outcome_id) IS NOT NULL
@@ -123,9 +128,11 @@ outcome_spans AS (
     ON w.outcome_id = o.outcome_id
   LEFT JOIN step2_judge_by_outcome AS j
     ON w.outcome_id = j.outcome_id
+  LEFT JOIN `agent_eval.app_registry` AS r
+    ON COALESCE(o.outcome_owner, w.outcome_owner, w.apphub_application_id, 'unregistered_app') = r.apphub_application_id
   WHERE w.outcome_id IS NOT NULL
-    AND COALESCE(w.apphub_application_id, '') NOT LIKE '%external%'
-    AND COALESCE(JSON_VALUE(w.attributes, '$."apphub.external"'), 'false') != 'true'
+    AND NOT COALESCE(r.is_external_counterparty, FALSE)
+    AND LOWER(COALESCE(JSON_VALUE(w.attributes, '$."apphub.external"'), 'false')) != 'true'
   GROUP BY 1, 2, 3, 4, 5, 6
 ),
 weighted_outcome_spans AS (

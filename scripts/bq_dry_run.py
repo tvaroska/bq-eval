@@ -15,7 +15,13 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from bq_eval.sql_eval import build_ai_evaluate_agent_sql, build_ai_generate_table_judge_sql
+import sqlglot
+from sqlglot import TokenType
+
+from bq_eval.engine.sql_eval import (
+    build_ai_evaluate_agent_sql,
+    build_ai_generate_table_judge_sql,
+)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SQL_DIR = REPO_ROOT / "sql"
@@ -48,41 +54,34 @@ def qualify_project_datasets(sql: str, project_id: str) -> str:
 
 
 def split_sql_statements(sql: str) -> list[str]:
-    """Split a multi-statement SQL script on semicolons outside quotes and line comments."""
+    """Split a multi-statement BigQuery SQL script via `sqlglot`'s BigQuery lexer (`F21`).
+
+    Handles `--` and `#` line comments, `/* ... */` block comments, single-quoted, double-quoted,
+    triple-quoted, raw strings, and backtick identifiers while preserving exact SQL slices.
+    """
+    tokens = sqlglot.tokenize(sql, read="bigquery")
+    if not tokens:
+        return []
+
     statements: list[str] = []
-    buf: list[str] = []
-    in_single = False
-    in_triple_single = False
-    i = 0
-    n = len(sql)
-    while i < n:
-        ch = sql[i]
-        if not in_single and not in_triple_single and ch == "-" and i + 1 < n and sql[i + 1] == "-":
-            nl = sql.find("\n", i)
-            i = n if nl == -1 else nl + 1
-            continue
-        if not in_single and sql[i : i + 3] == "'''":
-            in_triple_single = not in_triple_single
-            buf.append("'''")
-            i += 3
-            continue
-        if not in_triple_single and ch == "'" and (i == 0 or sql[i - 1] != "\\"):
-            in_single = not in_single
-            buf.append(ch)
-            i += 1
-            continue
-        if not in_single and not in_triple_single and ch == ";":
-            stmt = "".join(buf).strip()
-            if stmt:
-                statements.append(stmt)
-            buf = []
-            i += 1
-            continue
-        buf.append(ch)
-        i += 1
-    tail = "".join(buf).strip()
-    if tail:
-        statements.append(tail)
+    chunk_start = 0
+    has_non_semicolon = False
+
+    for tok in tokens:
+        if tok.token_type == TokenType.SEMICOLON:
+            if has_non_semicolon:
+                stmt = sql[chunk_start : tok.start].strip()
+                if stmt:
+                    statements.append(stmt)
+            chunk_start = tok.end + 1
+            has_non_semicolon = False
+        else:
+            has_non_semicolon = True
+
+    if has_non_semicolon:
+        tail = sql[chunk_start:].strip()
+        if tail:
+            statements.append(tail)
     return statements
 
 

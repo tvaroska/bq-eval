@@ -1,4 +1,4 @@
-"""Comprehensive tests for pure-SQLite statistical parity and CRITICAL.md invariants."""
+"""Comprehensive tests for pure-SQLite statistical parity and CRITICAL.md invariants (`F18`)."""
 
 from __future__ import annotations
 
@@ -8,91 +8,53 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from bq_eval.bqaa import (
+from bq_eval.cli import main as cli_main
+from bq_eval.contract.otel import (
     BQAAAgentEvent,
+    FinOpsTrafficType,
+    GenAISpanKind,
+    OTelGenAISpanRecord,
+    compute_weighted_burndown_tokens,
+)
+from bq_eval.contract.pricing import ModelPricingSKU
+from bq_eval.contract.results import ConfusionMatrix, ModelOption
+from bq_eval.contract.rubrics import OrdinalScoreOutput
+from bq_eval.engine.bqaa import (
     bqaa_events_to_otel_spans,
     bqaa_events_to_trace_payloads,
     deduplicate_bqaa_events,
 )
-from bq_eval.calibration import (
-    ConfusionMatrix,
+from bq_eval.engine.calibration import (
     build_calibration_result,
     compute_gwet_ac2,
     rogan_gladen_calibrate,
     rogan_gladen_wilson_ci,
     stratified_rogan_gladen_calibrate,
 )
-from bq_eval.cli import main as cli_main
-from bq_eval.finops import (
-    ModelOption,
-    ModelPricingSKU,
+from bq_eval.engine.finops import (
     allocate_focus_two_pool_chargeback,
     compute_pareto_frontier,
     compute_span_cost_usd,
     diagnose_prefix_cache_dilution,
 )
-from bq_eval.loadgen import (
-    build_golden_seed_templates,
-    evaluate_time_shifted_corpus,
-    generate_time_shifted_corpus,
-)
-from bq_eval.otel import (
-    FinOpsTrafficType,
-    GenAISpanKind,
-    OTelGenAISpanRecord,
-    compute_weighted_burndown_tokens,
-)
-from bq_eval.rubrics import OrdinalScoreOutput
-from bq_eval.sql_eval import (
+from bq_eval.engine.sql_eval import (
     build_ai_evaluate_agent_sql,
     build_ai_generate_table_judge_sql,
     evaluate_traces_in_sqlite,
 )
+from bq_eval.showcase.loadgen import (
+    build_golden_seed_templates,
+    evaluate_time_shifted_corpus,
+    generate_time_shifted_corpus,
+)
+from tests.conftest import make_span
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
-def _make_span(  # noqa: PLR0913
-    trace_id: str,
-    span_id: str,
-    *,
-    app_id: str = "critical-app",
-    span_kind: GenAISpanKind = GenAISpanKind.INVOKE_AGENT,
-    status_code: str = "OK",
-    tool_name: str | None = None,
-    tool_call_status: str | None = None,
-    rule0_pass: bool = True,
-    input_tokens: int = 10_000,
-    cached_input_tokens: int = 2_000,
-    output_tokens: int = 500,
-    thinking_tokens: int = 100,
-    offset_s: int = 0,
-) -> OTelGenAISpanRecord:
-    base = datetime(2026, 11, 14, 12, 0, 0, tzinfo=UTC) + timedelta(seconds=offset_s)
-    return OTelGenAISpanRecord(
-        trace_id=trace_id,
-        span_id=span_id,
-        start_time=base,
-        end_time=base + timedelta(milliseconds=400),
-        latency_ms=400.0,
-        status_code=status_code,
-        span_kind=span_kind,
-        gcp_apphub_application_id=app_id,
-        model_name="gemini-3.8-flash",
-        input_tokens=input_tokens,
-        cached_input_tokens=cached_input_tokens,
-        output_tokens=output_tokens,
-        thinking_tokens=thinking_tokens,
-        tool_name=tool_name,
-        tool_call_status=tool_call_status,
-        rule0_pass=rule0_pass,
-        finops_traffic_type=FinOpsTrafficType.PRODUCTION_INFERENCE,
-    )
-
-
 def test_pure_sqlite_rogan_gladen_and_gwet_ac2_exact_parity() -> None:
     """Pure SQLite views must match Python Rogan-Gladen + 95% CI + Gwet's AC2 within 1e-12."""
-    spans = [_make_span(f"trace-cal-{i:03d}", f"span-cal-{i:03d}", offset_s=i) for i in range(25)]
+    spans = [make_span(f"trace-cal-{i:03d}", f"span-cal-{i:03d}", offset_s=i) for i in range(25)]
     judge_outcomes = {f"trace-cal-{i:03d}": (i < 22) for i in range(25)}
     sme_pairs: list[tuple[int, int]] = [
         (4, 4),
@@ -156,7 +118,7 @@ def test_uncalibrated_youden_j_guard_in_python_and_sqlite() -> None:
     with pytest.raises(ValueError, match="uncalibrated"):
         rogan_gladen_calibrate(observed_pass_rate=0.80, sample_size=20, confusion=uncalibrated_cm)
 
-    spans = [_make_span(f"tr-unc-{i}", f"sp-unc-{i}", offset_s=i) for i in range(5)]
+    spans = [make_span(f"tr-unc-{i}", f"sp-unc-{i}", offset_s=i) for i in range(5)]
     outcomes = {f"tr-unc-{i}": True for i in range(5)}
     summary = evaluate_traces_in_sqlite(
         spans=spans,
@@ -180,7 +142,7 @@ def test_sqlite_rule0_tool_loop_and_template16_real_9_tool_spans() -> None:
     assert all(s.tool_call_status == "SUCCESS" for s in tool_spans)
 
     now = datetime(2026, 11, 14, 15, 0, 0, tzinfo=UTC)
-    spans, payloads, _ = generate_time_shifted_corpus(
+    spans, _, _ = generate_time_shifted_corpus(
         reference_time=now,
         total_replicas=2,
         last_hour_replicas=1,
@@ -191,15 +153,13 @@ def test_sqlite_rule0_tool_loop_and_template16_real_9_tool_spans() -> None:
     assert summary.rule0_pass_rate == 0.0
     assert summary.tool_success_rate == 1.0
 
-    report = evaluate_time_shifted_corpus(
-        spans=spans, payloads=payloads, reference_time=now, total_replicas=2, last_hour_replicas=1
-    )
+    report = evaluate_time_shifted_corpus(spans=spans, reference_time=now)
     audit_row = next(r for r in report.step1_rows if r.apphub_application_id == "unregistered_app")
     assert audit_row.step1_pass_rate == pytest.approx(0.75)
 
 
 def test_ordinal_score_output_contract() -> None:
-    """CoT-first OrdinalScoreOutput validates fields, min_length, and forbids extra fields."""
+    """CoT-first OrdinalScoreOutput validates fields, min_length, and binary_pass consistency."""
     valid = OrdinalScoreOutput(
         reasoning_trace="Every figure matches [DOC-01] with zero extrapolation.",
         ordinal_score=4,
@@ -214,6 +174,12 @@ def test_ordinal_score_output_contract() -> None:
         OrdinalScoreOutput(
             reasoning_trace="Long enough rationale for validation.",
             ordinal_score=5,  # type: ignore[arg-type]
+            binary_pass=True,
+        )
+    with pytest.raises(ValidationError, match="binary_pass"):
+        OrdinalScoreOutput(
+            reasoning_trace="Contradictory pass flag on failing score.",
+            ordinal_score=1,
             binary_pass=True,
         )
 
@@ -272,8 +238,8 @@ def test_engine_b_and_cli_managed_metrics_and_judge_model_override(
         build_ai_generate_table_judge_sql(project_id="demo-proj", judge_model="unknown-model")
 
 
-def test_bqaa_edge_cases_tool_error_invalid_traffic_and_outcome_closed() -> None:
-    """Cover TOOL_ERROR status, invalid traffic fallback, non-string JSON content, and OUTCOME_CLOSED."""
+def test_bqaa_edge_cases_tool_error_classification_and_outcome_closed() -> None:
+    """Cover context-aware TOOL_ERROR status (`F21`), invalid traffic fallback, and OUTCOME_CLOSED."""
     ts = datetime(2026, 11, 14, 12, 0, 0, tzinfo=UTC)
     events = [
         BQAAAgentEvent(
@@ -303,8 +269,47 @@ def test_bqaa_edge_cases_tool_error_invalid_traffic_and_outcome_closed() -> None
             trace_id="trace-edge-01",
             span_id="span-edge-02",
             status="OK",
-            error_message="downstream 503",
-            content={"tool_name": "carrier_api", "code": 503},
+            error_message="internal plugin crash",
+            content={"tool_name": "carrier_api", "code": 500},
+            attributes={"custom_metadata": {"gcp.apphub.application.id": "edge-app"}},
+        ),
+        BQAAAgentEvent(
+            event_id="evt-edge-02b",
+            timestamp=ts + timedelta(milliseconds=120),
+            event_type="TOOL_ERROR",
+            agent="edge-agent",
+            session_id="sess-1",
+            invocation_id="inv-edge-01",
+            trace_id="trace-edge-01",
+            span_id="span-edge-02b",
+            error_message="deadline exceeded timeout",
+            content={"tool_name": "carrier_api"},
+            attributes={"custom_metadata": {"gcp.apphub.application.id": "edge-app"}},
+        ),
+        BQAAAgentEvent(
+            event_id="evt-edge-02c",
+            timestamp=ts + timedelta(milliseconds=140),
+            event_type="TOOL_ERROR",
+            agent="edge-agent",
+            session_id="sess-1",
+            invocation_id="inv-edge-01",
+            trace_id="trace-edge-01",
+            span_id="span-edge-02c",
+            error_message="HTTP 429 quota resource_exhausted",
+            content={"tool_name": "carrier_api"},
+            attributes={"custom_metadata": {"gcp.apphub.application.id": "edge-app"}},
+        ),
+        BQAAAgentEvent(
+            event_id="evt-edge-02d",
+            timestamp=ts + timedelta(milliseconds=160),
+            event_type="TOOL_ERROR",
+            agent="edge-agent",
+            session_id="sess-1",
+            invocation_id="inv-edge-01",
+            trace_id="trace-edge-01",
+            span_id="span-edge-02d",
+            error_message="JSON schema validation error",
+            content={"tool_name": "carrier_api"},
             attributes={"custom_metadata": {"gcp.apphub.application.id": "edge-app"}},
         ),
         BQAAAgentEvent(
@@ -358,21 +363,23 @@ def test_bqaa_edge_cases_tool_error_invalid_traffic_and_outcome_closed() -> None
     spans = bqaa_events_to_otel_spans(deduped)
     payloads = bqaa_events_to_trace_payloads(deduped)
 
-    assert len(spans) == 3
+    assert len(spans) == 6
     assert spans[0].status_code == "ERROR"
-    assert spans[0].tool_call_status == "VALIDATION_ERROR"
+    assert spans[0].tool_call_status == "TOOL_ERROR"
     assert spans[0].rule0_pass is False
-    assert spans[1].span_kind == GenAISpanKind.INVOKE_AGENT
-    assert spans[1].outcome_id == "oc-edge-1"
-    assert spans[2].finops_traffic_type == FinOpsTrafficType.UNCLASSIFIED
+    assert spans[1].tool_call_status == "TIMEOUT"
+    assert spans[2].tool_call_status == "RATE_LIMITED"
+    assert spans[3].tool_call_status == "VALIDATION_ERROR"
+    assert spans[4].span_kind == GenAISpanKind.INVOKE_AGENT
+    assert spans[4].outcome_id == "oc-edge-1"
+    assert spans[5].finops_traffic_type == FinOpsTrafficType.UNCLASSIFIED
     assert len(payloads) == 1
     assert "Check policy" in payloads[0].user_prompt
     assert "42" in payloads[0].final_response
 
 
-def test_finops_cliff_boundary_sku_cost_overflow_and_deprecation_alias() -> None:
-    """Test 200,000 vs 200,001 cliff, compute_span_cost_usd, PAYG overflow, >200K dilution, deprecation."""
-    # Exact 200,000 stays standard; 200,001 crosses into >200K long-context cliff.
+def test_weighted_burndown_200k_cliff_boundary() -> None:
+    """Exact 200,000 input tokens stays standard; 200,001 crosses into >200K cliff (`F18`)."""
     bd_200k = compute_weighted_burndown_tokens(
         input_tokens=200_000, cached_input_tokens=0, output_tokens=0, thinking_tokens=0
     )
@@ -382,6 +389,9 @@ def test_finops_cliff_boundary_sku_cost_overflow_and_deprecation_alias() -> None
     assert bd_200k == pytest.approx(200_000.0)
     assert bd_200k_plus1 == pytest.approx(400_002.0)
 
+
+def test_compute_span_cost_usd_with_explicit_sku_cliff() -> None:
+    """`compute_span_cost_usd` switches from standard to long-context SKU rates at 200,001 tokens (`F18`)."""
     sku = ModelPricingSKU(
         model_name="gemini-3.8-flash",
         effective_start=datetime(2026, 1, 1, tzinfo=UTC),
@@ -393,7 +403,7 @@ def test_finops_cliff_boundary_sku_cost_overflow_and_deprecation_alias() -> None
         long_context_cached_usd_per_1m=0.030,
         long_context_output_usd_per_1m=2.25,
     )
-    std_span = _make_span(
+    std_span = make_span(
         "trace-std-001",
         "span-std-001",
         input_tokens=200_000,
@@ -401,7 +411,7 @@ def test_finops_cliff_boundary_sku_cost_overflow_and_deprecation_alias() -> None
         output_tokens=0,
         thinking_tokens=0,
     )
-    cliff_span = _make_span(
+    cliff_span = make_span(
         "trace-clif-001",
         "span-clif-001",
         input_tokens=200_001,
@@ -412,8 +422,10 @@ def test_finops_cliff_boundary_sku_cost_overflow_and_deprecation_alias() -> None
     assert compute_span_cost_usd(std_span, sku) == pytest.approx(0.03)
     assert compute_span_cost_usd(cliff_span, sku) == pytest.approx((200_001 / 1e6) * 0.30)
 
-    # >200K dilution uses 1.8x burndown delta and 2x default long-context USD delta.
-    long_span = _make_span(
+
+def test_prefix_cache_dilution_long_context_recoverable_window_usd() -> None:
+    """`>200K` prefix-cache dilution computes 1.8x burndown delta and `recoverable_window_usd` (`F17`, `F18`)."""
+    long_span = make_span(
         "trace-dil-001",
         "span-dil-001",
         input_tokens=1_000_000,
@@ -425,9 +437,11 @@ def test_finops_cliff_boundary_sku_cost_overflow_and_deprecation_alias() -> None
         [long_span], distinct_prompt_variants=5, target_cache_hit_ratio=0.75
     )
     assert dil.recoverable_weighted_burndown_tokens == pytest.approx(550_000 * 1.8)
-    assert dil.recoverable_monthly_usd == pytest.approx((550_000 / 1e6) * (0.30 - 0.03))
+    assert dil.recoverable_window_usd == pytest.approx((550_000 / 1e6) * (0.30 - 0.03))
 
-    # PAYG overflow when total demand exceeds reserved PT capacity.
+
+def test_focus_chargeback_payg_overflow_and_removed_legacy_kwarg() -> None:
+    """`allocate_focus_two_pool_chargeback` allocates PAYG overflow and rejects removed `reserved_pt_Fixed` (`F17`, `F18`)."""
     overflow_rows = allocate_focus_two_pool_chargeback(
         app_burndown_tokens={"app-a": 100_000_000.0, "app-b": 50_000_000.0},
         app_cost_centers={"app-a": "CC-A", "app-b": "CC-B"},
@@ -439,15 +453,13 @@ def test_finops_cliff_boundary_sku_cost_overflow_and_deprecation_alias() -> None
     assert sum(r.payg_overflow_cost_usd for r in overflow_rows) == pytest.approx(10.0)
     assert sum(r.total_allocated_cost_usd for r in overflow_rows) == pytest.approx(110.0)
 
-    # Backward-compatible deprecated kwarg emits DeprecationWarning.
-    with pytest.warns(DeprecationWarning, match="reserved_pt_fixed_cost_usd"):
-        legacy_rows = allocate_focus_two_pool_chargeback(
+    with pytest.raises(TypeError):
+        allocate_focus_two_pool_chargeback(  # type: ignore[call-arg]
             app_burndown_tokens={"app-a": 50_000_000.0},
             app_cost_centers={"app-a": "CC-A"},
             reserved_pt_capacity_tokens=100_000_000.0,
             reserved_pt_Fixed_cost_usd=100.0,
         )
-    assert sum(r.total_allocated_cost_usd for r in legacy_rows) == pytest.approx(100.0)
 
 
 def test_step3_paired_run_comparison_temporal_order_and_dedup() -> None:
@@ -470,7 +482,6 @@ def test_step3_paired_run_comparison_temporal_order_and_dedup() -> None:
     conn.executemany(
         "INSERT INTO eval_results VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         [
-            # run_9 ran earlier and passed; duplicate older row in run_9 must be deduplicated
             (
                 "app-1",
                 "groundedness_4pt_v1",
@@ -491,7 +502,6 @@ def test_step3_paired_run_comparison_temporal_order_and_dedup() -> None:
                 "good",
                 "2026-11-10T10:00:00+00:00",
             ),
-            # run_10 ran later and failed (lexically 'run_10' < 'run_9', temporally run_9 < run_10)
             (
                 "app-1",
                 "groundedness_4pt_v1",
@@ -535,21 +545,17 @@ def _build_stratppi_20_to_1_fixture() -> tuple[
         t0 = base + timedelta(seconds=i)
         t1 = t0 + timedelta(milliseconds=latency_ms)
         spans.append(
-            OTelGenAISpanRecord(
-                trace_id=tid,
-                span_id=f"sp-strat-{i:04d}",
-                start_time=t0,
-                end_time=t1,
+            make_span(
+                tid,
+                f"sp-strat-{i:04d}",
+                app_id="strat-app",
                 latency_ms=latency_ms,
-                status_code="OK",
-                span_kind=GenAISpanKind.INVOKE_AGENT,
-                gcp_apphub_application_id="strat-app",
-                model_name="gemini-3.8-flash",
                 input_tokens=1_000,
                 cached_input_tokens=0,
                 output_tokens=100,
-                rule0_pass=True,
-                finops_traffic_type=FinOpsTrafficType.PRODUCTION_INFERENCE,
+                thinking_tokens=0,
+                offset_s=i,
+                base_time=base,
             )
         )
         sql_span_rows.append(
@@ -689,51 +695,53 @@ def test_sqlite_multi_app_w3c_trace_per_app_sme_and_outcome_cpvo() -> None:
     """Cross-app W3C trace stays 1 trace under root `outcome_owner`, SME keys isolate per app, and outcome CPVO computes (`M6-2`)."""
     base = datetime(2026, 11, 21, 12, 0, 0, tzinfo=UTC)
     spans = [
-        # Cross-app trace: root belongs to app-alpha, child belongs to app-downstream
-        OTelGenAISpanRecord(
-            trace_id="trace-cross-001",
-            span_id="span-root-001",
-            parent_span_id=None,
-            start_time=base,
-            end_time=base + timedelta(milliseconds=600),
+        make_span(
+            "trace-cross-001",
+            "span-root-001",
+            app_id="app-alpha",
+            outcome_id="out-alpha-1",
+            outcome_owner="app-alpha",
+            input_tokens=100_000,
+            cached_input_tokens=0,
+            output_tokens=10_000,
+            thinking_tokens=0,
             latency_ms=600.0,
-            gcp_apphub_application_id="app-alpha",
-            outcome_id="out-alpha-1",
-            outcome_owner="app-alpha",
-            model_name="gemini-3.8-flash",
-            input_tokens=100_000,
-            output_tokens=10_000,
+            base_time=base,
         ),
-        OTelGenAISpanRecord(
-            trace_id="trace-cross-001",
-            span_id="span-child-001",
+        make_span(
+            "trace-cross-001",
+            "span-child-001",
             parent_span_id="span-root-001",
-            start_time=base + timedelta(milliseconds=100),
-            end_time=base + timedelta(milliseconds=400),
-            latency_ms=300.0,
-            gcp_apphub_application_id="app-downstream",
+            app_id="app-downstream",
             outcome_id="out-alpha-1",
             outcome_owner="app-alpha",
-            model_name="gemini-3.8-flash",
             input_tokens=100_000,
+            cached_input_tokens=0,
             output_tokens=10_000,
+            thinking_tokens=0,
+            latency_ms=300.0,
+            offset_ms=100,
+            base_time=base,
         ),
-        OTelGenAISpanRecord(
-            trace_id="trace-cross-001",
-            span_id="span-close-001",
+        make_span(
+            "trace-cross-001",
+            "span-close-001",
             parent_span_id="span-root-001",
             span_name="outcome.closed",
-            start_time=base + timedelta(milliseconds=600),
-            end_time=base + timedelta(milliseconds=600),
-            latency_ms=0.0,
-            gcp_apphub_application_id="app-alpha",
+            app_id="app-alpha",
             outcome_id="out-alpha-1",
             outcome_owner="app-alpha",
             model_name="none",
+            input_tokens=0,
+            cached_input_tokens=0,
+            output_tokens=0,
+            thinking_tokens=0,
+            latency_ms=0.0,
+            offset_ms=600,
             attributes={"outcome.status": "succeeded", "outcome.verified": "true"},
+            base_time=base,
         ),
-        # Second app with judged trace but no SME calibration entry
-        _make_span("trace-beta-001", "span-beta-001", app_id="app-beta", offset_s=5),
+        make_span("trace-beta-001", "span-beta-001", app_id="app-beta", offset_s=5, base_time=base),
     ]
     summaries = evaluate_traces_in_sqlite(
         spans=spans,
@@ -767,17 +775,17 @@ def test_numeric_gates_fail_closed_on_nan_negative_and_out_of_range() -> None:
             config_id="nan-opt",
             model_name="gemini-3.8-flash",
             rule0_pass_rate=float("nan"),
-            non_fabrication_rate_nfr=float("nan"),
+            fabrication_rate=float("nan"),
             calibrated_pass_rate=0.90,
             cost_per_verified_outcome_usd=0.01,
             p95_latency_ms=500.0,
         )
     with pytest.raises(ValidationError):
         ModelOption(
-            config_id="neg-nfr",
+            config_id="neg-fab",
             model_name="gemini-3.8-flash",
             rule0_pass_rate=0.99,
-            non_fabrication_rate_nfr=-0.01,
+            fabrication_rate=-0.01,
             calibrated_pass_rate=0.90,
             cost_per_verified_outcome_usd=0.01,
             p95_latency_ms=500.0,
@@ -798,7 +806,7 @@ def test_numeric_gates_fail_closed_on_nan_negative_and_out_of_range() -> None:
 
 
 def test_rfp_quote_accuracy_migration_hint() -> None:
-    """Renamed rubric ID gives an explicit migration hint (`M6-5`)."""
+    """Removed legacy rubric name raises an explicit migration hint (`M6-4`)."""
     with pytest.raises(ValueError, match="rfp_quote_completeness_4pt_v1"):
         build_ai_generate_table_judge_sql(
             project_id="demo-proj",

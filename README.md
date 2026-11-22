@@ -6,7 +6,7 @@ Token dashboards show what an agent spent, not whether it finished the job. Judg
 
 ## Verified Receipts
 
-Local math passes `67/67` tests (`0.0` mock ratio, `< 1e-12` SQLite-vs-Python parity). Live receipts come from a generated-document Google Cloud fleet (`343` labeled cases, `443` closed outcomes, `28,752` spans, `_AllSpans` lag `p50 = 87 ms`, `p95 = 11.4 s`).
+Local math passes `111/111` tests (`0.0` mock ratio, `< 1e-12` SQLite-vs-Python parity). Live receipts come from a generated-document Google Cloud fleet (`343` labeled cases, `443` closed outcomes, `28,752` spans, `_AllSpans` lag `p50 = 87 ms`, `p95 = 11.4 s`).
 
 | Scope | Measured Result | Proof |
 | :--- | :--- | :--- |

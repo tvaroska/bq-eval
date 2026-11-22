@@ -87,8 +87,32 @@ SELECT
     JSON_VALUE(content, '$.name')
   ) AS tool_name,
   CASE
-    WHEN event_type = 'TOOL_ERROR' THEN 'VALIDATION_ERROR'
     WHEN event_type = 'TOOL_COMPLETED' THEN 'SUCCESS'
+    WHEN event_type = 'TOOL_ERROR' THEN COALESCE(
+      NULLIF(
+        UPPER(
+          COALESCE(
+            JSON_VALUE(attributes, '$."tool.call.status"'),
+            JSON_VALUE(attributes, '$."error.type"'),
+            JSON_VALUE(attributes, '$.error_type'),
+            JSON_VALUE(content, '$.error_type')
+          )
+        ),
+        'OK'
+      ),
+      CASE
+        WHEN SAFE_CAST(JSON_VALUE(content, '$.code') AS INT64) IN (408, 503, 504)
+          OR REGEXP_CONTAINS(LOWER(COALESCE(error_message, '')), r'timeout|timed\s*out|503|504')
+          THEN 'TIMEOUT'
+        WHEN SAFE_CAST(JSON_VALUE(content, '$.code') AS INT64) = 429
+          OR REGEXP_CONTAINS(LOWER(COALESCE(error_message, '')), r'rate[_\s-]?limit|429')
+          THEN 'RATE_LIMITED'
+        WHEN SAFE_CAST(JSON_VALUE(content, '$.code') AS INT64) IN (400, 422)
+          OR REGEXP_CONTAINS(LOWER(COALESCE(error_message, '')), r'validat|schema|invalid')
+          THEN 'VALIDATION_ERROR'
+        ELSE 'TOOL_ERROR'
+      END
+    )
     ELSE NULL
   END AS tool_call_status,
   NOT (UPPER(COALESCE(status, 'OK')) = 'ERROR' OR event_type LIKE '%_ERROR') AS rule0_pass,
@@ -151,13 +175,16 @@ SELECT
     trace_id,
     invocation_id
   ) AS trace_id,
-  ANY_VALUE(
-    COALESCE(
-      JSON_VALUE(attributes, '$.custom_metadata."gcp.apphub.application.id"'),
-      JSON_VALUE(attributes, '$.custom_metadata."apphub.application.id"'),
-      JSON_VALUE(attributes, '$.custom_metadata.apphub_application_id'),
-      'unregistered_app'
-    )
+  COALESCE(
+    ARRAY_AGG(
+      COALESCE(
+        JSON_VALUE(attributes, '$.custom_metadata."gcp.apphub.application.id"'),
+        JSON_VALUE(attributes, '$.custom_metadata."apphub.application.id"'),
+        JSON_VALUE(attributes, '$.custom_metadata.apphub_application_id')
+      )
+      IGNORE NULLS ORDER BY timestamp ASC, event_id ASC LIMIT 1
+    )[SAFE_OFFSET(0)],
+    'unregistered_app'
   ) AS apphub_application_id,
   MAX(timestamp) AS ingested_at,
   COALESCE(
@@ -230,30 +257,31 @@ WITH bqaa_span_costs AS (
     COALESCE(s.rule0_pass, s.status_code != 'ERROR') AS rule0_pass,
     CASE
       WHEN s.model_name IS NULL OR s.model_name = 'none' OR (s.input_tokens = 0 AND s.output_tokens = 0 AND s.thinking_tokens = 0) THEN 0.0
-      WHEN s.model_name = 'gemini-4-argon' AND s.input_tokens > 200000 THEN
+      WHEN REGEXP_REPLACE(s.model_name, r'-(?:\d{3}|ga|rc|qcd|preview)$', '') = 'gemini-4-argon' AND s.input_tokens > 200000 THEN
         (GREATEST(0, s.input_tokens - s.cached_input_tokens) / 1e6) * 2.50
         + (s.cached_input_tokens / 1e6) * 0.250
         + ((s.output_tokens + s.thinking_tokens) / 1e6) * 18.75
-      WHEN s.model_name = 'gemini-4-argon' THEN
+      WHEN REGEXP_REPLACE(s.model_name, r'-(?:\d{3}|ga|rc|qcd|preview)$', '') = 'gemini-4-argon' THEN
         (GREATEST(0, s.input_tokens - s.cached_input_tokens) / 1e6) * 1.25
         + (s.cached_input_tokens / 1e6) * 0.125
         + ((s.output_tokens + s.thinking_tokens) / 1e6) * 5.00
-      WHEN s.model_name = 'gemini-3.5-flash-lite' AND s.input_tokens > 200000 THEN
+      WHEN REGEXP_REPLACE(s.model_name, r'-(?:\d{3}|ga|rc|qcd|preview)$', '') = 'gemini-3.5-flash-lite' AND s.input_tokens > 200000 THEN
         (GREATEST(0, s.input_tokens - s.cached_input_tokens) / 1e6) * 0.15
         + (s.cached_input_tokens / 1e6) * 0.015
         + ((s.output_tokens + s.thinking_tokens) / 1e6) * 1.125
-      WHEN s.model_name = 'gemini-3.5-flash-lite' THEN
+      WHEN REGEXP_REPLACE(s.model_name, r'-(?:\d{3}|ga|rc|qcd|preview)$', '') = 'gemini-3.5-flash-lite' THEN
         (GREATEST(0, s.input_tokens - s.cached_input_tokens) / 1e6) * 0.075
         + (s.cached_input_tokens / 1e6) * 0.0075
         + ((s.output_tokens + s.thinking_tokens) / 1e6) * 0.30
-      WHEN s.input_tokens > 200000 THEN
+      WHEN REGEXP_REPLACE(s.model_name, r'-(?:\d{3}|ga|rc|qcd|preview)$', '') IN ('gemini-3.8-flash', 'ai_evaluate_agent_managed') AND s.input_tokens > 200000 THEN
         (GREATEST(0, s.input_tokens - s.cached_input_tokens) / 1e6) * 0.30
         + (s.cached_input_tokens / 1e6) * 0.030
         + ((s.output_tokens + s.thinking_tokens) / 1e6) * 2.25
-      ELSE
+      WHEN REGEXP_REPLACE(s.model_name, r'-(?:\d{3}|ga|rc|qcd|preview)$', '') IN ('gemini-3.8-flash', 'ai_evaluate_agent_managed') THEN
         (GREATEST(0, s.input_tokens - s.cached_input_tokens) / 1e6) * 0.15
         + (s.cached_input_tokens / 1e6) * 0.015
         + ((s.output_tokens + s.thinking_tokens) / 1e6) * 0.60
+      ELSE NULL
     END AS span_cost_usd
   FROM `agent_eval.v_bqaa_otel_spans` AS s
 ),
