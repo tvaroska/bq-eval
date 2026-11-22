@@ -6,45 +6,44 @@ Agents don't fail loudly on monitoring dashboards: a looping tool or 200K-token 
 
 ## Verified Receipts
 
-Local math passes `111/111` tests (`0.0` mock ratio, `< 1e-12` SQLite-vs-Python parity). Live receipts come from a generated-document Google Cloud fleet (`343` labeled cases, `443` closed outcomes, `28,752` spans, `_AllSpans` lag `p50 = 87 ms`, `p95 = 11.4 s`).
+Static [rule views](sql/step1_trace_views.sql) (`51/51` `bq --dry_run` checks) check every trace over `agent_events` or `_AllSpans` (`32`-col [adapter parity](tests/test_m5_bqaa_dual_path.py)), while scheduled queries persist sampled LLM scores and labeled cases under a `2M` token/day [cap](sql/step3_daily_quota_guard.sql) so BI reads never re-bill judge spend. Math passes `111/111` tests (`0.0` mocks, `< 1e-12` `sqlglot` SQLite parity). Live [receipts](benchmarks/results/m2_live_receipt.json) run real agents on synthetic docs (`343` cases + `100` prior smoke runs = `443` outcomes across `28,752` spans).
 
 | Scope | Measured Result | Proof |
 | :--- | :--- | :--- |
-| **Offline twin (`50` traces)** | `order-support-agent`: `38/40` (`95%`) SQL pass, `18/20` (`90%`) raw judge, `87.4%` calibrated `[64.7%, 100%]`, `$0.0232`/outcome; unjudged app (`10/10`) fails closed (`NULL`); `5%` canary + error tail cuts `100k`-trace judge spend `92.2%` (`$250` to `$19.62`) | [SQL tests](tests/test_sql_contracts.py) |
-| **Live KYC (`280` cases)** | `28/28` structural + `8/8` PO Box traps caught in `$0` SQL; Flash caught `20/20` semantic traps (`100%` recall, Wilson `[83.9%, 100%]`, `0/216` FP); `30/30` binary pass match vs. Argon (4-point ordinal `AC2 = 0.8605`, calibrated `86.84%` `[82.8%, 90.9%]`) | [Step-2 SQL](sql/step2_stateless_eval.sql) |
-| **Live RFP cliff (`35` cases)** | A2A `$0.0000` AI vs. Flash PDF `$0.00024` AI vs. misconfigured `>200K` Argon PDF `$0.7225` AI for the same award, surfaced by `$0` SQL (combines model tier and `>200K` cliff) | [Step-1 SQL](sql/step1_trace_views.sql) |
-| **Live skill (`18` cases; `10` scored) & shadow (`10`)** | Skill `1.0.0` to `1.1.0`: `$0.02427` to `$0.000915`/outcome (`96.2%` drop, excl. reviewer wages); reviews `1.00` to `0.20`/outcome (`9/9` in-policy auto, `1/1` escalated). Unregistered service isolated to `unregistered_app` (`0%` coverage) | [Views](sql/views.sql), [BQAA tests](tests/test_m5_bqaa_dual_path.py) |
+| **Twin (`50`)** | `order-support-agent` (`40`): `38/40` (`95%`) rules, `18/20` (`90%`) sample + `0/2` tail (`81.8%` pooled vs. `87.4%` calibrated `[64.7%, 100%]`), `$0.0232`/outcome (`$0.7160` agent + `$0.0550` judge); unjudged (`10/10`) `NULL` | [SQL tests](tests/test_sql_contracts.py) |
+| **KYC (`280`)** | `28/28` structural + `8/8` PO Box + `8` OCR rejects in `$0` SQL; `20/20` traps caught (`100%` `[83.9%, 100%]`, `0/216` FP = `280`); across `266` judged rows, `30/30` binary Argon match (`4`-pt `AC2 = 0.8605`, calibrated `86.84%` `[82.8%, 90.9%]`, `$0.0056`/outcome) | [Judge SQL](sql/step2_stateless_eval.sql) |
+| **RFP (`35`)** | Structured (`n=8`) `$0.0000` AI vs. Flash PDF (`n=17`) `$0.00024` AI vs. `>200K` Argon PDF (`n=10`) `$0.7225` AI, flagged in `$0` SQL (mixes tier & cliff) | [Rule views](sql/step1_trace_views.sql) |
+| **Skill (`18`) & shadow (`10`)** | `1.0.0` (`n=8`) to `1.1.0` (`n=10`): `$0.02427` to `$0.000915`/outcome (`96.2%` drop, excl. wages; `9/9` auto, `1/1` escalated). `10` shadow traces hit `unregistered_app` (`0%`, `NULL`) | [Views](sql/views.sql) |
 
-## Why Not Langfuse, LangSmith, Datadog, or Raw BQAA?
+[Cost model](bq_eval/engine/finops.py): on `100k` traces (`3%` tail + `5%` sample), rule screening cuts judge spend `92.2%` (`$250` to `$19.62`) while catching `100%` of tail failures missed by uniform `5%` sampling.
 
-If you want prompt-iteration UIs, annotation queues, or single-team tracing outside BigQuery, start with Langfuse or LangSmith. Use `bq-eval` when traces already land in BigQuery and platform or finance teams need SQL-native evaluation, calibration, and chargeback without copying telemetry.
+## Why Not Langfuse, LangSmith, Datadog, or Managed BigQuery Eval?
+
+For prompt UIs, annotation queues, or `< 50`-trace slices where `$0` SQL rules plus manual review beat wide intervals, use Langfuse, LangSmith, or plain SQL/`dbt` (`dbt` can also schedule `bq-eval` SQL).
 
 | Incumbent | What It Does Well | Gap `bq-eval` Fills |
 | :--- | :--- | :--- |
-| **Langfuse / LangSmith** | Prompt workflows, annotation queues, dev evals (Langfuse is MIT self-hostable on ClickHouse; LangSmith fits LangGraph) | Copies traces out of BigQuery and meters per unit/seat; no SQL Rogan-Gladen debiasing, `>200K` cliffs, or `FOCUS 1.2` chargeback |
-| **Datadog LLM / Billing exports** | Unified APM alerts, latency, and raw token spend on existing infra | Bills per LLM span and stops at cost per trace; misses verified outcomes and fail-closed unjudged checks |
-| **Raw `BQAA` + `AI.EVALUATE_AGENT`** | 3-line Python capture (ADK/LangGraph) and zero-setup managed turn scoring | Skips App Hub stamping, reports uncalibrated scores, and omits `$0` SQL pre-filtering and outcome cost; `bq-eval` layers directly on top with zero ETL |
+| **Langfuse / LangSmith** | Prompt iteration, annotation UIs, dev tracing | Copies traces out of BigQuery; no warehouse rule views, debiased samples, or `>200K` cliffs |
+| **Datadog LLM / Billing** | APM alerts, latency, raw token spend | Stops at cost/trace; misses verified outcomes, judge spend, and `NULL` on unjudged apps |
+| **BigQuery Agent Analytics (`BQAA`) + `AI.EVALUATE_AGENT`** | 3-line capture, zero-setup turn scoring | Omits App Hub ownership, calibration, `$0` rule filtering, and outcome cost; `bq-eval` layers on top |
 
 ## Where This Breaks
 
-1. **Model-vs-model calibration today, not blind human SMEs:** Live `AC2 = 0.8605` compares `gemini-3.8-flash` to `gemini-4-argon` (`30/30` cases). Regulated calibration still requires `~100` blind human labels in `sme_labels`.
-2. **Small live slices and reviewer wages:** `StratPPI` population stratum weighting debiases `ERROR_OR_SLA_TAIL` vs. canary sampling in SQL and SQLite, but the live skill comparison (`N = 10`) remains small and excludes human reviewer wages.
-3. **BigQuery-only SQL and regional limits:** Core queries use `AI.GENERATE_TABLE` and `FARM_FINGERPRINT`. `AI.EVALUATE_AGENT` requires single regions (and its Step-3 token accounting uses `CHAR_LENGTH / 4` estimates).
-4. **No one-click IaC deploy yet:** Offline mode uses a SQLite twin; live BigQuery views assume existing `agent_events` or `_AllSpans` datasets and manual `bq query` runs.
+1. **Synthetic docs & model labels:** Live `343` cases use synthetic docs; `4`-point `AC2 = 0.8605` (`30/30` binary match) compares `gemini-3.8-flash` to `gemini-4-argon` (`0` human labels; `[82.8%, 90.9%]` uses point judge rates). Regulated use needs `~100` blind human labels.
+2. **Small slices & mixed cliffs:** Skill (`n=8` vs. `n=10`) excludes wages; RFP (`35`) mixes model tier with the `>200K` cliff.
+3. **Scheduled writes, caps & dialects:** Sampled `AI.GENERATE_TABLE` scores write via scheduled queries under a daily cap so BI reads and failure spikes don't re-bill judges. `AI.EVALUATE_AGENT` runs in single regions only and estimates judge tokens from character length (`CHAR_LENGTH / 4`).
+4. **Manual cloud setup:** Local runs use a `sqlglot`-verified SQLite twin; one-command BigQuery/Terraform bootstrap is on the [roadmap](docs/roadmap.md).
 
 ## Quick Start
 
-Run the zero-credential SQLite twin and full test suite locally:
+Run the SQLite twin (`kyc-address-verification`: `86.84% [82.78%, 90.90%]`, `$0.0056`/outcome; `unregistered_app`: `NULL`):
 
 ```bash
-uv sync --extra dev
-uv run python -m bq_eval.cli demo
-uv run pytest -p no:cacheprovider -v
+uv sync --extra dev && uv run python -m bq_eval.cli demo
 ```
+
+See `--corpus retail-2app`, `uv run pytest -p no:cacheprovider -v`, or [bq_dry_run.py](scripts/bq_dry_run.py).
 
 ### Deep Dives
 
-- [BigQuery Step 1-3 SQL setup & calibration math](docs/architecture-and-sql.md)
-- [Light Capture (`BQAA`) vs. Full Capture (`OTel`) & App Hub](docs/bqaa-and-dual-path-architecture.md)
-- [Serving physics, `>200K` cliffs, Pareto & `FOCUS 1.2`](docs/finops-and-cost-management.md)
-- [Plain-English rubric & slice skill](skills/bq-eval/SKILL.md) · [Invariants](CRITICAL.md) · [ADRs](DECISIONS.md) · [Roadmap](docs/roadmap.md)
+- [SQL & calibration](docs/architecture-and-sql.md) · [`BQAA` & `_AllSpans`](docs/bqaa-and-dual-path-architecture.md) · [Cliffs & chargeback](docs/finops-and-cost-management.md) · [Rubric skill](skills/bq-eval/SKILL.md) · [Invariants](CRITICAL.md) · [ADRs](DECISIONS.md) · [Roadmap](docs/roadmap.md)
