@@ -541,7 +541,7 @@ def test_progressive_step1_step2_step25_step3_pack() -> None:
     assert "MOD(ABS(FARM_FINGERPRINT(trace_id)), 100) < 5" in skill_md
     assert "TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR)" in skill_md
     assert "MERGE INTO agent_eval.rubrics" in skill_md
-    assert "MERGE `agent_eval.rubrics` AS target" in recipes_md
+    assert "MERGE INTO agent_eval.rubrics AS target" in recipes_md
     assert "## 3. Stateless Eval on Only the Last 1 Hour of Traces" in recipes_md
     assert "MODEL `agent_eval.gemini_4_argon_judge`" in recipes_md
     assert "INSERT INTO `agent_eval.eval_results`" in recipes_md

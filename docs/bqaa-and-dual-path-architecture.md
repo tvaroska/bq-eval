@@ -76,6 +76,10 @@ flowchart TB
 > **`span_id` vs. `attributes.otel.span_id` Nuance in `BQAA`**
 > The top-level `span_id` and `parent_span_id` columns in `agent_events` are **`BQAA`'s own internal `TraceManager` UUIDs** used to reconstruct the ADK agent/LLM/tool tree, not OpenTelemetry span IDs. If you need **span-level** correlation with `_AllSpans` (rather than trace-level correlation on `trace_id`), set `BigQueryLoggerConfig(log_otel_span_context=True)` (`False` by default), which snapshots the ambient OTel context into `attributes.otel.span_id` and `attributes.otel.trace_id` (automatically preferred by `v_bqaa_otel_spans`).
 
+> [!WARNING]
+> **Hybrid Mode C ADK Telemetry Requirement (`EVENT_ONLY`, Never `'true'`)**
+> When running Hybrid Mode C (`_AllSpans` + `BQAA`) on ADK (`>= 1.17.0`) or `Agent Runtime` with `OTEL_SEMCONV_STABILITY_OPT_IN=gen_ai_latest_experimental`, set `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=EVENT_ONLY` (paired with GCS payload offload for `> 64 KiB` prompts/completions). Setting `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=true` produces an invalid OTel GenAI configuration that silently drops trace and log export.
+
 ---
 
 ## 3. Runtime Behavior: Agent Runtime vs. Cloud Run vs. Non-GCP
@@ -115,7 +119,7 @@ flowchart TB
        - *Session-scoped (3)*: `multi_turn_task_success_v1`, `multi_turn_tool_use_quality_v1`, `multi_turn_trajectory_quality_v1`
      - **Custom JSON Metrics & Rubric Generation (`JSON` literal)**: Supports `custom_metric`, `prompt_template`, `system_instruction`, `judge_model`, `sampling_count` (`1..32`), and static `rubrics` or dynamic `rubric_generation`.
    - **Operational Constraints of `AI.EVALUATE_AGENT`**:
-     1. **Single-Region Allowlist Only (No `US` or `EU` Multi-Region Yet)**: Restricted to 15 single regions (`us-central1`, `us-east1`, `us-east4`, `us-east5`, `us-south1`, `us-west1`, `us-west4`, `europe-central2`, `europe-north1`, `europe-southwest1`, `europe-west1`, `europe-west4`, `europe-west8`, `europe-west9`), whereas `AI.GENERATE_TABLE` works in `US` and `EU` multi-regions today.
+     1. **Single-Region Allowlist Only (No `US` or `EU` Multi-Region Yet)**: Restricted to 14 single regions (`us-central1`, `us-east1`, `us-east4`, `us-east5`, `us-south1`, `us-west1`, `us-west4`, `europe-central2`, `europe-north1`, `europe-southwest1`, `europe-west1`, `europe-west4`, `europe-west8`, `europe-west9`), whereas `AI.GENERATE_TABLE` works in `US` and `EU` multi-regions today.
      2. **`AgentData` JSON Input Requirement**: `trace_col` must contain a valid `google.cloud.aiplatform.v1beta1.AgentData` JSON string (produced automatically by `BQAA`'s `{table}_eval_turn` and `{table}_eval_session` views).
 
 ### 4.2 Dual Judge Engines Inside the Progressive Ladder (`Step 1 -> Step 2 -> Step 3`)

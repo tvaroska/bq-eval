@@ -32,7 +32,7 @@ To eliminate day-1 setup friction while supporting full enterprise governance wh
 
 ### 2.2 Step 2: `1` Rubric Table + Stateless Dual-Engine Eval (`sql/step2_stateless_eval.sql`)
 - **`agent_eval.rubrics`**: Can be mounted directly from [`sql/step2_rubrics.csv`](../sql/step2_rubrics.csv) in Cloud Storage (`CREATE OR REPLACE EXTERNAL TABLE`) or created as a native BigQuery table seeded with the 8 canonical 4-point rubrics (`gemini-3.8-flash` default workhorse, `passing_score = 3`), including `EVAL-P10` contradiction-aware grounding and PII perturbation invariance rubrics.
-- **`agent_eval.v_step2_all_trace_rubric_prompts` & `agent_eval.v_step2_trace_rubric_prompts`**: `v_step2_all_trace_rubric_prompts` joins `v_step1_trace_eval` with `trace_payloads` and `rubrics` (preserving failing traces so canary+error views can inspect error tails), while `v_step2_trace_rubric_prompts` filters `WHERE step1_pass = TRUE` so routine semantic scoring skips `$0` deterministic rejects. Both escape `&`, `<`, and `>` inside `<untrusted_text>` blocks.
+- **`agent_eval.v_step2_all_trace_rubric_prompts` & `agent_eval.v_step2_trace_rubric_prompts`**: `v_step2_trace_rubric_prompts` filters `WHERE step1_pass = TRUE` so routine Step-2/Step-3 semantic scoring skips `$0` deterministic rejects, while `v_step2_all_trace_rubric_prompts` preserves failing traces for optional diagnostic error-tail inspection (with $\hat{\theta}_{\text{RG}}$ strictly restricted to `rule0_pass = TRUE` per `ADR-004`). Both escape `&`, `<`, and `>` inside `<untrusted_text>` blocks.
 - **Engine A (`AI.GENERATE_TABLE` — All Regions incl. `US`/`EU`)**: Runs 4-point ordinal rubrics statelessly on `100%` or `10%` of traces with `NOT NULL` schema fields (`reasoning_trace STRING NOT NULL, ordinal_score INT64 NOT NULL`) and returns `reasoning_trace`, `ordinal_score`, `verified_pass`, and `trace_cost_usd`.
 - **Engine B (`AI.EVALUATE_AGENT` — Single-Region `BQAA` `AgentData` TVF)**: Scores Step-1 passing turns (`v_bqaa_eval_turn_filtered`) against Google's 7 managed trajectory metrics (`tool_use_quality_v1`, `final_response_quality_v1`, `hallucination_v1`, `safety_v1`, etc.) with zero `CREATE MODEL` or `CREATE CONNECTION` setup.
 
@@ -84,7 +84,7 @@ Untrusted user prompts (`p.user_prompt`), retrieved chunks (`p.retrieved_context
 
 `v_step2_all_trace_rubric_prompts`, `v_step2_trace_rubric_prompts`, and `bq_eval.engine.sql_eval.build_ai_generate_table_judge_sql()` enforce two hard safeguards:
 1. **SQL-Level XML Entity Escaping (`EVAL-P02`):** Wraps `p.user_prompt`, `p.retrieved_context`, and `p.final_response` in nested `REPLACE(REPLACE(REPLACE(COALESCE(col, ''), '&', '&amp;'), '<', '&lt;'), '>', '&gt;')` before interpolating into `<untrusted_text>` blocks.
-2. **Deterministic Hash Sampling (`FARM_FINGERPRINT`, `EVAL-P08`):** Supports `10%` (`< 10`), `5%` (`< 5`), or `100%` error/SLA-tail sampling (`NOT t.rule0_pass OR t.tool_error_count > 0 OR t.trace_latency_ms > t.sla_latency_ms`), cutting judge token spend by `90–95%`.
+2. **Two-Mode Stratified Deterministic Sampling (`FARM_FINGERPRINT`, `EVAL-P08`):** Routine Step-2 semantic scoring filters `step1_pass = TRUE` / `rule0_pass = TRUE` (`v_step2_trace_rubric_prompts`, `v_bqaa_eval_turn_filtered`, or `build_ai_generate_table_judge_sql(..., include_rule0_failures=False)`), routing `5%`–`10%` healthy canaries plus `100%` tool-error/SLA-tail passes (`t.tool_error_count > 0 OR t.trace_latency_ms > t.sla_latency_ms`) to the judge for `90–95%` cost reduction. Optional diagnostic root-cause sweeps (`v_step2_all_trace_rubric_prompts` or `include_rule0_failures=True`) include `NOT t.rule0_pass` failures, while `v_agent_eval_and_finops_summary` always restricts $\hat{\theta}_{\text{RG}}$ to `WHERE rule0_pass = TRUE` and bills `100%` of judge runs (`ADR-004`).
 
 ---
 
@@ -116,29 +116,48 @@ A single business outcome (KYC approval, RFP award, loan consolidation) spans mu
 
 ## 7. BigQuery Deployment Commands & Repository Map
 
-### 7.1 Step 1 on BigQuery (`0` New Tables, No Skill)
+### 7.0 Cold Project Prerequisites & Regional Compatibility
+
+1. **Substitute Placeholders Before Running SQL**: Set `${PROJECT_ID}`, `${DATASET_ID}` (default `agent_eval`), `${PAYLOAD_BUCKET}` (`YOUR_GENAI_PAYLOAD_BUCKET` in [`sql/ddl.sql`](../sql/ddl.sql)), and `${CONNECTION_ID}` (`us.vertex_ai_connection` in `sql/ddl.sql` / `sql/step2_stateless_eval.sql`).
+2. **Region Alignment (`US`/`EU` vs. Single-Region)**: `AI.GENERATE_TABLE` (Engine A) supports `US`/`EU` multi-regions (`us.vertex_ai_connection`) as well as single regions, whereas `AI.EVALUATE_AGENT` (Engine B) currently requires one of the 14 listed single regions (e.g., `us-central1`). Provision the dataset and Vertex AI connection in matching locations before running DDL.
+3. **Create Dataset First (`CREATE SCHEMA`)**: [`sql/bqaa_adapter_views.sql`](../sql/bqaa_adapter_views.sql) defines views inside `agent_eval` without issuing `CREATE SCHEMA`. On a cold project, create `${DATASET_ID}` first via `bq mk --dataset` (or run `CREATE SCHEMA IF NOT EXISTS agent_eval`).
+
+### 7.1 Step 1 on BigQuery (`0` New Result Tables, No Skill)
+
+Choose **one** compatibility ingestion path (`otel_spans` + `trace_payloads`) before deploying [`sql/step1_trace_views.sql`](../sql/step1_trace_views.sql):
 
 ```bash
-# Option 1 (Light Capture: BQAA agent_events): deploy zero-copy BQAA adapter views
-# (Uncomment Mode A in sql/bqaa_adapter_views.sql if running BQAA standalone without _AllSpans)
-bq query --project_id=YOUR_PROJECT --use_legacy_sql=false < sql/bqaa_adapter_views.sql
+# Step 0: create target dataset in matching location (e.g. US for Engine A, us-central1 for Engine B)
+bq mk --dataset --location=US "${PROJECT_ID}:${DATASET_ID}"
 
-# Option 2 (Demo Seed): populate 800 synthetic traces in isolated dataset agent_eval_seed
-bq query --project_id=YOUR_PROJECT --use_legacy_sql=false < sql/demo_time_shift_loadgen.sql
+# Option 1 — Full Capture (_AllSpans + _AllLogs + BigLake completions):
+#   First replace YOUR_GENAI_PAYLOAD_BUCKET and us.vertex_ai_connection in sql/ddl.sql
+bq query --project_id="${PROJECT_ID}" --use_legacy_sql=false < sql/ddl.sql
 
-# Deploy static Step-1 views
-bq query --project_id=YOUR_PROJECT --use_legacy_sql=false < sql/step1_trace_views.sql
+# Option 2 — Light Capture (BQAA agent_events) or Hybrid Mode C:
+#   First uncomment Mode A (BQAA-only) or Mode C (Hybrid) in sql/bqaa_adapter_views.sql
+#   so agent_eval.otel_spans and agent_eval.trace_payloads exist before Step 1
+bq query --project_id="${PROJECT_ID}" --use_legacy_sql=false < sql/bqaa_adapter_views.sql
+
+# Deploy static Step-1 views over agent_eval.otel_spans + agent_eval.trace_payloads
+bq query --project_id="${PROJECT_ID}" --use_legacy_sql=false < sql/step1_trace_views.sql
+
+# Optional isolated demo seed: populates 800 synthetic traces in `agent_eval_seed` (not `agent_eval`)
+bq query --project_id="${PROJECT_ID}" --use_legacy_sql=false < sql/demo_time_shift_loadgen.sql
 ```
 
 ### 7.2 Step 2 & Step 3 on BigQuery
 
-```bash
-# Step 2: create agent_eval.rubrics, prompt views, and stateless 100% / 10% evaluations
-bq query --project_id=YOUR_PROJECT --use_legacy_sql=false < sql/step2_stateless_eval.sql
+> [!NOTE]
+> Judge execution `SELECT` and scheduled `INSERT` statements in [`sql/step2_stateless_eval.sql`](../sql/step2_stateless_eval.sql), [`sql/step3_saved_results.sql`](../sql/step3_saved_results.sql), and [`sql/step3_daily_quota_guard.sql`](../sql/step3_daily_quota_guard.sql) ship **commented out** so deploying schemas and views remains `$0`. Uncomment the desired block (after setting `${CONNECTION_ID}`) or generate ready-to-run parameterized SQL with `bq-eval judge-sql`.
 
-# Step 3: persist verdicts (Engine A or B), paired run comparisons, and daily token quota guard
-bq query --project_id=YOUR_PROJECT --use_legacy_sql=false < sql/step3_saved_results.sql
-bq query --project_id=YOUR_PROJECT --use_legacy_sql=false < sql/step3_daily_quota_guard.sql
+```bash
+# Step 2: create remote models (update CONNECTION_ID), agent_eval.rubrics, and prompt views
+bq query --project_id="${PROJECT_ID}" --use_legacy_sql=false < sql/step2_stateless_eval.sql
+
+# Step 3: create eval_results, deduplicated run views, paired comparisons, and quota guard tables/views
+bq query --project_id="${PROJECT_ID}" --use_legacy_sql=false < sql/step3_saved_results.sql
+bq query --project_id="${PROJECT_ID}" --use_legacy_sql=false < sql/step3_daily_quota_guard.sql
 ```
 
 ### 7.3 Local CLI Helpers & Verification Suite

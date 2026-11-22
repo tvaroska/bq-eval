@@ -304,6 +304,7 @@ class LiveKycCohortReceipt(BaseModel):
     total_cases: int = Field(..., gt=0)
     structural_step1_rejects: int = Field(..., ge=0)
     po_box_step1_traps_caught: int = Field(..., ge=0)
+    ocr_step1_rejects: int = Field(default=0, ge=0)
     step2_semantic_traps_caught: int = Field(..., ge=0)
     step2_semantic_traps_total: int = Field(..., gt=0)
     held_out_traps_caught: int = Field(..., ge=0)
@@ -376,6 +377,7 @@ class LiveFleetReceipt(BaseModel):
     schema_version: str
     run_id: str
     recorded_date_utc: str
+    summary_provenance: str = "reconstructed_from_bundle_spans"
     labeled_fleet_cases: int = Field(..., gt=0)
     cumulative_closed_outcomes: int = Field(..., gt=0)
     cumulative_allspans_count: int = Field(..., gt=0)

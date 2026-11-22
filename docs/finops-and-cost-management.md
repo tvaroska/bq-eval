@@ -7,7 +7,7 @@ Raw token counts (`input_tokens + output_tokens`) fail to reflect accelerator co
 - **Autoregressive Decoding & Reasoning (`4.0x` / `7.5x`):** Output tokens and internal `<thought>` (`thinking_tokens`) are memory-bandwidth bound during decoding and billed at the output multiplier.
 - **`>200K` Context Cliff:** Spans whose total prompt context (`input_tokens`, inclusive of `cached_input_tokens`) exceeds `200,000` tokens trigger higher attention memory footprint and long-context pricing tiers.
 
-Both [`sql/views.sql`](../sql/views.sql), [`bq_eval/contract/otel.py`](../bq_eval/contract/otel.py), and [`bq_eval/engine/finops.py`](../bq_eval/engine/finops.py) (`compute_span_cost_usd()`) compute weighted burndown and cliff-aware USD cost at the **individual span level** before aggregating to the trace:
+Both [`sql/views.sql`](../sql/views.sql), [`bq_eval/contract/otel.py`](../bq_eval/contract/otel.py) (`compute_weighted_burndown_tokens()`), and [`bq_eval/engine/finops.py`](../bq_eval/engine/finops.py) (`compute_span_cost_usd()`) compute weighted burndown and cliff-aware USD cost at the **individual span level** before aggregating to the trace:
 
 $$
 W_{\text{span}} = \begin{cases}
@@ -47,7 +47,7 @@ $$
 
 Alongside `CPVO`, `compute_eval_finops_roi()` quantifies the **Eval FinOps Savings** of the 3-Tier funnel:
 - **Baseline (`100%` LLM Judge):** Every production trace is evaluated by an LLM judge.
-- **3-Tier Funnel (`bq-eval`):** `100%` of traces run Tier 1 SQL checks at `$0` LLM cost; Tier 2 `AI.GENERATE_TABLE` runs only on `5%`–`10%` deterministic canary + `100%` error/SLA-tail traces.
+- **3-Tier Funnel (`bq-eval`):** `100%` of traces run Tier 1 deterministic `Rule 0` checks at `$0` LLM cost; routine Tier 2 `AI.GENERATE_TABLE` semantic scoring runs on `step1_pass = TRUE` `5%`–`10%` deterministic canary + tool-error/SLA-tail traces, while optional diagnostic mode (`v_step2_all_trace_rubric_prompts` / `include_rule0_failures=True`) inspects `Rule 0` failures separately (excluded from $\hat{\theta}_{\text{RG}}$ via `WHERE rule0_pass = TRUE`).
 
 ---
 
@@ -67,6 +67,6 @@ Model routing should never trade away factual integrity for lower token cost. `c
 
 ## 6. FOCUS 1.2 Two-Pool Chargeback & Off-Peak PT Batch-Eval Water-Filling
 
-For organizations running reserved Provisioned Throughput (`PT` / `GSU` commitments) alongside Pay-As-You-Go (`PAYG`) overflow, `bq_eval.finops` exports hourly weighted burndown directly to the `capacity` planner:
+For organizations running reserved Provisioned Throughput (`PT` / `GSU` commitments) alongside Pay-As-You-Go (`PAYG`) overflow, [`bq_eval/engine/finops.py`](../bq_eval/engine/finops.py) and `v_capacity_hourly_burndown_export` in [`sql/views.sql`](../sql/views.sql) export hourly weighted burndown directly to the `capacity` planner:
 1. **FOCUS 1.2 Two-Pool Attribution (`allocate_focus_two_pool_chargeback`):** Splits `reserved_pt_fixed_cost_usd` into **Utilized PT Cost** (allocated proportional to each app's active weighted burndown) and **Unutilized Idle Capacity Tax** (attributed to the central platform/reservation owner so tenant apps are never penalized for off-peak idle hours), rendered directly in Markdown and HTML executive scorecards.
 2. **Off-Peak PT Water-Filling (`plan_off_peak_eval_schedule`):** Identifies hourly valleys between reserved PT capacity and live production demand, scheduling `agent_gym_eval` and batch `autorater_judge` workloads into zero-marginal-cost idle PT slots.

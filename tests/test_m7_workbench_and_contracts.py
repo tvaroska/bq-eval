@@ -171,6 +171,33 @@ def test_m2_live_receipt_sha256_manifest_and_custom_scenario_replay(
     assert out["corpus_id"] == "custom-scenario"
     assert "order-support-agent" in out["artifacts"]["summaries"]
 
+    m2_artifacts = run_showcase_pipeline(corpus="m2-live")
+    receipt = m2_artifacts.live_receipt
+    assert receipt is not None
+    assert receipt.summary_provenance == "reconstructed_from_bundle_spans"
+    assert receipt.labeled_fleet_cases == 343
+    assert receipt.cumulative_closed_outcomes == 333
+    assert receipt.cumulative_allspans_count == 676
+    assert receipt.kyc_cohort.structural_step1_rejects == 28
+    assert receipt.kyc_cohort.po_box_step1_traps_caught == 8
+    assert receipt.kyc_cohort.ocr_step1_rejects == 8
+    assert sum(m.verified_outcomes for m in receipt.rfp_modalities) == 35
+    assert sum(c.total_traces for c in receipt.attribution_cohorts) == 343
+
+    kyc_sum = m2_artifacts.summaries["kyc-address-verification"]
+    assert kyc_sum.judged_samples == 236
+    assert kyc_sum.outcome_total_count == 280
+    assert kyc_sum.outcome_verified_count == 216
+    assert kyc_sum.outcome_cost_per_verified_usd == pytest.approx(
+        kyc_sum.cost_per_verified_outcome_usd, abs=1e-12
+    )
+
+    from bq_eval.showcase.pipeline import render_markdown_report
+
+    md_report = render_markdown_report(m2_artifacts)
+    assert "## 5. Reconstructed Fleet Cohort Receipts" in md_report
+    assert "reconstructed_from_bundle_spans" in md_report
+
 
 def test_capacity_wire_contract_hourly_burndown_jsonl_and_hourly_focus_chargeback(
     tmp_path: Path,

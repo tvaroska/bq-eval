@@ -5,6 +5,9 @@
 --     native BigQuery table seeded with the 8 canonical rubrics from step2_rubrics.csv)
 --   * 0 Result Tables Required: Static SQL queries run AI.GENERATE_TABLE on
 --     100% of traces or a 10% sample and return verdicts directly in the output
+--   * Two-Mode Rule 0 Routing (ADR-004): Routine semantic scoring reads
+--     `v_step2_trace_rubric_prompts` (`step1_pass = TRUE`) to skip $0 Step-1
+--     rejects; optional diagnostic root-cause sweeps target `v_step2_all_trace_rubric_prompts`.
 -- =============================================================================
 
 -- -----------------------------------------------------------------------------
@@ -243,6 +246,9 @@ WHERE rubric_id = 'groundedness_4pt_v1'
 
 -- =============================================================================
 -- 4. Static SQL Example 2A: Run Stateless Eval on FULL Traces (100%, No Saving)
+--    * Uses `v_step2_trace_rubric_prompts` (`step1_pass = TRUE`) so routine
+--      semantic scoring skips $0 deterministic rejects; switch to
+--      `v_step2_all_trace_rubric_prompts` only for diagnostic error-tail sweeps.
 --    * Commented so deploying this file via `bq query < sql/step2_stateless_eval.sql`
 --      stays $0 and never triggers accidental live Vertex AI billing.
 -- =============================================================================
@@ -271,7 +277,8 @@ WHERE rubric_id = 'groundedness_4pt_v1'
 
 -- =============================================================================
 -- 5. Static SQL Example 2B: Run Stateless Eval on 10% Sample of Traces (No Saving)
---   * Deterministic 10% sample via FARM_FINGERPRINT(trace_id)
+--   * Deterministic 10% sample over `step1_pass = TRUE` via FARM_FINGERPRINT(trace_id)
+--   * Use `v_step2_all_trace_rubric_prompts` only for diagnostic Rule 0 tail inspection
 -- =============================================================================
 -- SELECT
 --   trace_id,

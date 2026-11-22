@@ -33,6 +33,12 @@ CLUSTER BY apphub_application_id, rubric_id, trace_id;
 -- 2A. Idempotent Step-3 Insert Query — Engine A (`AI.GENERATE_TABLE`)
 --     Skips already-scored (eval_run_id, trace_id, rubric_id) triples while
 --     preserving `outcome_id` for EVAL-P11 outcome-level CPVO joins.
+--     * Routine runs read `v_step2_trace_rubric_prompts` (`step1_pass = TRUE`)
+--       to avoid spending judge tokens on $0 deterministic rejects.
+--     * For diagnostic Rule-0 failure inspection, swap to
+--       `v_step2_all_trace_rubric_prompts`; `v_agent_eval_and_finops_summary`
+--       always estimates theta_RG strictly over `WHERE rule0_pass = TRUE`
+--       while billing 100% of judge calls (`ADR-004`).
 -- -----------------------------------------------------------------------------
 -- INSERT INTO `agent_eval.eval_results` (
 --   eval_id, eval_run_id, trace_id, outcome_id, apphub_application_id, rubric_id, judge_model,
@@ -85,6 +91,8 @@ CLUSTER BY apphub_application_id, rubric_id, trace_id;
 --       `metric_row.explanation`.
 --     * Skips rows where `metric_row.score IS NULL` (fail-closed) and derives
 --       `binary_pass` strictly from `ordinal_score >= 3`.
+--     * Routine Engine B scoring reads `v_bqaa_eval_turn_filtered` (`step1_pass
+--       = TRUE` and `NOT has_tool_loop`), matching `ADR-004` $0 pre-filtering.
 --     * Deduplicates on `(eval_run_id, trace_id, metric_row.metric_name)` so
 --       partial-metric backfills persist only missing metrics.
 -- -----------------------------------------------------------------------------

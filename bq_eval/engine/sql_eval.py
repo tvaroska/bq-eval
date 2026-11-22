@@ -81,6 +81,7 @@ def build_ai_generate_table_judge_sql(  # noqa: PLR0913
     canary_sample_pct: int = 5,
     run_id: str | None = None,
     judge_model: str | None = None,
+    include_rule0_failures: bool = True,
 ) -> str:
     """Build production BigQuery `AI.GENERATE_TABLE` SQL query (EVAL-P02, EVAL-P08)."""
     valid_project = _validate_sql_identifier(project_id, "project_id", allow_hyphen=True)
@@ -125,6 +126,28 @@ def build_ai_generate_table_judge_sql(  # noqa: PLR0913
         else ""
     )
     eval_run_col = f"  '{valid_run_id}' AS eval_run_id,\n" if valid_run_id else ""
+    if include_rule0_failures:
+        stratum_condition = (
+            "NOT t.rule0_pass OR t.tool_error_count > 0 OR t.trace_latency_ms > t.sla_latency_ms"
+        )
+        where_clause = (
+            "  WHERE (\n"
+            "    NOT t.rule0_pass\n"
+            "    OR t.tool_error_count > 0\n"
+            "    OR t.trace_latency_ms > t.sla_latency_ms\n"
+            f"    OR MOD(ABS(FARM_FINGERPRINT(t.trace_id)), 100) < {canary_sample_pct}\n"
+            f"  ){run_filter}"
+        )
+    else:
+        stratum_condition = "t.tool_error_count > 0 OR t.trace_latency_ms > t.sla_latency_ms"
+        where_clause = (
+            "  WHERE t.rule0_pass\n"
+            "    AND (\n"
+            "      t.tool_error_count > 0\n"
+            "      OR t.trace_latency_ms > t.sla_latency_ms\n"
+            f"      OR MOD(ABS(FARM_FINGERPRINT(t.trace_id)), 100) < {canary_sample_pct}\n"
+            f"    ){run_filter}"
+        )
 
     return f"""-- Tier 2 Stratified AI.GENERATE_TABLE Judge Execution ({rubric.rubric_id})
 WITH candidate_traces AS (
@@ -134,7 +157,7 @@ WITH candidate_traces AS (
     t.apphub_application_id,
     t.rule0_pass,
     CASE
-      WHEN NOT t.rule0_pass OR t.tool_error_count > 0 OR t.trace_latency_ms > t.sla_latency_ms
+      WHEN {stratum_condition}
         THEN 'ERROR_OR_SLA_TAIL'
       ELSE 'CANARY_{canary_sample_pct}PCT'
     END AS sampling_stratum,
@@ -147,12 +170,7 @@ WITH candidate_traces AS (
   FROM `{valid_project}.{valid_dataset}.v_trace_sql_evaluation` AS t
   LEFT JOIN `{valid_project}.{valid_dataset}.trace_payloads` AS p
     ON t.trace_id = p.trace_id
-  WHERE (
-    NOT t.rule0_pass
-    OR t.tool_error_count > 0
-    OR t.trace_latency_ms > t.sla_latency_ms
-    OR MOD(ABS(FARM_FINGERPRINT(t.trace_id)), 100) < {canary_sample_pct}
-  ){run_filter}
+{where_clause}
 )
 SELECT
   GENERATE_UUID() AS eval_id,

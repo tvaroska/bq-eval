@@ -3,7 +3,7 @@
 ## 1. Upsert a New Rubric Generated from Plain English
 
 ```sql
-MERGE `agent_eval.rubrics` AS target
+MERGE INTO agent_eval.rubrics AS target
 USING (
   SELECT
     'underwriting_clarity_4pt_v1' AS rubric_id,

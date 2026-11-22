@@ -649,7 +649,7 @@ def build_showcase_page_view(
             title="FOCUS 1.2 Two-Pool Provisioned Throughput Chargeback",
             subtitle=(
                 "Separates utilized PT burndown from unutilized idle capacity tax "
-                "(__unallocated_idle_pt_capacity__) and PAYG spillover."
+                "(platform-shared-reservation) and PAYG spillover."
             ),
             table=TableView(
                 columns=(

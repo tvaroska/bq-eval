@@ -44,7 +44,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     demo_p = sub.add_parser(
         "demo",
-        help="Replay verified receipts or offline corpora in the SQLite twin and emit scorecards.",
+        help="Replay reconstructed fleet receipts or offline corpora in the SQLite twin and emit scorecards.",
     )
     demo_p.add_argument(
         "--corpus",

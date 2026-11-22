@@ -11,6 +11,7 @@ from typing import Any, Literal
 from bq_eval.contract.otel import FinOpsTrafficType, GenAISpanKind, OTelGenAISpanRecord
 from bq_eval.contract.results import (
     ConfusionMatrix,
+    LiveFleetReceipt,
     ModelOption,
     ParetoEvalResult,
     ScenarioCorpusBundle,
@@ -473,10 +474,13 @@ def format_demo_json(artifacts: ShowcaseRunArtifacts) -> str:
     if artifacts.live_receipt is not None:
         lr = artifacts.live_receipt
         kyc_sum = artifacts.summaries.get("kyc-address-verification")
+        kpi_table["summary_provenance"] = lr.summary_provenance
         kpi_table["live_kyc_280_cases"] = {
             "total_cases": lr.kyc_cohort.total_cases,
             "structural_step1_rejects": lr.kyc_cohort.structural_step1_rejects,
             "po_box_step1_traps_caught": lr.kyc_cohort.po_box_step1_traps_caught,
+            "ocr_step1_rejects": lr.kyc_cohort.ocr_step1_rejects,
+            "judged_rows": kyc_sum.judged_samples if kyc_sum is not None else None,
             "step2_semantic_traps_caught": lr.kyc_cohort.step2_semantic_traps_caught,
             "step2_semantic_traps_total": lr.kyc_cohort.step2_semantic_traps_total,
             "trap_recall": lr.kyc_cohort.trap_recall,
@@ -542,6 +546,38 @@ def format_demo_json(artifacts: ShowcaseRunArtifacts) -> str:
     return json.dumps(payload, indent=2, sort_keys=True)
 
 
+def _render_live_receipt_markdown(receipt: LiveFleetReceipt) -> str:
+    kyc = receipt.kyc_cohort
+    step1_total = (
+        kyc.structural_step1_rejects + kyc.po_box_step1_traps_caught + kyc.ocr_step1_rejects
+    )
+    rfp_parts = "; ".join(
+        f"`{m.source_mode}` (`{m.verified_outcomes}` outcomes, AI `${m.ai_cost_per_verified_outcome_usd:.5f}`/outcome, total `${m.total_cost_per_verified_outcome_usd:.5f}`/outcome)"
+        for m in receipt.rfp_modalities
+    )
+    sl = receipt.skill_lineage
+    attr_parts = "; ".join(
+        f"`{c.apphub_application_id}` (`{c.attributed_traces}/{c.total_traces}` attributed, `${c.attributed_spend_usd + c.unattributed_spend_usd:.5f}`, `{c.attribution_coverage_pct:.1f}%`)"
+        for c in receipt.attribution_cohorts
+    )
+    return (
+        f"\n## 5. Reconstructed Fleet Cohort Receipts (`{receipt.run_id}`)\n\n"
+        f"- **Provenance & Scope:** `{receipt.summary_provenance}` (`{receipt.labeled_fleet_cases}` labeled cases, "
+        f"`{receipt.cumulative_closed_outcomes}` closed outcomes, `{receipt.cumulative_allspans_count}` spans; "
+        f"lag p50 `{receipt.allspans_ingestion_lag_p50_ms:.0f} ms`, p95 `{receipt.allspans_ingestion_lag_p95_ms:,.0f} ms`)\n"
+        f"- **KYC Funnel (`{kyc.total_cases}` cases):** `{kyc.structural_step1_rejects}` structural + "
+        f"`{kyc.po_box_step1_traps_caught}` PO Box + `{kyc.ocr_step1_rejects}` OCR = `{step1_total}` `$0` Step-1 rejects; "
+        f"`{kyc.step2_semantic_traps_caught}/{kyc.step2_semantic_traps_total}` Step-2 traps caught "
+        f"(`{kyc.trap_recall * 100:.1f}%`, `{kyc.false_positives}/{kyc.clean_cases_evaluated}` false positives, "
+        f"`{kyc.flash_argon_binary_agreed}/{kyc.argon_calibration_pairs}` Flash-vs-Argon)\n"
+        f"- **Benefits RFP Modalities:** {rfp_parts}\n"
+        f"- **Skill Lineage (`{sl.skill_id}`):** `{sl.day1_version}` (`${sl.day1_cpvo_usd:.5f}`/outcome) -> "
+        f"`{sl.day2_version}` (`${sl.day2_cpvo_usd:.6f}`/outcome, `{sl.cpvo_reduction_pct:.1f}%` CPVO reduction; "
+        f"human reviews `{sl.day1_human_reviews_per_outcome:.2f}` -> `{sl.day2_human_reviews_per_outcome:.2f}`/outcome)\n"
+        f"- **Attribution Cohorts:** {attr_parts}\n"
+    )
+
+
 def render_markdown_report(artifacts: ShowcaseRunArtifacts) -> str:
     """Format a concise Markdown executive scorecard dynamically over `artifacts.summaries` (`F7`)."""
     summary_lines = "\n".join(
@@ -581,6 +617,12 @@ def render_markdown_report(artifacts: ShowcaseRunArtifacts) -> str:
         for row in artifacts.focus_chargeback
     )
 
+    live_section = (
+        _render_live_receipt_markdown(artifacts.live_receipt)
+        if artifacts.live_receipt is not None
+        else ""
+    )
+
     return f"""# BQ Eval & FinOps Executive Scorecard (`bq-eval`, Corpus `{artifacts.corpus_id}`)
 
 ## 1. Tier 1-3 Application Quality & Cost per Verified Outcome (`CPVO`)
@@ -610,4 +652,4 @@ def render_markdown_report(artifacts: ShowcaseRunArtifacts) -> str:
 {focus_lines}
 
 - **Off-Peak PT Batch-Eval Coverage:** `{artifacts.off_peak_plan.zero_marginal_cost_coverage_pct:.1f}%` of `{artifacts.off_peak_plan.total_batch_eval_tokens_requested:,.0f}` batch eval tokens scheduled into zero-marginal-cost PT valleys (saving `${artifacts.off_peak_plan.avoided_payg_cost_usd:.2f}`).
-"""
+{live_section}"""

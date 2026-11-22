@@ -227,9 +227,11 @@ GROUP BY trace_id;
 -- 3. Step-1 Pre-Filtered Turn View for Engine B (`AI.EVALUATE_AGENT`)
 --   * Self-contained over `v_bqaa_otel_spans` so fresh Light Capture projects
 --     deploy `bqaa_adapter_views.sql` in one pass before `step1_trace_views.sql`.
---   * Filters BQAA's `{table}_eval_turn` (`AgentData` JSON `trace` column) through
---     Step-1 deterministic SQL gates (`step1_pass = TRUE` and `NOT has_tool_loop`)
---     before invoking `AI.EVALUATE_AGENT`.
+--   * Matches ADR-004 routine Step-2 semantics (`step1_pass = TRUE` and
+--     `NOT has_tool_loop`) over BQAA's `{table}_eval_turn` (`AgentData` JSON)
+--     to skip $0 deterministic rejects before invoking `AI.EVALUATE_AGENT`.
+--   * Any optional diagnostic tail runs billed as `autorater_judge_usd` are still
+--     excluded from calibrated theta_RG via `WHERE rule0_pass = TRUE`.
 -- -----------------------------------------------------------------------------
 CREATE OR REPLACE VIEW `agent_eval.v_bqaa_eval_turn_filtered` AS
 WITH bqaa_span_costs AS (

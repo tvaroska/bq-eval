@@ -1,0 +1,65 @@
+{
+  "checked": 56,
+  "generated_statements": [
+    "build_ai_generate_table_judge_sql",
+    "build_ai_evaluate_agent_sql"
+  ],
+  "live_bq_dry_run_executed": false,
+  "mode": "offline_sqlglot_manifest",
+  "per_file": {
+    "bqaa_adapter_views.sql": {
+      "checked": 3,
+      "skipped": 0,
+      "total": 3
+    },
+    "ddl.sql": {
+      "checked": 13,
+      "skipped": 8,
+      "total": 21
+    },
+    "demo_docubridge_extensions.sql": {
+      "checked": 4,
+      "skipped": 0,
+      "total": 4
+    },
+    "demo_time_shift_loadgen.sql": {
+      "checked": 6,
+      "skipped": 1,
+      "total": 7
+    },
+    "step1_trace_views.sql": {
+      "checked": 9,
+      "skipped": 1,
+      "total": 10
+    },
+    "step2_stateless_eval.sql": {
+      "checked": 7,
+      "skipped": 2,
+      "total": 9
+    },
+    "step3_daily_quota_guard.sql": {
+      "checked": 3,
+      "skipped": 0,
+      "total": 3
+    },
+    "step3_saved_results.sql": {
+      "checked": 3,
+      "skipped": 0,
+      "total": 3
+    },
+    "views.sql": {
+      "checked": 6,
+      "skipped": 0,
+      "total": 6
+    }
+  },
+  "project_id": "showcase-project",
+  "schema_version": "1.0",
+  "skip_prefixes": [
+    "CREATE SCHEMA",
+    "CREATE EXTERNAL TABLE",
+    "CREATE MODEL",
+    "ALTER TABLE"
+  ],
+  "skipped": 12
+}

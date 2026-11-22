@@ -83,6 +83,10 @@ CROSS JOIN today_usage AS usage;
 --      (manualSchedule / disableAutoScheduling=true at rest; enable for live)
 --    * Intentionally deduplicates on (trace_id, rubric_id) so the same
 --      production trace is scored at most once by scheduled daily ticks
+--    * Sources `v_step2_trace_rubric_prompts` (`step1_pass = TRUE`) so routine
+--      daily ticks skip $0 Step-1 rejects (swap to `v_step2_all_trace_rubric_prompts`
+--      only for diagnostic tail sweeps; `v_agent_eval_and_finops_summary` filters
+--      `rule0_pass = TRUE` when estimating theta_RG while billing 100% of judge runs)
 --    * Bounds each run's candidate batch via cumulative estimated prompt tokens
 --      <= `tokens_remaining_today` so a single batch cannot overrun the daily cap
 -- -----------------------------------------------------------------------------

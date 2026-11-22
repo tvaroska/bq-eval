@@ -8,32 +8,161 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
+from bq_eval.contract.otel import OTelGenAISpanRecord
+from bq_eval.contract.results import LiveFleetReceipt, ScenarioCorpusBundle, ShowcaseRunArtifacts
 from bq_eval.contract.rubrics import CANONICAL_RUBRICS
-from bq_eval.showcase.pipeline import format_demo_json, run_showcase_pipeline
+from bq_eval.engine.finops import compute_span_cost_usd
+from bq_eval.showcase.pipeline import (
+    format_demo_json,
+    load_m2_live_bundle,
+    run_showcase_pipeline,
+)
+from scripts import bq_dry_run
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
-def test_readme_kpi_rows_match_demo_json_and_offline_twin() -> None:
-    """`bq-eval demo --format json` deterministically reproduces the `README.md` KPI table (`M7-2`, `F19`)."""
-    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
-    artifacts = run_showcase_pipeline(corpus="m2-live")
-    parsed = json.loads(format_demo_json(artifacts))
-    kpi = parsed["kpi_table"]
+def _assert_kyc_receipt_from_spans(
+    bundle: ScenarioCorpusBundle,
+    lr: LiveFleetReceipt,
+    artifacts: ShowcaseRunArtifacts,
+) -> None:
+    """Recompute KYC Step-1/Step-2 counts and judged row count directly from spans."""
+    kyc_roots = [
+        s
+        for s in bundle.spans
+        if s.resolved_application_id == "kyc-address-verification"
+        and s.span_name != "outcome.closed"
+    ]
+    assert lr.kyc_cohort.total_cases == len(kyc_roots) == 280
+    assert lr.kyc_cohort.structural_step1_rejects == sum(
+        1 for s in kyc_roots if s.attributes.get("step1.reject_reason") == "structural"
+    )
+    assert lr.kyc_cohort.po_box_step1_traps_caught == sum(
+        1 for s in kyc_roots if s.attributes.get("step1.reject_reason") == "po_box"
+    )
+    assert lr.kyc_cohort.ocr_step1_rejects == sum(
+        1 for s in kyc_roots if s.attributes.get("step1.reject_reason") == "ocr_reject"
+    )
+    trap_spans = [s for s in kyc_roots if s.attributes.get("kyc.case_type") == "step2_trap"]
+    clean_spans = [s for s in kyc_roots if s.attributes.get("kyc.case_type") == "clean"]
+    assert lr.kyc_cohort.step2_semantic_traps_total == len(trap_spans)
+    assert lr.kyc_cohort.step2_semantic_traps_caught == sum(
+        1 for s in trap_spans if bundle.judge_outcomes.get(s.trace_id) is False
+    )
+    assert lr.kyc_cohort.clean_cases_evaluated == len(clean_spans)
+    assert lr.kyc_cohort.false_positives == sum(
+        1 for s in clean_spans if bundle.judge_outcomes.get(s.trace_id) is False
+    )
+    rule0_judged = sum(1 for s in kyc_roots if s.rule0_pass and s.trace_id in bundle.judge_outcomes)
+    assert rule0_judged == artifacts.summaries["kyc-address-verification"].judged_samples == 236
 
+
+def _assert_live_receipt_recomputes_from_spans(
+    bundle: ScenarioCorpusBundle,
+    lr: LiveFleetReceipt,
+    artifacts: ShowcaseRunArtifacts,
+) -> None:
+    """Recompute KYC, RFP, Skill, and attribution metrics directly from bundle spans (`M8-2`)."""
+    assert lr.summary_provenance == "reconstructed_from_bundle_spans"
+    assert lr.labeled_fleet_cases == len({s.trace_id for s in bundle.spans}) == 343
+    assert lr.cumulative_allspans_count == len(bundle.spans) == 676
+
+    closed_spans = [
+        s for s in bundle.spans if s.span_name == "outcome.closed" and s.outcome_id is not None
+    ]
+    assert lr.cumulative_closed_outcomes == len(closed_spans) == 333
+    verified_outcome_ids = {
+        s.outcome_id
+        for s in closed_spans
+        if s.outcome_id is not None
+        and s.attributes.get("outcome.status") == "succeeded"
+        and s.attributes.get("outcome.verified") == "true"
+    }
+
+    _assert_kyc_receipt_from_spans(bundle, lr, artifacts)
+
+    rfp_roots = [
+        s
+        for s in bundle.spans
+        if s.resolved_application_id == "benefits-rfp-procurement"
+        and s.span_name != "outcome.closed"
+    ]
+    for modality in lr.rfp_modalities:
+        mode_spans = [s for s in rfp_roots if s.source_mode == modality.source_mode]
+        verified = sum(1 for s in mode_spans if s.outcome_id in verified_outcome_ids)
+        assert verified == modality.verified_outcomes
+        assert sum(s.input_tokens for s in mode_spans) == modality.input_tokens
+        assert sum(s.output_tokens for s in mode_spans) == modality.output_tokens
+        ai_cpvo = round(sum(compute_span_cost_usd(s) for s in mode_spans) / verified, 6)
+        assert ai_cpvo == modality.ai_cost_per_verified_outcome_usd
+
+    mer_roots = [
+        s
+        for s in bundle.spans
+        if s.resolved_application_id == "meridian-loan-consolidation"
+        and s.span_name != "outcome.closed"
+    ]
+    day1_spans = [s for s in mer_roots if s.skill_version == lr.skill_lineage.day1_version]
+    day2_spans = [s for s in mer_roots if s.skill_version == lr.skill_lineage.day2_version]
+    day1_ver = sum(1 for s in day1_spans if s.outcome_id in verified_outcome_ids)
+    day2_ver = sum(1 for s in day2_spans if s.outcome_id in verified_outcome_ids)
+    day1_cpvo = sum(compute_span_cost_usd(s) for s in day1_spans) / day1_ver
+    day2_cpvo = sum(compute_span_cost_usd(s) for s in day2_spans) / day2_ver
+    assert round(day1_cpvo, 6) == lr.skill_lineage.day1_cpvo_usd
+    assert round(day2_cpvo, 6) == lr.skill_lineage.day2_cpvo_usd
+    assert round((1.0 - day2_cpvo / day1_cpvo) * 100.0, 1) == lr.skill_lineage.cpvo_reduction_pct
+    assert lr.skill_lineage.day2_in_policy_auto_approved == sum(
+        1
+        for s in day2_spans
+        if s.attributes.get("policy.in_policy") == "true"
+        and s.attributes.get("hitl.review") != "true"
+    )
+    assert lr.skill_lineage.day2_out_of_policy_escalated == sum(
+        1
+        for s in day2_spans
+        if s.attributes.get("policy.in_policy") != "true"
+        and s.attributes.get("hitl.review") == "true"
+    )
+
+    by_app: dict[str, list[OTelGenAISpanRecord]] = {}
+    for s in bundle.spans:
+        if s.span_name != "outcome.closed":
+            by_app.setdefault(s.resolved_application_id, []).append(s)
+    cohort_by_app = {c.apphub_application_id: c for c in lr.attribution_cohorts}
+    assert set(cohort_by_app) == set(by_app)
+    for app_id, cohort in cohort_by_app.items():
+        app_spans = by_app[app_id]
+        total_traces = len({s.trace_id for s in app_spans})
+        total_spend = round(sum(compute_span_cost_usd(s) for s in app_spans), 6)
+        assert cohort.total_traces == total_traces
+        if app_id == "unregistered_app":
+            assert cohort.attributed_traces == 0
+            assert cohort.unattributed_spend_usd == total_spend
+            assert cohort.attribution_coverage_pct == 0.0
+        else:
+            assert cohort.attributed_traces == total_traces
+            assert cohort.attributed_spend_usd == total_spend
+            assert cohort.attribution_coverage_pct == 100.0
+
+
+def _assert_readme_matches_kpis(readme: str, parsed: dict[str, Any]) -> None:
+    kpi = parsed["kpi_table"]
+    summaries = parsed["artifacts"]["summaries"]
     twin_order = kpi["offline_twin_50_traces"]["order_support_agent"]
     cal_pct = f"{twin_order['calibrated_pass_rate'] * 100:.1f}%"
     ci_low = f"{twin_order['calibrated_ci_95'][0] * 100:.1f}%"
     ci_high = f"{twin_order['calibrated_ci_95'][1] * 100:.0f}%"
     cpvo = f"${twin_order['cost_per_verified_outcome_usd']:.4f}"
     savings = f"{kpi['offline_twin_50_traces']['judge_spend_savings_pct']:.1f}%"
-
     assert f"`{cal_pct}` calibrated `[{ci_low}, {ci_high}]`" in readme
     assert f"`{cpvo}`/outcome" in readme
     assert f"`{savings}`" in readme
 
     kyc = kpi["live_kyc_280_cases"]
+    kyc_cpvo = f"${summaries['kyc-address-verification']['outcome_cost_per_verified_usd']:.4f}"
     assert (
         f"`{kyc['structural_step1_rejects']}/{kyc['structural_step1_rejects']}` structural"
         in readme
@@ -41,19 +170,65 @@ def test_readme_kpi_rows_match_demo_json_and_offline_twin() -> None:
     assert (
         f"`{kyc['po_box_step1_traps_caught']}/{kyc['po_box_step1_traps_caught']}` PO Box" in readme
     )
+    assert f"`{kyc['ocr_step1_rejects']}` OCR" in readme
+    assert f"`{kyc['judged_rows']}` Rule-0 passing" in readme
     assert f"`AC2 = {kyc['gwet_ac2']:.4f}`" in readme
     assert f"calibrated `{kyc['calibrated_pass_rate'] * 100:.2f}%`" in readme
+    assert f"`{kyc_cpvo}`/outcome" in readme
 
     rfp = kpi["live_rfp_cliff_35_cases"]
     assert f"`${rfp['PDF_PATH_B_FLASH']['ai_cost_per_verified_outcome_usd']:.5f}` AI" in readme
     assert f"`${rfp['PDF_PATH_B_ARGON']['ai_cost_per_verified_outcome_usd']:.4f}` AI" in readme
 
     skill = kpi["live_skill_18_cases_and_shadow_10"]
-    assert f"`${skill['day1_cpvo_usd']:.5f}` to `${skill['day2_cpvo_usd']:.6f}`/outcome" in readme
+    assert f"`${skill['day1_cpvo_usd']:.5f}` AI/outcome" in readme
+    assert f"`${skill['day2_cpvo_usd']:.6f}` AI/outcome" in readme
     assert f"`{skill['cpvo_reduction_pct']:.1f}%` drop" in readme
 
-    assert "uv sync --extra dev" in readme
-    assert "rfp_quote_accuracy_4pt_v1" not in readme
+
+def test_readme_kpi_rows_match_demo_json_and_offline_twin() -> None:
+    """`bq-eval demo --format json` & bundle spans reproduce `README.md` and dry-run receipt (`M8-1`, `M8-2`, `M8-4`)."""
+    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    bundle = load_m2_live_bundle()
+    assert bundle.live_receipt is not None
+    artifacts = run_showcase_pipeline(corpus="m2-live")
+    _assert_live_receipt_recomputes_from_spans(bundle, bundle.live_receipt, artifacts)
+
+    parsed = json.loads(format_demo_json(artifacts))
+    summaries = parsed["artifacts"]["summaries"]
+    for registered_app in (
+        "kyc-address-verification",
+        "benefits-rfp-procurement",
+        "meridian-loan-consolidation",
+    ):
+        assert summaries[registered_app]["outcome_verified_count"] > 0
+        assert summaries[registered_app]["outcome_cost_per_verified_usd"] is not None
+    assert summaries["unregistered_app"]["outcome_verified_count"] == 0
+    assert summaries["unregistered_app"]["outcome_cost_per_verified_usd"] is None
+
+    _assert_readme_matches_kpis(readme, parsed)
+
+    dry_run_receipt = json.loads(
+        (REPO_ROOT / "benchmarks" / "results" / "bq_dry_run_receipt.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    manifest = bq_dry_run.collect_dry_run_manifest(project_id="showcase-project")
+    assert dry_run_receipt == manifest
+    assert manifest["checked"] == 56
+    assert manifest["skipped"] == 12
+    assert "`56`" in readme
+
+    for token in (
+        "uv sync --extra dev",
+        "bq_eval.cli serve",
+        "bq_eval.cli judge-sql",
+        "bq_eval.cli loadgen",
+        "BigQueryAgentAnalyticsPlugin",
+    ):
+        assert token in readme
+    for stale in ("rfp_quote_accuracy_4pt_v1", "51/51", "0.0 mocks"):
+        assert stale not in readme
 
 
 def test_rubric_count_and_names_match_docs_csv_and_code() -> None:
