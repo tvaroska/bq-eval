@@ -334,29 +334,18 @@ def _find_graph_cycles(deps: dict[str, set[str]]) -> list[str]:
 
 
 def _extract_mode_c_views(bqaa_sql: str) -> dict[str, set[str]]:
-    mode_c_marker = "-- Mode C:"
-    assert mode_c_marker in bqaa_sql
-    lines: list[str] = []
-    started = False
-    for line in bqaa_sql.split(mode_c_marker, 1)[1].splitlines():
-        stripped = line.strip()
-        candidate = (
-            stripped[3:] if stripped.startswith("-- ") else ("" if stripped == "--" else stripped)
-        )
-        if not started and not candidate.strip().upper().startswith("CREATE "):
-            continue
-        started = True
-        lines.append(candidate)
-    mode_c_stmts = _parse_bigquery_statements("\n".join(lines), "bqaa_adapter_views.sql Mode C")
+    stmts = _parse_bigquery_statements(bqaa_sql, "bqaa_adapter_views.sql")
     return {
         stmt.this.sql(dialect="bigquery").replace("`", "").strip(): _referenced_tables(stmt)
-        for stmt in mode_c_stmts
-        if isinstance(stmt, exp.Create) and (stmt.args.get("kind") or "").upper() == "VIEW"
+        for stmt in stmts
+        if isinstance(stmt, exp.Create)
+        and (stmt.args.get("kind") or "").upper() == "VIEW"
+        and "v_mode_" in stmt.this.sql(dialect="bigquery")
     }
 
 
 def test_view_dependency_dag_is_acyclic_and_light_capture_deployable() -> None:
-    """View graph has zero cycles, Light Capture deploys in one pass, and Mode C is acyclic."""
+    """View graph has zero cycles, Light Capture deploys in one pass, and live Mode A/C views are acyclic."""
     views = _extract_view_definitions()
     view_names = set(views)
     deps = {
@@ -377,13 +366,18 @@ def test_view_dependency_dag_is_acyclic_and_light_capture_deployable() -> None:
             "creating a deployment cycle on fresh Light Capture projects"
         )
 
-    mode_c_views = _extract_mode_c_views(bqaa_sql)
-    assert "agent_eval.otel_spans" in mode_c_views
-    assert "agent_eval.trace_payloads" in mode_c_views
-    for vname, refs in mode_c_views.items():
-        assert vname not in refs, f"Mode C view {vname} directly references itself"
-        mutual = [t for t in refs if t in mode_c_views and vname in mode_c_views[t]]
-        assert not mutual, f"Mode C circular view cycle: {vname} <-> {mutual}"
+    mode_views = _extract_mode_c_views(bqaa_sql)
+    for expected_view in (
+        "agent_eval.v_mode_a_otel_spans",
+        "agent_eval.v_mode_a_trace_payloads",
+        "agent_eval.v_mode_c_hybrid_otel_spans",
+        "agent_eval.v_mode_c_hybrid_trace_payloads",
+    ):
+        assert expected_view in mode_views
+    for vname, refs in mode_views.items():
+        assert vname not in refs, f"Mode view {vname} directly references itself"
+        mutual = [t for t in refs if t in mode_views and vname in mode_views[t]]
+        assert not mutual, f"Mode circular view cycle: {vname} <-> {mutual}"
 
 
 def test_bqaa_sql_adapter_matches_python_custom_metadata_and_outcome_closed() -> None:
@@ -568,6 +562,24 @@ def _sqlite_timestamp_sub_ms(ts: str | None, ms: float | int | None) -> str | No
     return (dt - timedelta(milliseconds=delta_ms)).isoformat()
 
 
+def _sqlite_unix_seconds(ts: str | None) -> int | None:
+    if ts is None:
+        return None
+    return int(datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp())
+
+
+def _sqlite_timestamp_seconds(sec: int | float | None) -> str | None:
+    if sec is None:
+        return None
+    return datetime.fromtimestamp(int(sec), tz=UTC).isoformat()
+
+
+def _sqlite_int_div(num: int | float | None, den: int | float | None) -> int | None:
+    if num is None or den is None or den == 0:
+        return None
+    return int(num) // int(den)
+
+
 def _sqlite_regexp_contains(value: str | None, pattern: str | None) -> int:
     if value is None or pattern is None:
         return 0
@@ -703,6 +715,9 @@ def _new_sqlite_bq_conn(current_date_utc: str = "2026-11-21") -> sqlite3.Connect
     conn.create_function("CEIL", 1, math.ceil)
     conn.create_function("TIMESTAMP_DIFF_MS", 2, _sqlite_timestamp_diff_ms)
     conn.create_function("BQ_TIMESTAMP_SUB_MS", 2, _sqlite_timestamp_sub_ms)
+    conn.create_function("BQ_UNIX_SECONDS", 1, _sqlite_unix_seconds)
+    conn.create_function("BQ_TIMESTAMP_SECONDS", 1, _sqlite_timestamp_seconds)
+    conn.create_function("BQ_INT_DIV", 2, _sqlite_int_div)
     conn.create_function("FORMAT_TIMESTAMP", 2, _sqlite_format_timestamp)
     conn.create_function("BQ_TIMESTAMP_TRUNC_HOUR", 1, _sqlite_timestamp_trunc_hour)
     conn.create_function("BQ_CURRENT_DATE", 0, lambda: current_date_utc)
@@ -819,6 +834,15 @@ def _rewrite_bq_temporal(node: exp.Expr) -> exp.Expr | None:
             this="FORMAT_TIMESTAMP",
             expressions=[node.args["format"].copy(), node.this.copy()],
         )
+    elif isinstance(node, exp.UnixToTime):
+        rewritten = exp.Anonymous(this="BQ_TIMESTAMP_SECONDS", expressions=[node.this.copy()])
+    elif isinstance(node, (exp.TimeToUnix, exp.UnixSeconds)):
+        rewritten = exp.Anonymous(this="BQ_UNIX_SECONDS", expressions=[node.this.copy()])
+    elif isinstance(node, exp.IntDiv):
+        rewritten = exp.Anonymous(
+            this="BQ_INT_DIV",
+            expressions=[node.this.copy(), node.expression.copy()],
+        )
     return rewritten
 
 
@@ -885,6 +909,21 @@ def _rewrite_bq_node_for_sqlite(node: exp.Expr) -> exp.Expr:  # noqa: C901, PLR0
                 this="BQ_STARTS_WITH",
                 expressions=[e.copy() for e in node.expressions],
             )
+        elif upper_name == "UNIX_SECONDS":
+            result = exp.Anonymous(
+                this="BQ_UNIX_SECONDS",
+                expressions=[e.copy() for e in node.expressions],
+            )
+        elif upper_name == "TIMESTAMP_SECONDS":
+            result = exp.Anonymous(
+                this="BQ_TIMESTAMP_SECONDS",
+                expressions=[e.copy() for e in node.expressions],
+            )
+        elif upper_name == "DIV":
+            result = exp.Anonymous(
+                this="BQ_INT_DIV",
+                expressions=[e.copy() for e in node.expressions],
+            )
         else:
             cls = _SQLITE_AGG_MAP.get(upper_name)
             if cls is not None:
@@ -902,10 +941,10 @@ def _transpile_bq_view_to_sqlite(view_sql: str) -> str:
     ).rstrip(";")
     body = body.replace("`agent_eval.", "`").replace("agent_eval.", "")
     ast_node = sqlglot.parse_one(body, read="bigquery")
-    # Run transform twice so inner CTE nodes rewrite before outer QUALIFY wraps them.
-    rewritten = ast_node.transform(_rewrite_bq_node_for_sqlite).transform(
-        _rewrite_bq_node_for_sqlite
-    )
+    # Run transform until fixed point so nested temporal/QUALIFY rewrites all resolve cleanly.
+    rewritten = ast_node
+    for _ in range(4):
+        rewritten = rewritten.transform(_rewrite_bq_node_for_sqlite)
     return rewritten.sql(dialect="sqlite")
 
 
@@ -1110,6 +1149,86 @@ def test_multi_key_outcome_fanout_exact_1x_infra_and_judge_cost() -> None:
     conn.close()
 
 
+ENTERPRISE_OTEL_SPANS_BASE_INSERT = (
+    "INSERT INTO otel_spans ("
+    "trace_id, span_id, parent_span_id, span_name, gcp_apphub_application_id, "
+    "service_name, agent_name, otel_span_kind, span_kind, model_name, "
+    "tool_name, tool_call_status, status_code, rule0_pass, finops_traffic_type, "
+    "outcome_id, outcome_owner, source_mode, skill_id, skill_version, entity_id, "
+    "start_time, end_time, receive_time, latency_ms, input_tokens, cached_input_tokens, "
+    "output_tokens, thinking_tokens, attributes"
+    ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+)
+
+ENTERPRISE_EVAL_RESULTS_BASE_INSERT = (
+    "INSERT INTO eval_results ("
+    "eval_id, eval_run_id, trace_id, outcome_id, apphub_application_id, "
+    "rubric_id, judge_model, sampling_stratum, rule0_pass, reasoning_trace, "
+    "ordinal_score, binary_pass, judge_input_tokens, judge_output_tokens, "
+    "judge_thinking_tokens, evaluated_at"
+    ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+)
+
+
+def insert_enterprise_sqlite_span(conn: sqlite3.Connection, span: OTelGenAISpanRecord) -> None:
+    """Insert a full 39-column `OTelGenAISpanRecord` into the transpiled SQLite fixture."""
+    conn.execute(
+        "INSERT INTO otel_spans ("
+        "trace_id, span_id, parent_span_id, span_name, gcp_apphub_application_id, "
+        "gcp_apphub_service_id, gcp_apphub_workload_id, service_name, agent_name, "
+        "otel_span_kind, span_kind, model_name, tool_name, tool_call_status, status_code, "
+        "rule0_pass, finops_traffic_type, outcome_id, outcome_owner, source_mode, skill_id, "
+        "skill_version, entity_id, start_time, end_time, receive_time, latency_ms, "
+        "input_tokens, cached_input_tokens, output_tokens, thinking_tokens, "
+        "serving_traffic_type, request_type_header, http_status_code, "
+        "cache_write_5m_tokens, cache_write_1h_tokens, session_id, turn_index, attributes"
+        ") VALUES ("
+        "?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?"
+        ")",
+        (
+            span.trace_id,
+            span.span_id,
+            span.parent_span_id,
+            span.span_name,
+            span.gcp_apphub_application_id,
+            span.gcp_apphub_service_id,
+            span.gcp_apphub_workload_id,
+            span.service_name,
+            span.agent_name,
+            span.otel_span_kind,
+            str(span.span_kind),
+            span.model_name,
+            span.tool_name,
+            span.tool_call_status,
+            span.status_code,
+            1 if span.rule0_pass else 0,
+            str(span.finops_traffic_type),
+            span.outcome_id,
+            span.outcome_owner,
+            span.source_mode,
+            span.skill_id,
+            span.skill_version,
+            span.entity_id,
+            span.start_time.isoformat(),
+            span.end_time.isoformat(),
+            (span.receive_time or span.end_time).isoformat(),
+            span.latency_ms,
+            span.input_tokens,
+            span.cached_input_tokens,
+            span.output_tokens,
+            span.thinking_tokens,
+            str(span.serving_traffic_type),
+            span.request_type_header,
+            span.http_status_code,
+            span.cache_write_5m_tokens,
+            span.cache_write_1h_tokens,
+            span.session_id,
+            span.turn_index,
+            json.dumps(span.attributes),
+        ),
+    )
+
+
 def _create_enterprise_sqlite_fixture(conn: sqlite3.Connection) -> None:
     """Create base tables required to execute transpiled `sql/views.sql` and `sql/step1_trace_views.sql`."""
     conn.executescript(
@@ -1120,6 +1239,8 @@ def _create_enterprise_sqlite_fixture(conn: sqlite3.Connection) -> None:
             parent_span_id TEXT,
             span_name TEXT,
             gcp_apphub_application_id TEXT,
+            gcp_apphub_service_id TEXT DEFAULT NULL,
+            gcp_apphub_workload_id TEXT DEFAULT NULL,
             service_name TEXT,
             agent_name TEXT,
             otel_span_kind TEXT,
@@ -1144,14 +1265,25 @@ def _create_enterprise_sqlite_fixture(conn: sqlite3.Connection) -> None:
             cached_input_tokens INTEGER,
             output_tokens INTEGER,
             thinking_tokens INTEGER,
+            serving_traffic_type TEXT DEFAULT 'STANDARD',
+            request_type_header TEXT DEFAULT NULL,
+            http_status_code INTEGER DEFAULT NULL,
+            cache_write_5m_tokens INTEGER DEFAULT 0,
+            cache_write_1h_tokens INTEGER DEFAULT 0,
+            session_id TEXT DEFAULT NULL,
+            turn_index INTEGER DEFAULT NULL,
             attributes TEXT
         );
         CREATE TABLE model_pricing_catalog (
             model_name TEXT,
+            provider TEXT DEFAULT 'google',
+            lifecycle_track TEXT DEFAULT 'long_term_ga',
             effective_start TEXT,
             effective_end TEXT,
             input_usd_per_1m REAL,
             cached_input_usd_per_1m REAL,
+            cache_write_5m_usd_per_1m REAL,
+            cache_write_1h_usd_per_1m REAL,
             output_usd_per_1m REAL,
             long_context_threshold_tokens INTEGER,
             long_context_input_usd_per_1m REAL,
@@ -1159,10 +1291,14 @@ def _create_enterprise_sqlite_fixture(conn: sqlite3.Connection) -> None:
             long_context_output_usd_per_1m REAL,
             burndown_uncached_weight REAL,
             burndown_cached_weight REAL,
+            burndown_cache_write_5m_weight REAL DEFAULT 1.0,
+            burndown_cache_write_1h_weight REAL DEFAULT 1.0,
             burndown_output_weight REAL,
             burndown_long_uncached_weight REAL,
             burndown_long_cached_weight REAL,
-            burndown_long_output_weight REAL
+            burndown_long_output_weight REAL,
+            priority_paygo_multiplier REAL DEFAULT 1.8,
+            flex_paygo_multiplier REAL DEFAULT 0.5
         );
         CREATE TABLE app_registry (
             apphub_application_id TEXT,
@@ -1170,7 +1306,13 @@ def _create_enterprise_sqlite_fixture(conn: sqlite3.Connection) -> None:
             sla_latency_ms REAL,
             cost_center TEXT,
             is_external_counterparty INTEGER DEFAULT 0,
-            storage_usd_per_outcome REAL
+            storage_usd_per_outcome REAL,
+            risk_tier TEXT DEFAULT 'RL-3b',
+            autonomy_tier TEXT DEFAULT 'HUMAN_IN_LOOP',
+            lifecycle_track_policy TEXT DEFAULT 'long_term_ga_only',
+            funded_gsus REAL DEFAULT 0.0,
+            spillover_tier TEXT DEFAULT 'standard',
+            pt_commitment_months INTEGER DEFAULT 0
         );
         CREATE TABLE eval_results (
             eval_id TEXT,
@@ -1188,6 +1330,9 @@ def _create_enterprise_sqlite_fixture(conn: sqlite3.Connection) -> None:
             judge_input_tokens INTEGER,
             judge_output_tokens INTEGER,
             judge_thinking_tokens INTEGER,
+            policy_sha256 TEXT DEFAULT NULL,
+            amended_clause_ids TEXT DEFAULT NULL,
+            target_clause_id TEXT DEFAULT NULL,
             evaluated_at TEXT
         );
         CREATE TABLE sme_labels (
@@ -1198,6 +1343,32 @@ def _create_enterprise_sqlite_fixture(conn: sqlite3.Connection) -> None:
             human_pass INTEGER,
             judge_ordinal_score INTEGER,
             judge_pass INTEGER
+        );
+        CREATE TABLE bq_query_jobs (
+            job_id TEXT,
+            apphub_application_id TEXT,
+            outcome_id TEXT,
+            total_bytes_billed INTEGER,
+            total_slot_ms INTEGER,
+            pricing_mode TEXT,
+            query_cost_usd REAL,
+            created_at TEXT
+        );
+        CREATE TABLE inference_request_logs (
+            request_id TEXT,
+            trace_id TEXT,
+            apphub_application_id TEXT,
+            model_name TEXT,
+            serving_traffic_type TEXT,
+            request_type_header TEXT,
+            http_status_code INTEGER,
+            input_tokens INTEGER,
+            cached_input_tokens INTEGER,
+            cache_write_5m_tokens INTEGER,
+            cache_write_1h_tokens INTEGER,
+            output_tokens INTEGER,
+            thinking_tokens INTEGER,
+            request_timestamp TEXT
         );
         """
     )
@@ -1212,6 +1383,7 @@ def _install_enterprise_views(conn: sqlite3.Connection) -> None:
         (step1_path, "agent_eval.v_outcomes"),
         (step1_path, "agent_eval.v_infra_cost_estimate"),
         (step1_path, "agent_eval.v_attribution_coverage"),
+        (views_path, "agent_eval.v_bq_query_cost_attribution"),
         (views_path, "agent_eval.v_trace_waterfall"),
         (views_path, "agent_eval.v_trace_sql_evaluation"),
         (views_path, "agent_eval.v_enterprise_cost_per_verified_outcome"),
@@ -1242,7 +1414,7 @@ def test_pricing_empty_catalog_fallback_suffix_stripping_and_ddl_seed() -> None:
     t0 = "2026-11-21T12:00:00+00:00"
     t1 = "2026-11-21T12:00:01+00:00"
     conn.executemany(
-        "INSERT INTO otel_spans VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        ENTERPRISE_OTEL_SPANS_BASE_INSERT,
         [
             (
                 "tr-argon",
@@ -1410,7 +1582,7 @@ def test_shipped_enterprise_views_value_parity_dedup_and_latest_verdict() -> Non
             )
         )
         conn.execute(
-            "INSERT INTO otel_spans VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ENTERPRISE_OTEL_SPANS_BASE_INSERT,
             (
                 tid,
                 f"sp-f3-{i:03d}",
@@ -1446,7 +1618,7 @@ def test_shipped_enterprise_views_value_parity_dedup_and_latest_verdict() -> Non
         )
         if i == 0:
             conn.execute(
-                "INSERT INTO otel_spans VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                ENTERPRISE_OTEL_SPANS_BASE_INSERT,
                 (
                     tid,
                     "sp-close-000",
@@ -1484,7 +1656,7 @@ def test_shipped_enterprise_views_value_parity_dedup_and_latest_verdict() -> Non
             passed = i < 18
             py_outcomes[tid] = passed
             conn.execute(
-                "INSERT INTO eval_results VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                ENTERPRISE_EVAL_RESULTS_BASE_INSERT,
                 (
                     f"ev-{i}",
                     "run-1",
@@ -1507,7 +1679,7 @@ def test_shipped_enterprise_views_value_parity_dedup_and_latest_verdict() -> Non
             # Duplicate append of the same (eval_run_id, trace_id, rubric_id) must be deduplicated (`M6-3`).
             if i == 0:
                 conn.execute(
-                    "INSERT INTO eval_results VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    ENTERPRISE_EVAL_RESULTS_BASE_INSERT,
                     (
                         "ev-0-dup-older",
                         "run-1",
@@ -1529,7 +1701,7 @@ def test_shipped_enterprise_views_value_parity_dedup_and_latest_verdict() -> Non
                 )
                 # Older failing run for out-f3-000 must be superseded by newer passing run-1 (`F15`).
                 conn.execute(
-                    "INSERT INTO eval_results VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    ENTERPRISE_EVAL_RESULTS_BASE_INSERT,
                     (
                         "ev-0-old-fail",
                         "run-0-old",
@@ -1602,7 +1774,7 @@ def test_unclassified_traffic_type_included_in_total_spend_and_coverage() -> Non
     t0 = "2026-11-21T12:00:00+00:00"
     t1 = "2026-11-21T12:00:01+00:00"
     conn.execute(
-        "INSERT INTO otel_spans VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        ENTERPRISE_OTEL_SPANS_BASE_INSERT,
         (
             "tr-unclass",
             "sp-1",
@@ -1839,7 +2011,7 @@ def test_f11_deterministic_traffic_type_unjudged_rubric_and_multi_rubric_filter(
     t0 = "2026-11-21T12:00:00+00:00"
     t1 = "2026-11-21T12:00:01+00:00"
     conn.executemany(
-        "INSERT INTO otel_spans VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        ENTERPRISE_OTEL_SPANS_BASE_INSERT,
         [
             (
                 "tr-unjudged",
@@ -1908,7 +2080,7 @@ def test_f11_deterministic_traffic_type_unjudged_rubric_and_multi_rubric_filter(
         ],
     )
     conn.executemany(
-        "INSERT INTO eval_results VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        ENTERPRISE_EVAL_RESULTS_BASE_INSERT,
         [
             (
                 "ev-m-g",
@@ -2010,28 +2182,57 @@ def test_f12_sql_pricing_constants_match_python_default_model_skus() -> None:
     ddl_text = (SQL_DIR / "ddl.sql").read_text(encoding="utf-8")
     select_sku_re = re.compile(
         r"SELECT\s+'([^']+)'(?:\s+AS\s+model_name)?,\s*"
+        r"'([^']+)'(?:\s+AS\s+provider)?,\s*"
+        r"'([^']+)'(?:\s+AS\s+lifecycle_track)?,\s*"
         r"TIMESTAMP\s+'[^']+'(?:\s+AS\s+effective_start)?,\s*"
         r"TIMESTAMP\s+'[^']+'(?:\s+AS\s+effective_end)?,\s*"
         r"([0-9.]+)(?:\s+AS\s+input_usd_per_1m)?,\s*"
         r"([0-9.]+)(?:\s+AS\s+cached_input_usd_per_1m)?,\s*"
+        r"([0-9.]+)(?:\s+AS\s+cache_write_5m_usd_per_1m)?,\s*"
+        r"([0-9.]+)(?:\s+AS\s+cache_write_1h_usd_per_1m)?,\s*"
         r"([0-9.]+)(?:\s+AS\s+output_usd_per_1m)?,\s*"
-        r"(\d+)(?:\s+AS\s+long_context_threshold_tokens)?,\s*"
+        r"(\d+|CAST\(NULL\s+AS\s+INT64\))(?:\s+AS\s+long_context_threshold_tokens)?,\s*"
         r"([0-9.]+)(?:\s+AS\s+long_context_input_usd_per_1m)?,\s*"
         r"([0-9.]+)(?:\s+AS\s+long_context_cached_usd_per_1m)?,\s*"
         r"([0-9.]+)(?:\s+AS\s+long_context_output_usd_per_1m)?",
         re.DOTALL,
     )
-    parsed_ddl: dict[str, tuple[float, ...]] = {}
+    parsed_ddl: dict[
+        str, tuple[str, str, float, float, float, float, float, float | None, float, float, float]
+    ] = {}
     for m in select_sku_re.finditer(ddl_text):
-        parsed_ddl[m.group(1)] = tuple(float(m.group(idx)) for idx in range(2, 9))
+        thresh_raw = m.group(9)
+        thresh: float | None = None if "NULL" in thresh_raw else float(thresh_raw)
+        parsed_ddl[m.group(1)] = (
+            m.group(2),
+            m.group(3),
+            float(m.group(4)),
+            float(m.group(5)),
+            float(m.group(6)),
+            float(m.group(7)),
+            float(m.group(8)),
+            thresh,
+            float(m.group(10)),
+            float(m.group(11)),
+            float(m.group(12)),
+        )
     assert set(parsed_ddl) == set(DEFAULT_MODEL_SKUS)
     for model_id, sku in DEFAULT_MODEL_SKUS.items():
-        assert parsed_ddl[model_id] == pytest.approx(
+        row = parsed_ddl[model_id]
+        assert row[0] == sku.provider
+        assert row[1] == sku.lifecycle_track
+        assert row[7] == (
+            float(sku.long_context_threshold_tokens)
+            if sku.long_context_threshold_tokens is not None
+            else None
+        )
+        assert (row[2], row[3], row[4], row[5], row[6], row[8], row[9], row[10]) == pytest.approx(
             (
                 sku.input_usd_per_1m,
                 sku.cached_input_usd_per_1m,
+                sku.effective_cache_write_5m_usd_per_1m,
+                sku.effective_cache_write_1h_usd_per_1m,
                 sku.output_usd_per_1m,
-                float(sku.long_context_threshold_tokens),
                 sku.long_context_input_usd_per_1m,
                 sku.long_context_cached_usd_per_1m,
                 sku.long_context_output_usd_per_1m,
@@ -2079,7 +2280,7 @@ def test_f12_sql_pricing_constants_match_python_default_model_skus() -> None:
                 thinking_tokens=1_000,
             )
             conn.execute(
-                "INSERT INTO otel_spans VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                ENTERPRISE_OTEL_SPANS_BASE_INSERT,
                 (
                     tid,
                     py_span.span_id,
@@ -2148,7 +2349,7 @@ def test_f14_counterparty_classification_uses_explicit_flag_not_app_id_substring
         ("attr-marked-partner", "out-ext-2", '{"apphub.external": "true"}'),
     ):
         conn.executemany(
-            "INSERT INTO otel_spans VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ENTERPRISE_OTEL_SPANS_BASE_INSERT,
             [
                 (
                     f"tr-{out_id}",

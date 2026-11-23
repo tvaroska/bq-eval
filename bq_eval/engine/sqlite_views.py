@@ -21,6 +21,13 @@ CREATE TABLE otel_spans (
     status_code TEXT NOT NULL,
     rule0_pass INTEGER NOT NULL,
     finops_traffic_type TEXT NOT NULL,
+    serving_traffic_type TEXT NOT NULL,
+    request_type_header TEXT,
+    http_status_code INTEGER,
+    cache_write_5m_tokens INTEGER NOT NULL,
+    cache_write_1h_tokens INTEGER NOT NULL,
+    session_id TEXT,
+    turn_index INTEGER,
     is_external_counterparty INTEGER NOT NULL,
     service_vcpu REAL NOT NULL,
     service_gib REAL NOT NULL,
@@ -39,6 +46,15 @@ CREATE TABLE otel_spans (
     is_long_context_cliff INTEGER NOT NULL,
     weighted_burndown_tokens REAL NOT NULL,
     span_cost_usd REAL NOT NULL
+);
+CREATE TABLE bq_query_jobs (
+    job_id TEXT NOT NULL,
+    apphub_application_id TEXT NOT NULL,
+    outcome_id TEXT,
+    total_bytes_billed INTEGER NOT NULL,
+    total_slot_ms INTEGER NOT NULL,
+    pricing_mode TEXT NOT NULL,
+    query_cost_usd REAL NOT NULL
 );
 CREATE TABLE eval_results (
     trace_id TEXT NOT NULL,
@@ -87,6 +103,7 @@ SELECT
     SUM(CASE WHEN span_kind = 'execute_tool'
         AND (status_code = 'ERROR' OR COALESCE(tool_call_status, 'SUCCESS') != 'SUCCESS')
         THEN 1 ELSE 0 END) AS tool_error_count,
+    SUM(CASE WHEN http_status_code = 429 THEN 1 ELSE 0 END) AS http_429_count,
     CASE WHEN MIN(rule0_pass) = 1
         AND SUM(CASE WHEN status_code = 'ERROR' THEN 1 ELSE 0 END) = 0
         AND SUM(CASE WHEN span_kind = 'execute_tool'
@@ -100,13 +117,15 @@ SELECT
             WHEN 'conflict_escalation' THEN 2
             WHEN 'agent_gym_eval' THEN 3
             WHEN 'autorater_judge' THEN 4
-            ELSE 5
+            WHEN 'optimize' THEN 5
+            ELSE 6
         END
     )
         WHEN 1 THEN 'production_inference'
         WHEN 2 THEN 'conflict_escalation'
         WHEN 3 THEN 'agent_gym_eval'
         WHEN 4 THEN 'autorater_judge'
+        WHEN 5 THEN 'optimize'
         ELSE COALESCE(MAX(finops_traffic_type), 'unclassified')
     END AS primary_traffic_type,
     SUM(input_tokens) AS total_input_tokens,
@@ -119,11 +138,30 @@ SELECT
     SUM(CASE WHEN finops_traffic_type = 'conflict_escalation' THEN span_cost_usd ELSE 0.0 END) AS conflict_escalation_usd,
     SUM(CASE WHEN finops_traffic_type = 'agent_gym_eval' THEN span_cost_usd ELSE 0.0 END) AS agent_gym_eval_usd,
     SUM(CASE WHEN finops_traffic_type = 'autorater_judge' THEN span_cost_usd ELSE 0.0 END) AS span_autorater_judge_usd,
-    SUM(CASE WHEN finops_traffic_type NOT IN ('production_inference', 'conflict_escalation', 'agent_gym_eval', 'autorater_judge')
+    SUM(CASE WHEN finops_traffic_type = 'optimize' THEN span_cost_usd ELSE 0.0 END) AS optimize_usd,
+    SUM(CASE WHEN finops_traffic_type NOT IN ('production_inference', 'conflict_escalation', 'agent_gym_eval', 'autorater_judge', 'optimize')
         THEN span_cost_usd ELSE 0.0 END) AS unclassified_usd,
     SUM(span_cost_usd) AS trace_span_cost_usd
 FROM otel_spans
 GROUP BY trace_id;
+
+CREATE VIEW v_bq_query_cost_attribution AS
+SELECT
+    apphub_application_id,
+    COUNT(*) AS query_job_count,
+    SUM(total_bytes_billed) AS total_bytes_billed,
+    SUM(total_slot_ms) AS total_slot_ms,
+    SUM(
+        COALESCE(
+            NULLIF(query_cost_usd, 0.0),
+            CASE
+                WHEN pricing_mode = 'capacity_slot' THEN (total_slot_ms / 3600000.0) * 0.04
+                ELSE (total_bytes_billed / 1099511627776.0) * 6.25
+            END
+        )
+    ) AS bq_query_cost_usd
+FROM bq_query_jobs
+GROUP BY apphub_application_id;
 
 CREATE VIEW v_outcomes AS
 WITH ranked_closed AS (
@@ -223,26 +261,29 @@ outcome_costs AS (
     FROM outcome_agg
 )
 SELECT
-    apphub_application_id,
+    oc.apphub_application_id,
     COUNT(*) AS total_outcomes,
-    SUM(CASE WHEN is_verified = 1 THEN 1 ELSE 0 END) AS verified_outcomes,
-    SUM(total_ai_cost_usd) AS total_ai_cost_usd,
-    SUM(estimated_infra_cost_usd) AS estimated_infra_cost_usd,
-    SUM(total_ai_cost_usd + estimated_infra_cost_usd) AS total_outcome_cost_usd,
+    SUM(CASE WHEN oc.is_verified = 1 THEN 1 ELSE 0 END) AS verified_outcomes,
+    SUM(oc.total_ai_cost_usd) AS total_ai_cost_usd,
+    SUM(oc.estimated_infra_cost_usd) AS estimated_infra_cost_usd,
+    COALESCE(qc.bq_query_cost_usd, 0.0) AS bq_query_cost_usd,
+    SUM(oc.total_ai_cost_usd + oc.estimated_infra_cost_usd) + COALESCE(qc.bq_query_cost_usd, 0.0) AS total_outcome_cost_usd,
     CASE
-        WHEN SUM(CASE WHEN is_verified = 1 THEN 1 ELSE 0 END) > 0
-        THEN SUM(total_ai_cost_usd)
-             / SUM(CASE WHEN is_verified = 1 THEN 1 ELSE 0 END)
+        WHEN SUM(CASE WHEN oc.is_verified = 1 THEN 1 ELSE 0 END) > 0
+        THEN SUM(oc.total_ai_cost_usd)
+             / SUM(CASE WHEN oc.is_verified = 1 THEN 1 ELSE 0 END)
         ELSE NULL
     END AS cost_per_verified_outcome_ai_usd,
     CASE
-        WHEN SUM(CASE WHEN is_verified = 1 THEN 1 ELSE 0 END) > 0
-        THEN SUM(total_ai_cost_usd + estimated_infra_cost_usd)
-             / SUM(CASE WHEN is_verified = 1 THEN 1 ELSE 0 END)
+        WHEN SUM(CASE WHEN oc.is_verified = 1 THEN 1 ELSE 0 END) > 0
+        THEN (SUM(oc.total_ai_cost_usd + oc.estimated_infra_cost_usd) + COALESCE(qc.bq_query_cost_usd, 0.0))
+             / SUM(CASE WHEN oc.is_verified = 1 THEN 1 ELSE 0 END)
         ELSE NULL
     END AS cost_per_verified_outcome_usd
-FROM outcome_costs
-GROUP BY apphub_application_id;
+FROM outcome_costs AS oc
+LEFT JOIN v_bq_query_cost_attribution AS qc
+    ON oc.apphub_application_id = qc.apphub_application_id
+GROUP BY oc.apphub_application_id;
 
 CREATE VIEW v_agent_eval_and_finops_summary AS
 WITH app_traces AS (
@@ -259,6 +300,7 @@ WITH app_traces AS (
         SUM(conflict_escalation_usd) AS conflict_escalation_usd,
         SUM(agent_gym_eval_usd) AS agent_gym_eval_usd,
         SUM(span_autorater_judge_usd) AS span_autorater_judge_usd,
+        SUM(optimize_usd) AS optimize_usd,
         SUM(unclassified_usd) AS unclassified_usd
     FROM v_trace_sql_evaluation
     GROUP BY apphub_application_id
@@ -400,6 +442,7 @@ rg_base AS (
         j.raw_judge_pass_rate,
         j.var_p_obs,
         MAX(a.span_autorater_judge_usd, COALESCE(j.table_judge_usd, 0.0)) AS autorater_judge_usd,
+        COALESCE(qc.bq_query_cost_usd, 0.0) AS bq_query_cost_usd,
         s.n_pos,
         s.n_neg,
         s.tpr,
@@ -429,6 +472,8 @@ rg_base AS (
     CROSS JOIN eval_config AS cfg
     INNER JOIN p95_latencies AS p
         ON a.apphub_application_id = p.apphub_application_id
+    LEFT JOIN v_bq_query_cost_attribution AS qc
+        ON a.apphub_application_id = qc.apphub_application_id
     LEFT JOIN judge_stats AS j
         ON a.apphub_application_id = j.apphub_application_id
     LEFT JOIN sme_rates AS s
@@ -452,7 +497,7 @@ rg_ci AS (
                 ) / youden_j
             ELSE NULL
         END AS se_theta,
-        (production_inference_usd + conflict_escalation_usd + agent_gym_eval_usd + autorater_judge_usd + unclassified_usd) AS total_spend_usd
+        (production_inference_usd + conflict_escalation_usd + agent_gym_eval_usd + autorater_judge_usd + optimize_usd + bq_query_cost_usd + unclassified_usd) AS total_spend_usd
     FROM rg_base
 )
 SELECT
@@ -483,6 +528,8 @@ SELECT
     conflict_escalation_usd,
     agent_gym_eval_usd,
     autorater_judge_usd,
+    optimize_usd,
+    bq_query_cost_usd,
     unclassified_usd,
     total_spend_usd,
     CASE
@@ -509,11 +556,18 @@ SELECT
     model_name,
     model_name AS model,
     finops_traffic_type,
+    serving_traffic_type,
     COUNT(DISTINCT trace_id) AS distinct_traces,
     COUNT(*) AS span_count,
+    SUM(CASE WHEN status_code = 'OK' THEN 1 ELSE 0 END) AS ok_span_count,
+    SUM(CASE WHEN status_code = 'ERROR' THEN 1 ELSE 0 END) AS error_span_count,
+    SUM(CASE WHEN http_status_code = 429 THEN 1 ELSE 0 END) AS http_429_count,
+    SUM(CASE WHEN UPPER(serving_traffic_type) IN ('PRIORITY', 'STANDARD', 'FLEX') THEN 1 ELSE 0 END) AS spillover_span_count,
     SUM(input_tokens) AS input_tokens,
     SUM(cached_input_tokens) AS cached_input_tokens,
     SUM(cached_input_tokens) AS cached_tokens,
+    SUM(cache_write_5m_tokens) AS cache_write_5m_tokens,
+    SUM(cache_write_1h_tokens) AS cache_write_1h_tokens,
     SUM(uncached_input_tokens) AS uncached_input_tokens,
     SUM(output_tokens) AS output_tokens,
     SUM(thinking_tokens) AS thinking_tokens,
@@ -523,6 +577,105 @@ SELECT
     SUM(weighted_burndown_tokens) AS precomputed_weighted_burndown_tokens,
     SUM(span_cost_usd) AS total_cost_usd
 FROM otel_spans
-GROUP BY usage_hour_iso, apphub_application_id, model_name, finops_traffic_type
-ORDER BY usage_hour_iso, apphub_application_id, model_name, finops_traffic_type;
+GROUP BY usage_hour_iso, apphub_application_id, model_name, finops_traffic_type, serving_traffic_type
+ORDER BY usage_hour_iso, apphub_application_id, model_name, finops_traffic_type, serving_traffic_type;
+
+CREATE VIEW v_interaction_session_lineage AS
+WITH session_spans AS (
+    SELECT
+        apphub_application_id,
+        session_id,
+        COALESCE(
+            turn_index,
+            ROW_NUMBER() OVER (PARTITION BY apphub_application_id, session_id ORDER BY start_epoch_ms, span_id) - 1
+        ) AS resolved_turn_index,
+        trace_id,
+        start_epoch_ms,
+        end_epoch_ms,
+        input_tokens,
+        output_tokens,
+        thinking_tokens,
+        span_cost_usd,
+        CASE WHEN rule0_pass = 1 AND status_code != 'ERROR' THEN 1 ELSE 0 END AS turn_ok
+    FROM otel_spans
+    WHERE session_id IS NOT NULL AND session_id != ''
+)
+SELECT
+    apphub_application_id,
+    session_id,
+    COUNT(DISTINCT resolved_turn_index) AS turn_count,
+    MAX(resolved_turn_index) AS max_turn_index,
+    COUNT(DISTINCT trace_id) AS trace_count,
+    MAX(end_epoch_ms) - MIN(start_epoch_ms) AS session_duration_ms,
+    SUM(input_tokens) AS cumulative_input_tokens,
+    SUM(output_tokens + thinking_tokens) AS cumulative_output_tokens,
+    SUM(span_cost_usd) AS cumulative_cost_usd,
+    MIN(turn_ok) AS session_rule0_pass,
+    MIN(CASE WHEN turn_ok = 0 THEN resolved_turn_index ELSE NULL END) AS first_failure_turn_index
+FROM session_spans
+GROUP BY apphub_application_id, session_id
+ORDER BY apphub_application_id, session_id;
+
+CREATE VIEW v_live_slo_and_429_breaches AS
+WITH bucketed_spans AS (
+    SELECT
+        CAST(CAST(start_epoch_ms / 300000.0 AS INTEGER) * 300000 AS INTEGER) AS window_5m_epoch_ms,
+        apphub_application_id,
+        latency_ms,
+        http_status_code,
+        rule0_pass,
+        status_code
+    FROM otel_spans
+),
+ranked AS (
+    SELECT
+        window_5m_epoch_ms,
+        apphub_application_id,
+        latency_ms,
+        ROW_NUMBER() OVER (PARTITION BY window_5m_epoch_ms, apphub_application_id ORDER BY latency_ms) AS rn,
+        COUNT(*) OVER (PARTITION BY window_5m_epoch_ms, apphub_application_id) AS cnt
+    FROM bucketed_spans
+),
+p95_win AS (
+    SELECT window_5m_epoch_ms, apphub_application_id, latency_ms AS p95_latency_ms
+    FROM ranked
+    WHERE rn = MIN(cnt, MAX(1, CAST(CEIL(0.95 * cnt) AS INTEGER)))
+),
+agg AS (
+    SELECT
+        window_5m_epoch_ms,
+        apphub_application_id,
+        COUNT(*) AS span_count,
+        SUM(CASE WHEN http_status_code = 429 THEN 1 ELSE 0 END) AS http_429_count,
+        SUM(CASE WHEN rule0_pass = 0 OR status_code = 'ERROR' THEN 1 ELSE 0 END) AS rule0_fail_count
+    FROM bucketed_spans
+    GROUP BY window_5m_epoch_ms, apphub_application_id
+)
+SELECT
+    a.window_5m_epoch_ms,
+    a.apphub_application_id,
+    a.span_count,
+    a.http_429_count,
+    100.0 * CAST(a.http_429_count AS REAL) / a.span_count AS http_429_rate_pct,
+    100.0 * CAST(a.rule0_fail_count AS REAL) / a.span_count AS rule0_fail_rate_pct,
+    p.p95_latency_ms,
+    cfg.sla_latency_ms,
+    CASE
+        WHEN p.p95_latency_ms > cfg.sla_latency_ms
+            OR (100.0 * CAST(a.http_429_count AS REAL) / a.span_count) >= 1.0
+            OR (100.0 * CAST(a.rule0_fail_count AS REAL) / a.span_count) >= 5.0
+        THEN 1 ELSE 0
+    END AS is_breach,
+    CASE
+        WHEN (100.0 * CAST(a.http_429_count AS REAL) / a.span_count) >= 1.0 THEN 'HTTP_429_STORM'
+        WHEN p.p95_latency_ms > cfg.sla_latency_ms THEN 'SLA_LATENCY'
+        WHEN (100.0 * CAST(a.rule0_fail_count AS REAL) / a.span_count) >= 5.0 THEN 'RULE0_SPIKE'
+        ELSE 'OK'
+    END AS breach_reason
+FROM agg AS a
+INNER JOIN p95_win AS p
+    ON a.window_5m_epoch_ms = p.window_5m_epoch_ms
+    AND a.apphub_application_id = p.apphub_application_id
+CROSS JOIN eval_config AS cfg
+ORDER BY a.window_5m_epoch_ms, a.apphub_application_id;
 """

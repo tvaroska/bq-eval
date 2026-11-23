@@ -28,28 +28,44 @@ CREATE TABLE IF NOT EXISTS `agent_eval.app_registry` (
   monthly_budget_usd FLOAT64 NOT NULL OPTIONS (description = 'Monthly LLM & evaluation budget cap in USD.'),
   is_external_counterparty BOOL OPTIONS (description = 'TRUE when the registered application represents an external counterparty excluded from internal CPVO.'),
   storage_usd_per_outcome FLOAT64 OPTIONS (description = 'Optional per-outcome storage/WORM retention proxy override in USD (defaults to 0.000020 when NULL).'),
+  risk_tier STRING OPTIONS (description = '5-level criticality tier (RL-1, RL-2, RL-3a, RL-3b, RL-4, RL-5) driving tiered AC2 IRR gates (0.85 / 0.80 / 0.75).'),
+  autonomy_tier STRING OPTIONS (description = 'Operational autonomy tier (ASSISTIVE, HUMAN_IN_LOOP, HUMAN_ON_LOOP, BOUNDED_AUTONOMOUS, FULLY_AUTONOMOUS).'),
+  lifecycle_track_policy STRING OPTIONS (description = 'Allowed model lifecycle track for PT commitments (long_term_ga_only, short_term_ga_allowed, preview_allowed).'),
+  funded_gsus FLOAT64 OPTIONS (description = 'Contracted Provisioned Throughput GSU share owned by this application for Pool 3 Involuntary vs. TenantBurst attribution.'),
+  spillover_tier STRING OPTIONS (description = 'Configured PayGo spillover billing tier (priority, standard, flex).'),
+  pt_commitment_months INT64 OPTIONS (description = 'Provisioned Throughput commitment term in months (0 for PayGo-only; >= 3 blocked on short_term_ga/preview models).'),
   owner_email STRING NOT NULL OPTIONS (description = 'Technical owner contact email.'),
   updated_at TIMESTAMP NOT NULL OPTIONS (description = 'Last registry metadata update timestamp.')
 )
 CLUSTER BY apphub_application_id, cost_center
 OPTIONS (
-  description = 'Application registry mapping App Hub / agent identifiers to SLA thresholds and FinOps cost centers.'
+  description = 'Application registry mapping App Hub / agent identifiers to SLA thresholds, RL-1..RL-5 governance, and FinOps cost centers.'
 );
 
 ALTER TABLE `agent_eval.app_registry`
   ADD COLUMN IF NOT EXISTS is_external_counterparty BOOL OPTIONS (description = 'TRUE when the registered application represents an external counterparty excluded from internal CPVO.'),
-  ADD COLUMN IF NOT EXISTS storage_usd_per_outcome FLOAT64 OPTIONS (description = 'Optional per-outcome storage/WORM retention proxy override in USD (defaults to 0.000020 when NULL).');
+  ADD COLUMN IF NOT EXISTS storage_usd_per_outcome FLOAT64 OPTIONS (description = 'Optional per-outcome storage/WORM retention proxy override in USD (defaults to 0.000020 when NULL).'),
+  ADD COLUMN IF NOT EXISTS risk_tier STRING OPTIONS (description = '5-level criticality tier (RL-1, RL-2, RL-3a, RL-3b, RL-4, RL-5).'),
+  ADD COLUMN IF NOT EXISTS autonomy_tier STRING OPTIONS (description = 'Operational autonomy tier.'),
+  ADD COLUMN IF NOT EXISTS lifecycle_track_policy STRING OPTIONS (description = 'Allowed model lifecycle track for PT commitments.'),
+  ADD COLUMN IF NOT EXISTS funded_gsus FLOAT64 OPTIONS (description = 'Contracted GSU entitlement owned by this application.'),
+  ADD COLUMN IF NOT EXISTS spillover_tier STRING OPTIONS (description = 'Configured PayGo spillover tier (priority, standard, flex).'),
+  ADD COLUMN IF NOT EXISTS pt_commitment_months INT64 OPTIONS (description = 'Provisioned Throughput commitment term in months.');
 
 -- -----------------------------------------------------------------------------
 -- 1B. BigLake External Table for Uploaded OTel GenAI Completion Payloads
+--     Dual-schema: supports nested `payload` JSON and top-level text columns
 -- -----------------------------------------------------------------------------
 CREATE EXTERNAL TABLE IF NOT EXISTS `agent_eval.completions` (
-  payload JSON OPTIONS (description = 'Uploaded OTel GenAI prompt/context/completion JSON payload.')
+  payload JSON OPTIONS (description = 'Uploaded OTel GenAI prompt/context/completion JSON payload.'),
+  user_prompt STRING OPTIONS (description = 'Optional top-level user prompt text.'),
+  retrieved_context STRING OPTIONS (description = 'Optional top-level retrieved context.'),
+  final_response STRING OPTIONS (description = 'Optional top-level final response.')
 )
-WITH CONNECTION `us.vertex_ai_connection`
+WITH CONNECTION `${CONNECTION_ID}`
 OPTIONS (
   format = 'JSON',
-  uris = ['gs://YOUR_GENAI_PAYLOAD_BUCKET/*.jsonl']
+  uris = ['gs://${PAYLOAD_BUCKET}/${PREFIX}*.jsonl']
 );
 
 -- 2. Native Telemetry Compatibility Views (agent_eval.v_otel_allspans_only -> obs_traces._AllSpans)
@@ -153,6 +169,52 @@ SELECT
   JSON_VALUE(attributes, '$."skill_id"') AS skill_id,
   JSON_VALUE(attributes, '$."skill_version"') AS skill_version,
   JSON_VALUE(attributes, '$."entity_id"') AS entity_id,
+  CASE UPPER(COALESCE(
+    JSON_VALUE(attributes, '$."gen_ai.response.traffic_type"'),
+    JSON_VALUE(attributes, '$."gen_ai.vertex.traffic_type"'),
+    JSON_VALUE(attributes, '$."serving.traffic_type"'),
+    'STANDARD'
+  ))
+    WHEN 'PROVISIONED_THROUGHPUT' THEN 'PROVISIONED_THROUGHPUT'
+    WHEN 'DEDICATED' THEN 'PROVISIONED_THROUGHPUT'
+    WHEN 'PRIORITY' THEN 'PRIORITY'
+    WHEN 'ON_DEMAND_PRIORITY' THEN 'PRIORITY'
+    WHEN 'FLEX' THEN 'FLEX'
+    WHEN 'ON_DEMAND_FLEX' THEN 'FLEX'
+    ELSE 'STANDARD'
+  END AS serving_traffic_type,
+  COALESCE(
+    JSON_VALUE(attributes, '$."x-vertex-ai-llm-request-type"'),
+    JSON_VALUE(attributes, '$."request_type_header"')
+  ) AS request_type_header,
+  COALESCE(
+    SAFE_CAST(JSON_VALUE(attributes, '$."http.response.status_code"') AS INT64),
+    SAFE_CAST(JSON_VALUE(attributes, '$."http.status_code"') AS INT64),
+    CASE
+      WHEN JSON_VALUE(attributes, '$."error.type"') = 'RATE_LIMITED' THEN 429
+      WHEN CAST(status.code AS STRING) IN ('2', 'ERROR', 'STATUS_CODE_ERROR') THEN 500
+      ELSE 200
+    END
+  ) AS http_status_code,
+  COALESCE(
+    SAFE_CAST(JSON_VALUE(attributes, '$."gen_ai.usage.cache_creation.ephemeral_5m_input_tokens"') AS INT64),
+    SAFE_CAST(JSON_VALUE(attributes, '$."cache_write_5m_tokens"') AS INT64),
+    0
+  ) AS cache_write_5m_tokens,
+  COALESCE(
+    SAFE_CAST(JSON_VALUE(attributes, '$."gen_ai.usage.cache_creation.ephemeral_1h_input_tokens"') AS INT64),
+    SAFE_CAST(JSON_VALUE(attributes, '$."cache_write_1h_tokens"') AS INT64),
+    0
+  ) AS cache_write_1h_tokens,
+  COALESCE(
+    JSON_VALUE(attributes, '$."gen_ai.conversation.id"'),
+    JSON_VALUE(attributes, '$."interaction.session_id"'),
+    JSON_VALUE(attributes, '$."session_id"')
+  ) AS session_id,
+  COALESCE(
+    SAFE_CAST(JSON_VALUE(attributes, '$."gen_ai.interaction.turn_index"') AS INT64),
+    SAFE_CAST(JSON_VALUE(attributes, '$."turn_index"') AS INT64)
+  ) AS turn_index,
   attributes
 FROM `obs_traces._AllSpans`;
 
@@ -179,6 +241,7 @@ SELECT
   COALESCE(
     STRING_AGG(
       COALESCE(
+        c.user_prompt,
         JSON_VALUE(c.payload, '$."user_prompt"'),
         JSON_VALUE(l.json_payload, '$."gen_ai.prompt"'),
         JSON_VALUE(l.json_payload, '$."user_prompt"')
@@ -190,6 +253,7 @@ SELECT
   COALESCE(
     STRING_AGG(
       COALESCE(
+        c.retrieved_context,
         JSON_VALUE(c.payload, '$."retrieved_context"'),
         JSON_VALUE(l.json_payload, '$."gen_ai.retrieved_context"'),
         JSON_VALUE(l.json_payload, '$."retrieved_context"')
@@ -201,6 +265,7 @@ SELECT
   COALESCE(
     ARRAY_AGG(
       COALESCE(
+        c.final_response,
         JSON_VALUE(c.payload, '$."final_response"'),
         JSON_VALUE(l.json_payload, '$."gen_ai.completion"'),
         JSON_VALUE(l.json_payload, '$."final_response"')
@@ -262,6 +327,7 @@ CREATE TABLE IF NOT EXISTS `agent_eval.eval_results` (
   judge_thinking_tokens INT64 NOT NULL OPTIONS (description = 'Reasoning tokens consumed by the judge call.'),
   policy_sha256 STRING OPTIONS (description = 'SHA-256 hash of active policy text for zero-day drift tracking.'),
   amended_clause_ids STRING OPTIONS (description = 'Comma-separated clause IDs modified under the active policy revision.'),
+  target_clause_id STRING OPTIONS (description = 'Optional clause identifier evaluated by this trace/rubric pair for clause-scoped EVAL-P09 NFR gating.'),
   evaluated_at TIMESTAMP NOT NULL OPTIONS (description = 'UTC judge execution timestamp.')
 )
 PARTITION BY DATE(evaluated_at)
@@ -271,7 +337,10 @@ OPTIONS (
 );
 
 ALTER TABLE `agent_eval.eval_results`
-  ADD COLUMN IF NOT EXISTS outcome_id STRING OPTIONS (description = 'Business outcome identifier (EVAL-P11 outcome.id).');
+  ADD COLUMN IF NOT EXISTS outcome_id STRING OPTIONS (description = 'Business outcome identifier (EVAL-P11 outcome.id).'),
+  ADD COLUMN IF NOT EXISTS policy_sha256 STRING OPTIONS (description = 'SHA-256 hash of active policy text.'),
+  ADD COLUMN IF NOT EXISTS amended_clause_ids STRING OPTIONS (description = 'Comma-separated clause IDs modified under active policy.'),
+  ADD COLUMN IF NOT EXISTS target_clause_id STRING OPTIONS (description = 'Optional clause identifier evaluated for clause-scoped EVAL-P09 NFR gating.');
 
 -- -----------------------------------------------------------------------------
 -- 6. Stratified SME Calibration Audit Labels (agent_eval.sme_labels)
@@ -300,144 +369,162 @@ ALTER TABLE `agent_eval.sme_labels`
   ADD COLUMN IF NOT EXISTS outcome_id STRING OPTIONS (description = 'Business outcome identifier (EVAL-P11 outcome.id).');
 
 -- -----------------------------------------------------------------------------
--- 7. Effective-Dated Model Pricing & Burndown Catalog (agent_eval.model_pricing_catalog)
+-- 7. Effective-Dated 1P & 3P Model Pricing & Burndown Catalog (agent_eval.model_pricing_catalog)
 -- -----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS `agent_eval.model_pricing_catalog` (
-  model_name STRING NOT NULL OPTIONS (description = 'Public model name (gemini-3.8-flash, gemini-4-argon, gemini-3.5-flash-lite).'),
+  model_name STRING NOT NULL OPTIONS (description = 'Public model name (gemini-3.8-flash, gemini-4-argon, claude-sonnet-4-6, etc.).'),
+  provider STRING OPTIONS (description = 'Model provider family: google, anthropic, or self_hosted.'),
+  lifecycle_track STRING OPTIONS (description = 'GA lifecycle track: long_term_ga, short_term_ga, preview, or legacy_sunset.'),
   effective_start TIMESTAMP NOT NULL OPTIONS (description = 'Inclusive pricing effective start timestamp.'),
   effective_end TIMESTAMP NOT NULL OPTIONS (description = 'Exclusive pricing effective end timestamp.'),
   input_usd_per_1m FLOAT64 NOT NULL OPTIONS (description = 'Uncached input token price per 1M tokens (<=200K context).'),
   cached_input_usd_per_1m FLOAT64 NOT NULL OPTIONS (description = 'Cached prefix token price per 1M tokens (<=200K context).'),
+  cache_write_5m_usd_per_1m FLOAT64 OPTIONS (description = '5m ephemeral cache-write price per 1M tokens (1.25x input on 3P models).'),
+  cache_write_1h_usd_per_1m FLOAT64 OPTIONS (description = '1h ephemeral cache-write price per 1M tokens (2.0x input on 3P models).'),
   output_usd_per_1m FLOAT64 NOT NULL OPTIONS (description = 'Output and thinking token price per 1M tokens (<=200K context).'),
-  long_context_threshold_tokens INT64 NOT NULL OPTIONS (description = 'Context cliff threshold in input tokens (standard: 200000).'),
+  long_context_threshold_tokens INT64 OPTIONS (description = 'Context cliff threshold in input tokens (200000 for 1P Gemini; NULL for flat 3P).'),
   long_context_input_usd_per_1m FLOAT64 NOT NULL OPTIONS (description = 'Uncached input price per 1M tokens above threshold (>200K).'),
   long_context_cached_usd_per_1m FLOAT64 NOT NULL OPTIONS (description = 'Cached input price per 1M tokens above threshold (>200K).'),
   long_context_output_usd_per_1m FLOAT64 NOT NULL OPTIONS (description = 'Output/thinking price per 1M tokens above threshold (>200K).'),
   burndown_uncached_weight FLOAT64 NOT NULL OPTIONS (description = 'Standard uncached input burndown multiplier (1.0).'),
   burndown_cached_weight FLOAT64 NOT NULL OPTIONS (description = 'Standard cached input burndown multiplier (0.1).'),
-  burndown_output_weight FLOAT64 NOT NULL OPTIONS (description = 'Standard output/thinking burndown multiplier (4.0).'),
-  burndown_long_uncached_weight FLOAT64 NOT NULL OPTIONS (description = 'Long-context (>200K) uncached input multiplier (2.0).'),
-  burndown_long_cached_weight FLOAT64 NOT NULL OPTIONS (description = 'Long-context (>200K) cached input multiplier (0.2).'),
-  burndown_long_output_weight FLOAT64 NOT NULL OPTIONS (description = 'Long-context (>200K) output/thinking multiplier (7.5).')
+  burndown_cache_write_5m_weight FLOAT64 OPTIONS (description = '5m cache-write burndown multiplier (1.0 1P, 1.25 3P).'),
+  burndown_cache_write_1h_weight FLOAT64 OPTIONS (description = '1h cache-write burndown multiplier (1.0 1P, 2.0 3P).'),
+  burndown_output_weight FLOAT64 NOT NULL OPTIONS (description = 'Standard output/thinking burndown multiplier (4.0 1P, 5.0 3P).'),
+  burndown_long_uncached_weight FLOAT64 NOT NULL OPTIONS (description = 'Long-context (>200K) uncached input multiplier (2.0 1P, 1.0 3P).'),
+  burndown_long_cached_weight FLOAT64 NOT NULL OPTIONS (description = 'Long-context (>200K) cached input multiplier (0.2 1P, 0.1 3P).'),
+  burndown_long_output_weight FLOAT64 NOT NULL OPTIONS (description = 'Long-context (>200K) output/thinking multiplier (7.5 1P, 5.0 3P).'),
+  priority_paygo_multiplier FLOAT64 OPTIONS (description = 'Priority PayGo billing multiplier (1.8x).'),
+  flex_paygo_multiplier FLOAT64 OPTIONS (description = 'Flex/Batch PayGo billing multiplier (0.5x).')
 )
 CLUSTER BY model_name
 OPTIONS (
-  description = 'Effective-dated SKU pricing and GSU serving-physics burndown weights.'
+  description = 'Effective-dated 1P/3P SKU pricing, PayGo multipliers, and GSU serving-physics burndown weights.'
 );
+
+ALTER TABLE `agent_eval.model_pricing_catalog`
+  ADD COLUMN IF NOT EXISTS provider STRING,
+  ADD COLUMN IF NOT EXISTS lifecycle_track STRING,
+  ADD COLUMN IF NOT EXISTS cache_write_5m_usd_per_1m FLOAT64,
+  ADD COLUMN IF NOT EXISTS cache_write_1h_usd_per_1m FLOAT64,
+  ADD COLUMN IF NOT EXISTS burndown_cache_write_5m_weight FLOAT64,
+  ADD COLUMN IF NOT EXISTS burndown_cache_write_1h_weight FLOAT64,
+  ADD COLUMN IF NOT EXISTS priority_paygo_multiplier FLOAT64,
+  ADD COLUMN IF NOT EXISTS flex_paygo_multiplier FLOAT64;
 
 MERGE INTO `agent_eval.model_pricing_catalog` AS target
 USING (
   SELECT
-    'gemini-3.5-flash-lite' AS model_name,
-    TIMESTAMP '2026-01-01 00:00:00 UTC' AS effective_start,
-    TIMESTAMP '2099-12-31 23:59:59 UTC' AS effective_end,
-    0.075 AS input_usd_per_1m,
-    0.0075 AS cached_input_usd_per_1m,
-    0.30 AS output_usd_per_1m,
-    200000 AS long_context_threshold_tokens,
-    0.15 AS long_context_input_usd_per_1m,
-    0.015 AS long_context_cached_usd_per_1m,
-    1.125 AS long_context_output_usd_per_1m,
-    1.0 AS burndown_uncached_weight,
-    0.1 AS burndown_cached_weight,
-    4.0 AS burndown_output_weight,
-    2.0 AS burndown_long_uncached_weight,
-    0.2 AS burndown_long_cached_weight,
-    7.5 AS burndown_long_output_weight
+    'gemini-3.5-flash-lite' AS model_name, 'google' AS provider, 'long_term_ga' AS lifecycle_track,
+    TIMESTAMP '2026-01-01 00:00:00 UTC' AS effective_start, TIMESTAMP '2099-12-31 23:59:59 UTC' AS effective_end,
+    0.075 AS input_usd_per_1m, 0.0075 AS cached_input_usd_per_1m, 0.075 AS cache_write_5m_usd_per_1m, 0.075 AS cache_write_1h_usd_per_1m, 0.30 AS output_usd_per_1m,
+    200000 AS long_context_threshold_tokens, 0.15 AS long_context_input_usd_per_1m, 0.015 AS long_context_cached_usd_per_1m, 1.125 AS long_context_output_usd_per_1m,
+    1.0 AS burndown_uncached_weight, 0.1 AS burndown_cached_weight, 1.0 AS burndown_cache_write_5m_weight, 1.0 AS burndown_cache_write_1h_weight, 4.0 AS burndown_output_weight,
+    2.0 AS burndown_long_uncached_weight, 0.2 AS burndown_long_cached_weight, 7.5 AS burndown_long_output_weight,
+    1.8 AS priority_paygo_multiplier, 0.5 AS flex_paygo_multiplier
   UNION ALL
-  SELECT
-    'gemini-3.8-flash',
-    TIMESTAMP '2026-01-01 00:00:00 UTC',
-    TIMESTAMP '2099-12-31 23:59:59 UTC',
-    0.15,
-    0.015,
-    0.60,
-    200000,
-    0.30,
-    0.030,
-    2.25,
-    1.0,
-    0.1,
-    4.0,
-    2.0,
-    0.2,
-    7.5
+  SELECT 'gemini-3.8-flash', 'google', 'long_term_ga', TIMESTAMP '2026-01-01 00:00:00 UTC', TIMESTAMP '2099-12-31 23:59:59 UTC', 0.15, 0.015, 0.15, 0.15, 0.60, 200000, 0.30, 0.030, 2.25, 1.0, 0.1, 1.0, 1.0, 4.0, 2.0, 0.2, 7.5, 1.8, 0.5
   UNION ALL
-  SELECT
-    'gemini-4-argon',
-    TIMESTAMP '2026-01-01 00:00:00 UTC',
-    TIMESTAMP '2099-12-31 23:59:59 UTC',
-    1.25,
-    0.125,
-    5.00,
-    200000,
-    2.50,
-    0.250,
-    18.75,
-    1.0,
-    0.1,
-    4.0,
-    2.0,
-    0.2,
-    7.5
+  SELECT 'gemini-4-argon', 'google', 'long_term_ga', TIMESTAMP '2026-01-01 00:00:00 UTC', TIMESTAMP '2099-12-31 23:59:59 UTC', 1.25, 0.125, 1.25, 1.25, 5.00, 200000, 2.50, 0.250, 18.75, 1.0, 0.1, 1.0, 1.0, 4.0, 2.0, 0.2, 7.5, 1.8, 0.5
   UNION ALL
-  SELECT
-    'ai_evaluate_agent_managed',
-    TIMESTAMP '2026-01-01 00:00:00 UTC',
-    TIMESTAMP '2099-12-31 23:59:59 UTC',
-    0.15,
-    0.015,
-    0.60,
-    200000,
-    0.30,
-    0.030,
-    2.25,
-    1.0,
-    0.1,
-    4.0,
-    2.0,
-    0.2,
-    7.5
+  SELECT 'gemini-4-carbon', 'google', 'short_term_ga', TIMESTAMP '2026-01-01 00:00:00 UTC', TIMESTAMP '2099-12-31 23:59:59 UTC', 1.25, 0.125, 1.25, 1.25, 5.00, 200000, 2.50, 0.250, 18.75, 1.0, 0.1, 1.0, 1.0, 4.0, 2.0, 0.2, 7.5, 1.8, 0.5
+  UNION ALL
+  SELECT 'ai_evaluate_agent_managed', 'google', 'long_term_ga', TIMESTAMP '2026-01-01 00:00:00 UTC', TIMESTAMP '2099-12-31 23:59:59 UTC', 0.15, 0.015, 0.15, 0.15, 0.60, 200000, 0.30, 0.030, 2.25, 1.0, 0.1, 1.0, 1.0, 4.0, 2.0, 0.2, 7.5, 1.8, 0.5
+  UNION ALL
+  SELECT 'claude-sonnet-4-6', 'anthropic', 'long_term_ga', TIMESTAMP '2026-01-01 00:00:00 UTC', TIMESTAMP '2099-12-31 23:59:59 UTC', 3.00, 0.30, 3.75, 6.00, 15.00, CAST(NULL AS INT64), 3.00, 0.30, 15.00, 1.0, 0.1, 1.25, 2.0, 5.0, 1.0, 0.1, 5.0, 1.8, 0.5
+  UNION ALL
+  SELECT 'claude-opus-4-6', 'anthropic', 'long_term_ga', TIMESTAMP '2026-01-01 00:00:00 UTC', TIMESTAMP '2099-12-31 23:59:59 UTC', 15.00, 1.50, 18.75, 30.00, 75.00, CAST(NULL AS INT64), 15.00, 1.50, 75.00, 1.0, 0.1, 1.25, 2.0, 5.0, 1.0, 0.1, 5.0, 1.8, 0.5
+  UNION ALL
+  SELECT 'claude-sonnet-5-5', 'anthropic', 'long_term_ga', TIMESTAMP '2026-01-01 00:00:00 UTC', TIMESTAMP '2099-12-31 23:59:59 UTC', 3.00, 0.30, 3.75, 6.00, 15.00, CAST(NULL AS INT64), 3.00, 0.30, 15.00, 1.0, 0.1, 1.25, 2.0, 5.0, 1.0, 0.1, 5.0, 1.8, 0.5
 ) AS src
 ON target.model_name = src.model_name
   AND target.effective_start = src.effective_start
 WHEN NOT MATCHED THEN
   INSERT (
-    model_name,
-    effective_start,
-    effective_end,
-    input_usd_per_1m,
-    cached_input_usd_per_1m,
-    output_usd_per_1m,
-    long_context_threshold_tokens,
-    long_context_input_usd_per_1m,
-    long_context_cached_usd_per_1m,
-    long_context_output_usd_per_1m,
-    burndown_uncached_weight,
-    burndown_cached_weight,
-    burndown_output_weight,
-    burndown_long_uncached_weight,
-    burndown_long_cached_weight,
-    burndown_long_output_weight
+    model_name, provider, lifecycle_track, effective_start, effective_end,
+    input_usd_per_1m, cached_input_usd_per_1m, cache_write_5m_usd_per_1m, cache_write_1h_usd_per_1m, output_usd_per_1m,
+    long_context_threshold_tokens, long_context_input_usd_per_1m, long_context_cached_usd_per_1m, long_context_output_usd_per_1m,
+    burndown_uncached_weight, burndown_cached_weight, burndown_cache_write_5m_weight, burndown_cache_write_1h_weight, burndown_output_weight,
+    burndown_long_uncached_weight, burndown_long_cached_weight, burndown_long_output_weight,
+    priority_paygo_multiplier, flex_paygo_multiplier
   )
   VALUES (
-    src.model_name,
-    src.effective_start,
-    src.effective_end,
-    src.input_usd_per_1m,
-    src.cached_input_usd_per_1m,
-    src.output_usd_per_1m,
-    src.long_context_threshold_tokens,
-    src.long_context_input_usd_per_1m,
-    src.long_context_cached_usd_per_1m,
-    src.long_context_output_usd_per_1m,
-    src.burndown_uncached_weight,
-    src.burndown_cached_weight,
-    src.burndown_output_weight,
-    src.burndown_long_uncached_weight,
-    src.burndown_long_cached_weight,
-    src.burndown_long_output_weight
+    src.model_name, src.provider, src.lifecycle_track, src.effective_start, src.effective_end,
+    src.input_usd_per_1m, src.cached_input_usd_per_1m, src.cache_write_5m_usd_per_1m, src.cache_write_1h_usd_per_1m, src.output_usd_per_1m,
+    src.long_context_threshold_tokens, src.long_context_input_usd_per_1m, src.long_context_cached_usd_per_1m, src.long_context_output_usd_per_1m,
+    src.burndown_uncached_weight, src.burndown_cached_weight, src.burndown_cache_write_5m_weight, src.burndown_cache_write_1h_weight, src.burndown_output_weight,
+    src.burndown_long_uncached_weight, src.burndown_long_cached_weight, src.burndown_long_output_weight,
+    src.priority_paygo_multiplier, src.flex_paygo_multiplier
   );
+
+-- -----------------------------------------------------------------------------
+-- 7B. Server-Side Inference Request Logs (for v_inference_request_reconciliation)
+-- -----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `agent_eval.inference_request_logs` (
+  request_id STRING NOT NULL OPTIONS (description = 'Unique server-side inference request ID.'),
+  trace_id STRING OPTIONS (description = 'Optional W3C trace_id linking server log to OTel span.'),
+  apphub_application_id STRING NOT NULL OPTIONS (description = 'Attributed application identifier.'),
+  model_name STRING NOT NULL OPTIONS (description = 'Resolved serving model name.'),
+  serving_traffic_type STRING NOT NULL OPTIONS (description = 'Server-reported serving tier: PROVISIONED_THROUGHPUT, PRIORITY, STANDARD, or FLEX.'),
+  request_type_header STRING OPTIONS (description = 'Inbound X-Vertex-AI-LLM-Request-Type header value (dedicated, shared, or NULL).'),
+  http_status_code INT64 NOT NULL OPTIONS (description = 'HTTP response status code (e.g., 200, 429, 503).'),
+  input_tokens INT64 NOT NULL OPTIONS (description = 'Server-billed input tokens.'),
+  cached_input_tokens INT64 NOT NULL OPTIONS (description = 'Server-billed cache-read input tokens.'),
+  cache_write_5m_tokens INT64 NOT NULL OPTIONS (description = 'Server-billed 5m cache-write tokens.'),
+  cache_write_1h_tokens INT64 NOT NULL OPTIONS (description = 'Server-billed 1h cache-write tokens.'),
+  output_tokens INT64 NOT NULL OPTIONS (description = 'Server-billed output tokens.'),
+  thinking_tokens INT64 NOT NULL OPTIONS (description = 'Server-billed thinking tokens.'),
+  request_timestamp TIMESTAMP NOT NULL OPTIONS (description = 'UTC server request timestamp.')
+)
+PARTITION BY DATE(request_timestamp)
+CLUSTER BY apphub_application_id, model_name, serving_traffic_type
+OPTIONS (
+  description = 'Server-side inference_request telemetry for OTel-vs-billing reconciliation and involuntary spillover detection.'
+);
+
+-- -----------------------------------------------------------------------------
+-- 7C. BigQuery INFORMATION_SCHEMA.JOBS Query Cost Ledger (M10-3)
+-- -----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `agent_eval.bq_query_jobs` (
+  job_id STRING NOT NULL OPTIONS (description = 'BigQuery job_id from INFORMATION_SCHEMA.JOBS_BY_PROJECT.'),
+  apphub_application_id STRING NOT NULL OPTIONS (description = 'Attributed application identifier from job labels.'),
+  outcome_id STRING OPTIONS (description = 'Optional business outcome identifier from job labels.'),
+  total_bytes_billed INT64 NOT NULL OPTIONS (description = 'Bytes billed for on-demand query pricing ($6.25/TiB).'),
+  total_slot_ms INT64 NOT NULL OPTIONS (description = 'Slot milliseconds consumed for capacity-slot pricing.'),
+  pricing_mode STRING NOT NULL OPTIONS (description = 'on_demand or capacity_slot.'),
+  query_cost_usd FLOAT64 NOT NULL OPTIONS (description = 'Attributed BigQuery execution cost in USD.'),
+  created_at TIMESTAMP NOT NULL OPTIONS (description = 'UTC BigQuery job creation timestamp.')
+)
+PARTITION BY DATE(created_at)
+CLUSTER BY apphub_application_id, pricing_mode
+OPTIONS (
+  description = 'Attributed BigQuery query scan/slot costs folded into enterprise CPVO.'
+);
+
+-- -----------------------------------------------------------------------------
+-- 7D. Multi-Cloud BigQuery Omni Remote Trace Slice Rollups (M11-3)
+-- -----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `agent_eval.remote_trace_slices` (
+  cloud_provider STRING NOT NULL OPTIONS (description = 'Origin cloud spoke: aws, azure, or on_prem.'),
+  cloud_region STRING NOT NULL OPTIONS (description = 'Origin cloud region.'),
+  usage_hour TIMESTAMP NOT NULL OPTIONS (description = 'UTC hourly rollup bucket.'),
+  apphub_application_id STRING NOT NULL OPTIONS (description = 'Normalized App Hub application ID or unregistered_app.'),
+  workload_principal STRING NOT NULL OPTIONS (description = 'Normalized principal:// or spiffe:// workload identity.'),
+  model_name STRING NOT NULL OPTIONS (description = 'Model identifier.'),
+  finops_traffic_type STRING NOT NULL OPTIONS (description = 'FinOps traffic lane: production_inference, conflict_escalation, agent_gym_eval, autorater_judge, optimize.'),
+  total_traces INT64 NOT NULL OPTIONS (description = 'Remote trace count rolled up in-region with zero raw prompt egress.'),
+  rule0_passing_traces INT64 NOT NULL OPTIONS (description = 'Remote traces passing Rule 0 checks.'),
+  verified_outcomes INT64 NOT NULL OPTIONS (description = 'Remote verified outcomes counted in-region.'),
+  total_input_tokens INT64 NOT NULL OPTIONS (description = 'Aggregated remote input tokens.'),
+  total_output_tokens INT64 NOT NULL OPTIONS (description = 'Aggregated remote output tokens.'),
+  weighted_burndown_tokens FLOAT64 NOT NULL OPTIONS (description = 'Aggregated remote weighted burndown tokens.'),
+  total_spend_usd FLOAT64 NOT NULL OPTIONS (description = 'Aggregated remote model + judge spend in USD.')
+)
+PARTITION BY DATE(usage_hour)
+CLUSTER BY cloud_provider, apphub_application_id, model_name
+OPTIONS (
+  description = 'Zero-egress partial telemetry rollups pushed from AWS/Azure BigQuery Omni spokes.'
+);
 
 -- -----------------------------------------------------------------------------
 -- 8. M2 Multi-Agent Fleet Ground-Truth Labels, Outcomes & Run Manifests
@@ -537,13 +624,13 @@ CREATE TABLE IF NOT EXISTS `agent_eval_seed.seed_trace_payloads` (
 -- 9. Remote Cloud AI Autorater Models
 -- -----------------------------------------------------------------------------
 CREATE MODEL IF NOT EXISTS `agent_eval.gemini_3_8_flash_judge`
-REMOTE WITH CONNECTION `us.vertex_ai_connection`
+REMOTE WITH CONNECTION `${CONNECTION_ID}`
 OPTIONS (
   endpoint = 'gemini-3.8-flash'
 );
 
 CREATE MODEL IF NOT EXISTS `agent_eval.gemini_4_argon_judge`
-REMOTE WITH CONNECTION `us.vertex_ai_connection`
+REMOTE WITH CONNECTION `${CONNECTION_ID}`
 OPTIONS (
   endpoint = 'gemini-4-argon'
 );

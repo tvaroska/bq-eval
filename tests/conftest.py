@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
-from bq_eval.contract.otel import FinOpsTrafficType, GenAISpanKind, OTelGenAISpanRecord
+from bq_eval.contract.otel import (
+    FinOpsTrafficType,
+    GenAISpanKind,
+    OTelGenAISpanRecord,
+    ServingTrafficType,
+)
 
 REQUIRED_OTEL_SPANS_VIEW_COLUMNS: tuple[str, ...] = (
     "trace_id",
@@ -38,6 +43,13 @@ REQUIRED_OTEL_SPANS_VIEW_COLUMNS: tuple[str, ...] = (
     "skill_id",
     "skill_version",
     "entity_id",
+    "serving_traffic_type",
+    "request_type_header",
+    "http_status_code",
+    "cache_write_5m_tokens",
+    "cache_write_1h_tokens",
+    "session_id",
+    "turn_index",
     "attributes",
 )
 
@@ -70,6 +82,13 @@ def make_span(  # noqa: PLR0913
     source_mode: str | None = None,
     skill_id: str | None = None,
     skill_version: str | None = None,
+    serving_traffic_type: ServingTrafficType = ServingTrafficType.STANDARD,
+    request_type_header: str | None = None,
+    http_status_code: int | None = None,
+    cache_write_5m_tokens: int = 0,
+    cache_write_1h_tokens: int = 0,
+    session_id: str | None = None,
+    turn_index: int | None = None,
     attributes: dict[str, str] | None = None,
     base_time: datetime | None = None,
 ) -> OTelGenAISpanRecord:
@@ -103,5 +122,12 @@ def make_span(  # noqa: PLR0913
         source_mode=source_mode,
         skill_id=skill_id,
         skill_version=skill_version,
+        serving_traffic_type=serving_traffic_type,
+        request_type_header=request_type_header,
+        http_status_code=http_status_code,
+        cache_write_5m_tokens=cache_write_5m_tokens,
+        cache_write_1h_tokens=cache_write_1h_tokens,
+        session_id=session_id,
+        turn_index=turn_index,
         attributes=attributes or {},
     )

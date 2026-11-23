@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import cast
 
 from bq_eval import __version__
+from bq_eval.cli.bootstrap_cmd import register_bootstrap_subparser, run_bootstrap_command
 from bq_eval.cli.server import create_workbench_server
 from bq_eval.contract.otel import BQAAAgentEvent
 from bq_eval.contract.pricing import MANAGED_EVALUATE_AGENT_METRICS
@@ -208,6 +209,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional path to export aggregated TracePayloadRecord rows as JSONL.",
     )
+    register_bootstrap_subparser(sub)
     return parser
 
 
@@ -383,6 +385,7 @@ def _run_command(args: argparse.Namespace) -> int:
         "loadgen": _run_loadgen,
         "judge-sql": _run_judge_sql,
         "bqaa": _run_bqaa,
+        "bootstrap": run_bootstrap_command,
     }
     handler = handlers.get(args.command)
     return handler(args) if handler is not None else 1

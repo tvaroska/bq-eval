@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS `agent_eval.eval_results` (
   judge_thinking_tokens INT64 NOT NULL OPTIONS (description = 'Reasoning tokens consumed by the judge call.'),
   policy_sha256 STRING OPTIONS (description = 'SHA-256 hash of active policy text for zero-day amendment drift tracking.'),
   amended_clause_ids STRING OPTIONS (description = 'Comma-separated clause IDs modified under the active policy revision.'),
+  target_clause_id STRING OPTIONS (description = 'Optional clause identifier evaluated by this trace/rubric pair for clause-scoped EVAL-P09 NFR gating.'),
   evaluated_at TIMESTAMP NOT NULL OPTIONS (description = 'UTC judge execution timestamp.')
 )
 PARTITION BY DATE(evaluated_at)
@@ -96,6 +97,7 @@ WITH normalized_results AS (
     e.reasoning_trace,
     e.policy_sha256,
     e.amended_clause_ids,
+    e.target_clause_id,
     e.evaluated_at
   FROM `agent_eval.eval_results` AS e
 ),
@@ -120,15 +122,32 @@ SELECT
   base.eval_run_id AS baseline_run_id,
   cand.eval_run_id AS candidate_run_id,
   base.trace_id,
+  COALESCE(cand.target_clause_id, base.target_clause_id) AS target_clause_id,
   base.policy_sha256 AS baseline_policy_sha256,
   cand.policy_sha256 AS candidate_policy_sha256,
   (base.policy_sha256 IS DISTINCT FROM cand.policy_sha256) AS policy_changed,
   cand.amended_clause_ids,
+  (
+    (base.policy_sha256 IS DISTINCT FROM cand.policy_sha256)
+    AND COALESCE(cand.target_clause_id, base.target_clause_id) IS NOT NULL
+    AND CONCAT(',', COALESCE(cand.amended_clause_ids, ''), ',')
+      LIKE CONCAT('%,', COALESCE(cand.target_clause_id, base.target_clause_id), ',%')
+  ) AS is_clause_amended,
   base.ordinal_score AS baseline_score,
   cand.ordinal_score AS candidate_score,
   base.binary_pass AS baseline_pass,
   cand.binary_pass AS candidate_pass,
   (base.binary_pass AND NOT cand.binary_pass) AS is_negative_flip,
+  (
+    base.binary_pass
+    AND NOT cand.binary_pass
+    AND NOT (
+      (base.policy_sha256 IS DISTINCT FROM cand.policy_sha256)
+      AND COALESCE(cand.target_clause_id, base.target_clause_id) IS NOT NULL
+      AND CONCAT(',', COALESCE(cand.amended_clause_ids, ''), ',')
+        LIKE CONCAT('%,', COALESCE(cand.target_clause_id, base.target_clause_id), ',%')
+    )
+  ) AS is_unamended_negative_flip,
   (NOT base.binary_pass AND cand.binary_pass) AS is_positive_flip,
   cand.reasoning_trace AS candidate_reasoning
 FROM deduped_results AS base
@@ -145,3 +164,35 @@ WHERE base_start.run_started_at < cand_start.run_started_at
     base_start.run_started_at = cand_start.run_started_at
     AND base.eval_run_id < cand.eval_run_id
   );
+
+-- -----------------------------------------------------------------------------
+-- 5. View 3C: Clause-Scoped EVAL-P09 Policy NFR == 0.0% Gate (`v_step3_policy_nfr_gate`)
+--    * Enforces strict NFR == 0.0% across unamended policy clauses while isolating
+--      flips on explicitly amended clauses under a new `policy_sha256`.
+-- -----------------------------------------------------------------------------
+CREATE OR REPLACE VIEW `agent_eval.v_step3_policy_nfr_gate` AS
+SELECT
+  apphub_application_id,
+  rubric_id,
+  baseline_run_id,
+  candidate_run_id,
+  COUNT(*) AS paired_traces,
+  COUNTIF(baseline_pass) AS baseline_passing_traces,
+  COUNTIF(is_negative_flip) AS total_negative_flips,
+  COUNTIF(is_unamended_negative_flip) AS unamended_negative_flips,
+  COUNTIF(is_negative_flip AND is_clause_amended) AS amended_clause_flips,
+  COUNTIF(is_positive_flip) AS positive_flips,
+  COALESCE(
+    SAFE_DIVIDE(
+      COUNTIF(is_unamended_negative_flip),
+      NULLIF(COUNTIF(baseline_pass AND NOT is_clause_amended), 0)
+    ),
+    0.0
+  ) AS unamended_nfr,
+  COUNTIF(is_unamended_negative_flip) = 0 AS passes_nfr_gate
+FROM `agent_eval.v_step3_paired_run_comparison`
+GROUP BY
+  apphub_application_id,
+  rubric_id,
+  baseline_run_id,
+  candidate_run_id;

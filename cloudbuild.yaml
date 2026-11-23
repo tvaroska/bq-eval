@@ -1,10 +1,17 @@
+substitutions:
+  _REGION: us-central1
+  _AR_REPO: containers
+  _IMAGE_NAME: bq-eval
+  _PUSH: "false"
+
 steps:
-  - name: "ghcr.io/astral-sh/uv:0.12.24-python3.12-bookworm-slim"
+  - name: "ghcr.io/astral-sh/uv:0.12.24-python3.12-trixie-slim"
     id: "lint-and-test"
     entrypoint: "bash"
     args:
       - "-c"
       - |
+        set -euo pipefail
         export PYTHONDONTWRITEBYTECODE=1
         uv lock --check --offline --no-config
         uv sync --frozen --extra dev --no-config
@@ -17,7 +24,65 @@ steps:
         .venv/bin/bq-eval loadgen --replicas 5 --last-hour-replicas 2 >/dev/null
         .venv/bin/bq-eval judge-sql --project-id demo-proj >/dev/null
         .venv/bin/bq-eval judge-sql --engine evaluate-agent --project-id demo-proj >/dev/null
+        .venv/bin/bq-eval bootstrap --mode light --offline-schema >/dev/null
+        .venv/bin/bq-eval bootstrap --mode full --offline-schema >/dev/null
+        .venv/bin/bq-eval bootstrap --mode hybrid --offline-schema >/dev/null
         .venv/bin/python examples/run_showcase_demo.py >/dev/null
+
+  - name: "hashicorp/terraform:1.9.8"
+    id: "terraform-test"
+    waitFor: ["-"]
+    entrypoint: "sh"
+    args:
+      - "-c"
+      - |
+        set -eu
+        terraform -chdir=terraform init -backend=false -input=false
+        terraform -chdir=terraform validate
+        terraform -chdir=terraform test
+
+  - name: "gcr.io/cloud-builders/docker"
+    id: "docker-build"
+    waitFor: ["lint-and-test"]
+    entrypoint: "bash"
+    env:
+      - "DOCKER_BUILDKIT=1"
+    args:
+      - "-c"
+      - |
+        set -euo pipefail
+        TAG="${SHORT_SHA}"
+        if [[ -z "$${TAG}" ]]; then TAG="local"; fi
+        IMAGE_REPO="${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/${_IMAGE_NAME}"
+        BUILD_TAG="$${IMAGE_REPO}:$${TAG}"
+        docker build -t "$${BUILD_TAG}" -f Dockerfile .
+        if [[ -n "${TAG_NAME}" || "${_PUSH}" == "true" ]]; then
+          docker tag "$${BUILD_TAG}" "$${IMAGE_REPO}:latest"
+          docker push "$${BUILD_TAG}"
+          docker push "$${IMAGE_REPO}:latest"
+        fi
+
+  - name: "gcr.io/cloud-builders/docker"
+    id: "trivy-scan"
+    waitFor: ["docker-build"]
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        set -euo pipefail
+        TAG="${SHORT_SHA}"
+        if [[ -z "$${TAG}" ]]; then TAG="local"; fi
+        IMAGE_REPO="${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/${_IMAGE_NAME}"
+        BUILD_TAG="$${IMAGE_REPO}:$${TAG}"
+        docker run --rm \
+          -v /var/run/docker.sock:/var/run/docker.sock \
+          aquasec/trivy:0.58.2 image \
+          --scanners vuln \
+          --pkg-types os,library \
+          --severity HIGH,CRITICAL \
+          --ignore-unfixed \
+          --exit-code 1 \
+          "$${BUILD_TAG}"
 
 options:
   logging: CLOUD_LOGGING_ONLY

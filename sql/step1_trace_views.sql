@@ -11,18 +11,32 @@ OPTIONS (
   description = 'BQ Eval: Step 1-3 progressive trace evaluation, rubric catalog, and cost management.'
 );
 
--- View 1.0: Canonical Built-In Default Model Pricing (`v_default_model_pricing`)
+-- View 1.0: Canonical Built-In Default 1P & 3P Model Pricing (`v_default_model_pricing`)
 --   Single fallback SKU table shared across Step 1 and Enterprise views (`0` extra tables).
 CREATE OR REPLACE VIEW `agent_eval.v_default_model_pricing` AS
-SELECT 'gemini-4-argon' AS model_name, 1.25 AS input_usd_per_1m, 0.125 AS cached_input_usd_per_1m, 5.00 AS output_usd_per_1m, 200000 AS long_context_threshold_tokens, 2.50 AS long_context_input_usd_per_1m, 0.250 AS long_context_cached_usd_per_1m, 18.75 AS long_context_output_usd_per_1m
+SELECT
+  'gemini-4-argon' AS model_name, 'google' AS provider, 'long_term_ga' AS lifecycle_track,
+  1.25 AS input_usd_per_1m, 0.125 AS cached_input_usd_per_1m, 1.25 AS cache_write_5m_usd_per_1m, 1.25 AS cache_write_1h_usd_per_1m, 5.00 AS output_usd_per_1m,
+  200000 AS long_context_threshold_tokens, 2.50 AS long_context_input_usd_per_1m, 0.250 AS long_context_cached_usd_per_1m, 18.75 AS long_context_output_usd_per_1m,
+  1.0 AS burndown_uncached_weight, 0.1 AS burndown_cached_weight, 1.0 AS burndown_cache_write_5m_weight, 1.0 AS burndown_cache_write_1h_weight, 4.0 AS burndown_output_weight,
+  2.0 AS burndown_long_uncached_weight, 0.2 AS burndown_long_cached_weight, 7.5 AS burndown_long_output_weight,
+  1.8 AS priority_paygo_multiplier, 0.5 AS flex_paygo_multiplier
 UNION ALL
-SELECT 'gemini-3.5-flash-lite', 0.075, 0.0075, 0.30, 200000, 0.15, 0.015, 1.125
+SELECT 'gemini-4-carbon', 'google', 'short_term_ga', 1.25, 0.125, 1.25, 1.25, 5.00, 200000, 2.50, 0.250, 18.75, 1.0, 0.1, 1.0, 1.0, 4.0, 2.0, 0.2, 7.5, 1.8, 0.5
 UNION ALL
-SELECT 'gemini-3.8-flash', 0.15, 0.015, 0.60, 200000, 0.30, 0.030, 2.25
+SELECT 'gemini-3.5-flash-lite', 'google', 'long_term_ga', 0.075, 0.0075, 0.075, 0.075, 0.30, 200000, 0.15, 0.015, 1.125, 1.0, 0.1, 1.0, 1.0, 4.0, 2.0, 0.2, 7.5, 1.8, 0.5
 UNION ALL
-SELECT 'ai_evaluate_agent_managed', 0.15, 0.015, 0.60, 200000, 0.30, 0.030, 2.25;
+SELECT 'gemini-3.8-flash', 'google', 'long_term_ga', 0.15, 0.015, 0.15, 0.15, 0.60, 200000, 0.30, 0.030, 2.25, 1.0, 0.1, 1.0, 1.0, 4.0, 2.0, 0.2, 7.5, 1.8, 0.5
+UNION ALL
+SELECT 'ai_evaluate_agent_managed', 'google', 'long_term_ga', 0.15, 0.015, 0.15, 0.15, 0.60, 200000, 0.30, 0.030, 2.25, 1.0, 0.1, 1.0, 1.0, 4.0, 2.0, 0.2, 7.5, 1.8, 0.5
+UNION ALL
+SELECT 'claude-sonnet-4-6', 'anthropic', 'long_term_ga', 3.00, 0.30, 3.75, 6.00, 15.00, CAST(NULL AS INT64), 3.00, 0.30, 15.00, 1.0, 0.1, 1.25, 2.0, 5.0, 1.0, 0.1, 5.0, 1.8, 0.5
+UNION ALL
+SELECT 'claude-opus-4-6', 'anthropic', 'long_term_ga', 15.00, 1.50, 18.75, 30.00, 75.00, CAST(NULL AS INT64), 15.00, 1.50, 75.00, 1.0, 0.1, 1.25, 2.0, 5.0, 1.0, 0.1, 5.0, 1.8, 0.5
+UNION ALL
+SELECT 'claude-sonnet-5-5', 'anthropic', 'long_term_ga', 3.00, 0.30, 3.75, 6.00, 15.00, CAST(NULL AS INT64), 3.00, 0.30, 15.00, 1.0, 0.1, 1.25, 2.0, 5.0, 1.0, 0.1, 5.0, 1.8, 0.5;
 
--- View 1A: Span-Level Waterfall with Portable App/BU ID & Default Pricing
+-- View 1A: Span-Level Waterfall with Portable App/BU ID, 1P/3P Burndown & PayGo Multipliers
 CREATE OR REPLACE VIEW `agent_eval.v_step1_trace_waterfall` AS
 SELECT
   s.trace_id,
@@ -50,17 +64,24 @@ SELECT
   s.otel_span_kind,
   s.span_kind,
   s.model_name,
+  COALESCE(p.provider, 'google') AS provider,
+  COALESCE(p.lifecycle_track, 'long_term_ga') AS lifecycle_track,
   s.tool_name,
   s.tool_call_status,
   s.status_code,
   COALESCE(s.rule0_pass, s.status_code != 'ERROR') AS rule0_pass,
   COALESCE(s.finops_traffic_type, 'production_inference') AS finops_traffic_type,
+  COALESCE(s.serving_traffic_type, 'STANDARD') AS serving_traffic_type,
+  s.request_type_header,
+  s.http_status_code,
   s.outcome_id,
   s.outcome_owner,
   s.source_mode,
   s.skill_id,
   s.skill_version,
   s.entity_id,
+  s.session_id,
+  s.turn_index,
   s.start_time,
   s.end_time,
   s.receive_time,
@@ -68,36 +89,63 @@ SELECT
   TIMESTAMP_DIFF(s.receive_time, s.end_time, MILLISECOND) AS ingestion_lag_ms,
   s.input_tokens,
   s.cached_input_tokens,
-  GREATEST(0, s.input_tokens - s.cached_input_tokens) AS uncached_input_tokens,
+  COALESCE(s.cache_write_5m_tokens, 0) AS cache_write_5m_tokens,
+  COALESCE(s.cache_write_1h_tokens, 0) AS cache_write_1h_tokens,
+  GREATEST(
+    0,
+    s.input_tokens
+      - s.cached_input_tokens
+      - COALESCE(s.cache_write_5m_tokens, 0)
+      - COALESCE(s.cache_write_1h_tokens, 0)
+  ) AS uncached_input_tokens,
   s.output_tokens,
   s.thinking_tokens,
-  s.input_tokens > COALESCE(p.long_context_threshold_tokens, 200000) AS is_long_context_cliff,
+  (p.long_context_threshold_tokens IS NOT NULL AND s.input_tokens > p.long_context_threshold_tokens) AS is_long_context_cliff,
   CASE
-    WHEN s.input_tokens > COALESCE(p.long_context_threshold_tokens, 200000) THEN
-      (2.0 * GREATEST(0, s.input_tokens - s.cached_input_tokens))
-      + (0.2 * s.cached_input_tokens)
-      + (7.5 * (s.output_tokens + s.thinking_tokens))
+    WHEN p.long_context_threshold_tokens IS NOT NULL AND s.input_tokens > p.long_context_threshold_tokens THEN
+      (COALESCE(p.burndown_long_uncached_weight, 2.0) * GREATEST(0, s.input_tokens - s.cached_input_tokens - COALESCE(s.cache_write_5m_tokens, 0) - COALESCE(s.cache_write_1h_tokens, 0)))
+      + (COALESCE(p.burndown_long_cached_weight, 0.2) * s.cached_input_tokens)
+      + (COALESCE(p.burndown_cache_write_5m_weight, 1.0) * COALESCE(s.cache_write_5m_tokens, 0))
+      + (COALESCE(p.burndown_cache_write_1h_weight, 1.0) * COALESCE(s.cache_write_1h_tokens, 0))
+      + (COALESCE(p.burndown_long_output_weight, 7.5) * (s.output_tokens + s.thinking_tokens))
     ELSE
-      (1.0 * GREATEST(0, s.input_tokens - s.cached_input_tokens))
-      + (0.1 * s.cached_input_tokens)
-      + (4.0 * (s.output_tokens + s.thinking_tokens))
+      (COALESCE(p.burndown_uncached_weight, 1.0) * GREATEST(0, s.input_tokens - s.cached_input_tokens - COALESCE(s.cache_write_5m_tokens, 0) - COALESCE(s.cache_write_1h_tokens, 0)))
+      + (COALESCE(p.burndown_cached_weight, 0.1) * s.cached_input_tokens)
+      + (COALESCE(p.burndown_cache_write_5m_weight, 1.0) * COALESCE(s.cache_write_5m_tokens, 0))
+      + (COALESCE(p.burndown_cache_write_1h_weight, 1.0) * COALESCE(s.cache_write_1h_tokens, 0))
+      + (COALESCE(p.burndown_output_weight, 4.0) * (s.output_tokens + s.thinking_tokens))
   END AS weighted_burndown_tokens,
   CASE
     WHEN s.model_name IS NULL OR s.model_name = 'none' OR (s.input_tokens = 0 AND s.output_tokens = 0 AND s.thinking_tokens = 0) THEN
       0.0
-    WHEN s.input_tokens > COALESCE(p.long_context_threshold_tokens, 200000) THEN
-      (GREATEST(0, s.input_tokens - s.cached_input_tokens) / 1e6) * p.long_context_input_usd_per_1m
-      + (s.cached_input_tokens / 1e6) * p.long_context_cached_usd_per_1m
-      + ((s.output_tokens + s.thinking_tokens) / 1e6) * p.long_context_output_usd_per_1m
     ELSE
-      (GREATEST(0, s.input_tokens - s.cached_input_tokens) / 1e6) * p.input_usd_per_1m
-      + (s.cached_input_tokens / 1e6) * p.cached_input_usd_per_1m
-      + ((s.output_tokens + s.thinking_tokens) / 1e6) * p.output_usd_per_1m
+      (
+        CASE UPPER(COALESCE(s.serving_traffic_type, 'STANDARD'))
+          WHEN 'PRIORITY' THEN COALESCE(p.priority_paygo_multiplier, 1.8)
+          WHEN 'FLEX' THEN COALESCE(p.flex_paygo_multiplier, 0.5)
+          ELSE 1.0
+        END
+      ) * (
+        CASE
+          WHEN p.long_context_threshold_tokens IS NOT NULL AND s.input_tokens > p.long_context_threshold_tokens THEN
+            (GREATEST(0, s.input_tokens - s.cached_input_tokens - COALESCE(s.cache_write_5m_tokens, 0) - COALESCE(s.cache_write_1h_tokens, 0)) / 1e6) * p.long_context_input_usd_per_1m
+            + (s.cached_input_tokens / 1e6) * p.long_context_cached_usd_per_1m
+            + (COALESCE(s.cache_write_5m_tokens, 0) / 1e6) * p.cache_write_5m_usd_per_1m
+            + (COALESCE(s.cache_write_1h_tokens, 0) / 1e6) * p.cache_write_1h_usd_per_1m
+            + ((s.output_tokens + s.thinking_tokens) / 1e6) * p.long_context_output_usd_per_1m
+          ELSE
+            (GREATEST(0, s.input_tokens - s.cached_input_tokens - COALESCE(s.cache_write_5m_tokens, 0) - COALESCE(s.cache_write_1h_tokens, 0)) / 1e6) * p.input_usd_per_1m
+            + (s.cached_input_tokens / 1e6) * p.cached_input_usd_per_1m
+            + (COALESCE(s.cache_write_5m_tokens, 0) / 1e6) * p.cache_write_5m_usd_per_1m
+            + (COALESCE(s.cache_write_1h_tokens, 0) / 1e6) * p.cache_write_1h_usd_per_1m
+            + ((s.output_tokens + s.thinking_tokens) / 1e6) * p.output_usd_per_1m
+        END
+      )
   END AS span_cost_usd,
   s.attributes
 FROM `agent_eval.otel_spans` AS s
 LEFT JOIN `agent_eval.v_default_model_pricing` AS p
-  ON REGEXP_REPLACE(s.model_name, r'-(?:\d{3}|ga|rc|qcd|preview)$', '') = p.model_name;
+  ON REGEXP_REPLACE(REGEXP_REPLACE(s.model_name, r'^.*/', ''), r'-(?:\d{3}|ga|rc|qcd|preview)$', '') = p.model_name;
 
 -- -----------------------------------------------------------------------------
 -- View 1B: Trace-Level Deterministic SQL Evaluation ($0 LLM Judge Cost)
@@ -358,11 +406,11 @@ SELECT
   SUM(IF(w.outcome_id IS NOT NULL AND w.outcome_id != '', w.span_cost_usd, 0.0)) AS attributed_spend_usd,
   SUM(IF(w.outcome_id IS NULL OR w.outcome_id = '', COALESCE(w.span_cost_usd, 0.0), 0.0)) AS unattributed_spend_usd,
   COUNTIF(
-    w.finops_traffic_type NOT IN ('production_inference', 'conflict_escalation', 'agent_gym_eval', 'autorater_judge')
+    w.finops_traffic_type NOT IN ('production_inference', 'conflict_escalation', 'agent_gym_eval', 'autorater_judge', 'optimize')
   ) AS unclassified_traffic_spans,
   SUM(
     IF(
-      w.finops_traffic_type NOT IN ('production_inference', 'conflict_escalation', 'agent_gym_eval', 'autorater_judge'),
+      w.finops_traffic_type NOT IN ('production_inference', 'conflict_escalation', 'agent_gym_eval', 'autorater_judge', 'optimize'),
       COALESCE(w.span_cost_usd, 0.0),
       0.0
     )
@@ -479,7 +527,7 @@ SELECT
   100.0 * AVG(IF(s.input_tokens > 0 OR s.output_tokens > 0 OR s.thinking_tokens > 0, 1.0, 0.0)) AS tokens_coverage_pct,
   100.0 * AVG(
     IF(
-      s.finops_traffic_type IN ('production_inference', 'conflict_escalation', 'agent_gym_eval', 'autorater_judge'),
+      s.finops_traffic_type IN ('production_inference', 'conflict_escalation', 'agent_gym_eval', 'autorater_judge', 'optimize'),
       1.0,
       0.0
     )

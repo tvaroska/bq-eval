@@ -96,6 +96,8 @@ class SQLTraceEvalSummary(BaseModel):
     conflict_escalation_usd: NonNegFloat
     agent_gym_eval_usd: NonNegFloat
     autorater_judge_usd: NonNegFloat
+    optimize_usd: NonNegFloat = 0.0
+    bq_query_cost_usd: NonNegFloat = 0.0
     unclassified_usd: NonNegFloat = 0.0
     total_spend_usd: NonNegFloat
     cost_per_verified_outcome_usd: NonNegFloat | None
@@ -189,11 +191,18 @@ class HourlyBurndownExportRow(BaseModel):
     model_name: str
     model: str
     finops_traffic_type: str
+    serving_traffic_type: str = "STANDARD"
     distinct_traces: int = Field(..., ge=0)
     span_count: int = Field(..., ge=0)
+    ok_span_count: int = Field(default=0, ge=0)
+    error_span_count: int = Field(default=0, ge=0)
+    http_429_count: int = Field(default=0, ge=0)
+    spillover_span_count: int = Field(default=0, ge=0)
     input_tokens: int = Field(..., ge=0)
     cached_input_tokens: int = Field(..., ge=0)
     cached_tokens: int = Field(..., ge=0)
+    cache_write_5m_tokens: int = Field(default=0, ge=0)
+    cache_write_1h_tokens: int = Field(default=0, ge=0)
     uncached_input_tokens: int = Field(..., ge=0)
     output_tokens: int = Field(..., ge=0)
     thinking_tokens: int = Field(..., ge=0)

@@ -38,5 +38,8 @@ if [[ $# -eq 0 ]]; then
   uv run --no-sync bq-eval loadgen --replicas 5 --last-hour-replicas 2 >/dev/null
   uv run --no-sync bq-eval judge-sql --project-id demo-proj >/dev/null
   uv run --no-sync bq-eval judge-sql --engine evaluate-agent --project-id demo-proj >/dev/null
+  uv run --no-sync bq-eval bootstrap --mode light --project-id demo-proj --offline-schema >/dev/null
+  uv run --no-sync bq-eval bootstrap --mode full --project-id demo-proj --offline-schema >/dev/null
+  uv run --no-sync bq-eval bootstrap --mode hybrid --project-id demo-proj --offline-schema >/dev/null
   uv run --no-sync python examples/run_showcase_demo.py >/dev/null
 fi

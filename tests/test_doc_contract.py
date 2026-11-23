@@ -215,15 +215,16 @@ def test_readme_kpi_rows_match_demo_json_and_offline_twin() -> None:
     )
     manifest = bq_dry_run.collect_dry_run_manifest(project_id="showcase-project")
     assert dry_run_receipt == manifest
-    assert manifest["checked"] == 55
-    assert manifest["skipped"] == 13
-    assert "`55`" in readme
+    assert manifest["checked"] == 73
+    assert manifest["skipped"] == 17
+    assert "`73`" in readme
 
     for token in (
         "uv sync --extra dev",
         "bq_eval.cli serve",
         "bq_eval.cli judge-sql",
         "bq_eval.cli loadgen",
+        "bq_eval.cli bootstrap",
         "BigQueryAgentAnalyticsPlugin",
     ):
         assert token in readme

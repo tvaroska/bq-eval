@@ -29,6 +29,8 @@ from bq_eval.engine.quota import (
 from bq_eval.showcase.pipeline import run_showcase_pipeline
 from scripts.bq_dry_run import split_sql_statements
 from tests.test_sql_contracts import (
+    ENTERPRISE_EVAL_RESULTS_BASE_INSERT,
+    ENTERPRISE_OTEL_SPANS_BASE_INSERT,
     SQL_DIR,
     _create_enterprise_sqlite_fixture,
     _extract_view_sql_text,
@@ -343,7 +345,7 @@ def _seed_port_parity_fixture(
         passed = i < 9
         outcomes[tid] = passed
         conn.execute(
-            "INSERT INTO otel_spans VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ENTERPRISE_OTEL_SPANS_BASE_INSERT,
             (
                 tid,
                 f"sp-port-{i:03d}",
@@ -378,7 +380,7 @@ def _seed_port_parity_fixture(
             ),
         )
         conn.execute(
-            "INSERT INTO eval_results VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ENTERPRISE_EVAL_RESULTS_BASE_INSERT,
             (
                 f"ev-port-{i:03d}",
                 "run-port",
@@ -423,7 +425,7 @@ def _seed_port_parity_fixture(
         )
     )
     conn.execute(
-        "INSERT INTO otel_spans VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        ENTERPRISE_OTEL_SPANS_BASE_INSERT,
         (
             "trace-unjudged-001",
             "sp-unjudged-001",

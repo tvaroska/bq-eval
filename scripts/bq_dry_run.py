@@ -44,11 +44,35 @@ SKIP_DRY_RUN_PREFIXES: tuple[str, ...] = (
 )
 
 
-def qualify_project_datasets(sql: str, project_id: str) -> str:
-    """Prefix bare dataset references (`agent_eval.`, etc.) with `project_id.` in memory."""
-    qualified = sql
+def qualify_project_datasets(  # noqa: PLR0913
+    sql: str,
+    project_id: str,
+    *,
+    dataset_id: str = "agent_eval",
+    connection_id: str = "us.vertex_ai_connection",
+    payload_bucket: str | None = None,
+    payload_prefix: str = "bq-eval/",
+) -> str:
+    """Substitute bootstrap placeholders and prefix bare dataset refs with `project_id.` in memory."""
+    bucket = payload_bucket or project_id
+    prefix = payload_prefix.lstrip("/")
+    if prefix and not prefix.endswith("/"):
+        prefix = f"{prefix}/"
+    qualified = (
+        sql.replace("${PROJECT_ID}", project_id)
+        .replace("${DATASET_ID}", dataset_id)
+        .replace("${CONNECTION_ID}", connection_id)
+        .replace("${PAYLOAD_BUCKET}", bucket)
+        .replace("${PREFIX}", prefix)
+        .replace("${AWS_OMNI_CONNECTION_ID}", "aws-us-east-1.omni_connection")
+        .replace("${AZURE_OMNI_CONNECTION_ID}", "azure-eastus2.omni_connection")
+        .replace("${AWS_S3_BUCKET}", "enterprise-aws-otel-bucket")
+        .replace("${AZURE_STORAGE_ACCOUNT}", "enterpriseazureotel")
+        .replace("${AZURE_CONTAINER}", "otel-spans")
+    )
     for dataset in DATASET_PREFIXES:
-        qualified = qualified.replace(f"`{dataset}.", f"`{project_id}.{dataset}.")
+        target_ds = dataset_id if dataset == "agent_eval" else dataset
+        qualified = qualified.replace(f"`{dataset}.", f"`{project_id}.{target_ds}.")
     return qualified
 
 

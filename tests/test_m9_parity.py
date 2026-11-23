@@ -19,11 +19,13 @@ from bq_eval.engine.sql_eval import (
 )
 from tests.conftest import make_span
 from tests.test_sql_contracts import (
+    ENTERPRISE_EVAL_RESULTS_BASE_INSERT,
     _create_enterprise_sqlite_fixture,
     _extract_view_sql_text,
     _install_enterprise_views,
     _new_sqlite_bq_conn,
     _transpile_bq_view_to_sqlite,
+    insert_enterprise_sqlite_span,
 )
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -31,41 +33,7 @@ SQL_DIR = REPO_ROOT / "sql"
 
 
 def _insert_bq_span(conn: sqlite3.Connection, span: OTelGenAISpanRecord) -> None:
-    conn.execute(
-        "INSERT INTO otel_spans VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (
-            span.trace_id,
-            span.span_id,
-            span.parent_span_id,
-            span.span_name,
-            span.gcp_apphub_application_id,
-            span.service_name,
-            span.agent_name,
-            span.otel_span_kind,
-            str(span.span_kind),
-            span.model_name,
-            span.tool_name,
-            span.tool_call_status,
-            span.status_code,
-            1 if span.rule0_pass else 0,
-            str(span.finops_traffic_type),
-            span.outcome_id,
-            span.outcome_owner,
-            span.source_mode,
-            span.skill_id,
-            span.skill_version,
-            span.entity_id,
-            span.start_time.isoformat(),
-            span.end_time.isoformat(),
-            span.end_time.isoformat(),
-            span.latency_ms,
-            span.input_tokens,
-            span.cached_input_tokens,
-            span.output_tokens,
-            span.thinking_tokens,
-            json.dumps(span.attributes),
-        ),
-    )
+    insert_enterprise_sqlite_span(conn, span)
 
 
 def test_m9_2_zero_token_cache_hit_ratio_and_unclassified_traffic_priority_parity() -> None:
@@ -382,7 +350,7 @@ def test_m9_2_real_p95_and_latest_array_agg_plus_strict_judge_pricing() -> None:
 
     # Unknown judge model row in eval_results -> judge pricing fallback must be NULL (0.0 via COALESCE at outer layer, NULL inside SUM)
     conn.execute(
-        "INSERT INTO eval_results VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        ENTERPRISE_EVAL_RESULTS_BASE_INSERT,
         (
             "ev-unk-1",
             "run-unk",
@@ -498,7 +466,9 @@ def test_m9_2_value_parity_step1_step2_xml_escaping_step3_runs_and_ddl_views() -
         )
         """
     )
-    conn.execute("CREATE TABLE completions (_FILE_NAME TEXT, payload TEXT)")
+    conn.execute(
+        "CREATE TABLE completions (_FILE_NAME TEXT, payload TEXT, user_prompt TEXT, retrieved_context TEXT, final_response TEXT)"
+    )
     conn.execute(
         """
         CREATE TABLE rubrics (

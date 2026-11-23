@@ -478,10 +478,13 @@ def test_step3_paired_run_comparison_temporal_order_and_dedup() -> None:
     conn.execute(
         "CREATE TABLE eval_results (apphub_application_id TEXT, rubric_id TEXT, eval_run_id TEXT, "
         "trace_id TEXT, ordinal_score INT, binary_pass INT, reasoning_trace TEXT, "
-        "policy_sha256 TEXT, amended_clause_ids TEXT, evaluated_at TEXT)"
+        "policy_sha256 TEXT, amended_clause_ids TEXT, target_clause_id TEXT DEFAULT NULL, evaluated_at TEXT)"
     )
     conn.executemany(
-        "INSERT INTO eval_results VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO eval_results ("
+        "apphub_application_id, rubric_id, eval_run_id, trace_id, ordinal_score, "
+        "binary_pass, reasoning_trace, policy_sha256, amended_clause_ids, evaluated_at"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [
             (
                 "app-1",
@@ -631,6 +634,8 @@ def _build_stratppi_20_to_1_fixture() -> tuple[
 def test_stratppi_20_to_1_tail_sampling_sql_sqlite_python_parity() -> None:
     """`20:1` tail-skewed fixture proves `< 1e-12` SQL/SQLite/Python parity and unbiased `calibrated_pass_rate` (`M6-1`)."""
     from tests.test_sql_contracts import (
+        ENTERPRISE_EVAL_RESULTS_BASE_INSERT,
+        ENTERPRISE_OTEL_SPANS_BASE_INSERT,
         _create_enterprise_sqlite_fixture,
         _install_enterprise_views,
         _new_sqlite_bq_conn,
@@ -642,14 +647,8 @@ def test_stratppi_20_to_1_tail_sampling_sql_sqlite_python_parity() -> None:
     conn = _new_sqlite_bq_conn()
     _create_enterprise_sqlite_fixture(conn)
     _install_enterprise_views(conn)
-    conn.executemany(
-        "INSERT INTO otel_spans VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        sql_span_rows,
-    )
-    conn.executemany(
-        "INSERT INTO eval_results VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        sql_eval_rows,
-    )
+    conn.executemany(ENTERPRISE_OTEL_SPANS_BASE_INSERT, sql_span_rows)
+    conn.executemany(ENTERPRISE_EVAL_RESULTS_BASE_INSERT, sql_eval_rows)
     sme_rows = (
         [("strat-app", "groundedness_4pt_v1", 1, 4, 1, 4, 1)] * 87
         + [("strat-app", "groundedness_4pt_v1", 1, 4, 1, 2, 0)] * 2

@@ -14,6 +14,7 @@ from bq_eval.contract.results import ScenarioCorpusBundle
 from bq_eval.engine import finops
 from bq_eval.showcase.golden_seeds import build_golden_seed_templates
 from tests.test_sql_contracts import (
+    ENTERPRISE_OTEL_SPANS_BASE_INSERT,
     REPO_ROOT,
     SQL_DIR,
     _create_enterprise_sqlite_fixture,
@@ -190,7 +191,7 @@ def test_app_registry_worm_storage_parameterization_and_dark_loc_removals() -> N
         ("out-span-override", '{"outcome.storage_usd": "0.000900"}'),
     ):
         conn.executemany(
-            "INSERT INTO otel_spans VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ENTERPRISE_OTEL_SPANS_BASE_INSERT,
             [
                 (
                     f"tr-{out_id}",

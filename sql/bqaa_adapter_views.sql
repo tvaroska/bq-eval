@@ -9,6 +9,11 @@
 --     into self-reported `adk.app_name` or `agent` strings.
 -- =============================================================================
 
+CREATE SCHEMA IF NOT EXISTS `agent_eval`
+OPTIONS (
+  description = 'BQ Eval & FinOps: Light Capture (BQAA) and Hybrid Dual-Path adapter dataset.'
+);
+
 -- -----------------------------------------------------------------------------
 -- 1. Zero-Copy Span Waterfall Adapter (`agent_events` -> `v_bqaa_otel_spans`)
 --   * Deduplicates BigQuery Storage Write API retry rows by `event_id`
@@ -139,6 +144,51 @@ SELECT
     JSON_VALUE(attributes, '$.custom_metadata.entity_id'),
     session_id
   ) AS entity_id,
+  CASE UPPER(COALESCE(
+    JSON_VALUE(attributes, '$.usage_metadata.traffic_type'),
+    JSON_VALUE(attributes, '$.custom_metadata."serving.traffic_type"'),
+    'STANDARD'
+  ))
+    WHEN 'PROVISIONED_THROUGHPUT' THEN 'PROVISIONED_THROUGHPUT'
+    WHEN 'DEDICATED' THEN 'PROVISIONED_THROUGHPUT'
+    WHEN 'PRIORITY' THEN 'PRIORITY'
+    WHEN 'ON_DEMAND_PRIORITY' THEN 'PRIORITY'
+    WHEN 'FLEX' THEN 'FLEX'
+    WHEN 'ON_DEMAND_FLEX' THEN 'FLEX'
+    ELSE 'STANDARD'
+  END AS serving_traffic_type,
+  COALESCE(
+    JSON_VALUE(attributes, '$.custom_metadata."x-vertex-ai-llm-request-type"'),
+    JSON_VALUE(attributes, '$.custom_metadata.request_type_header')
+  ) AS request_type_header,
+  COALESCE(
+    SAFE_CAST(JSON_VALUE(content, '$.code') AS INT64),
+    SAFE_CAST(JSON_VALUE(attributes, '$."http.response.status_code"') AS INT64),
+    CASE
+      WHEN UPPER(COALESCE(status, 'OK')) = 'ERROR' OR event_type LIKE '%_ERROR' THEN 500
+      ELSE 200
+    END
+  ) AS http_status_code,
+  COALESCE(
+    SAFE_CAST(JSON_VALUE(attributes, '$.usage_metadata.cache_write_5m_tokens') AS INT64),
+    SAFE_CAST(JSON_VALUE(attributes, '$.usage_metadata.ephemeral_5m_input_tokens') AS INT64),
+    0
+  ) AS cache_write_5m_tokens,
+  COALESCE(
+    SAFE_CAST(JSON_VALUE(attributes, '$.usage_metadata.cache_write_1h_tokens') AS INT64),
+    SAFE_CAST(JSON_VALUE(attributes, '$.usage_metadata.ephemeral_1h_input_tokens') AS INT64),
+    0
+  ) AS cache_write_1h_tokens,
+  COALESCE(
+    JSON_VALUE(attributes, '$.custom_metadata."interaction.session_id"'),
+    session_id
+  ) AS session_id,
+  SAFE_CAST(
+    COALESCE(
+      JSON_VALUE(attributes, '$.custom_metadata."interaction.turn_index"'),
+      JSON_VALUE(attributes, '$.turn_index')
+    ) AS INT64
+  ) AS turn_index,
   JSON_SET(
     COALESCE(attributes, JSON '{}'),
     '$."business_unit"', COALESCE(JSON_VALUE(attributes, '$."business_unit"'), JSON_VALUE(attributes, '$.custom_metadata."business_unit"')),
@@ -323,15 +373,31 @@ INNER JOIN bqaa_step1_eval AS s1
 WHERE s1.step1_pass = TRUE
   AND NOT COALESCE(et.has_tool_loop, FALSE);
 
--- Mode A (Light Capture Only): point `otel_spans` -> `v_bqaa_otel_spans` and `trace_payloads` -> `v_bqaa_trace_payloads`.
--- Mode C: Hybrid Dual-Path (`sql/ddl.sql` `v_otel_allspans_only` / `v_otel_logs_payloads_only` + `BQAA` fallback)
--- CREATE OR REPLACE VIEW `agent_eval.otel_spans` AS
--- SELECT * FROM `agent_eval.v_otel_allspans_only`
--- UNION ALL
--- SELECT b.* FROM `agent_eval.v_bqaa_otel_spans` AS b
--- WHERE NOT EXISTS (SELECT 1 FROM `agent_eval.v_otel_allspans_only` AS f WHERE f.trace_id = b.trace_id);
--- CREATE OR REPLACE VIEW `agent_eval.trace_payloads` AS
--- SELECT * FROM `agent_eval.v_otel_logs_payloads_only`
--- UNION ALL
--- SELECT b.* FROM `agent_eval.v_bqaa_trace_payloads` AS b
--- WHERE NOT EXISTS (SELECT 1 FROM `agent_eval.v_otel_logs_payloads_only` AS f WHERE f.trace_id = b.trace_id);
+-- -----------------------------------------------------------------------------
+-- 4. Live Mode A (Light Capture) & Mode C (Hybrid Dual-Path) Canonical Views
+--    `bq-eval bootstrap --mode light|full|hybrid` binds `otel_spans` and
+--    `trace_payloads` to the selected mode with zero manual SQL edits.
+-- -----------------------------------------------------------------------------
+CREATE OR REPLACE VIEW `agent_eval.v_mode_a_otel_spans` AS
+SELECT * FROM `agent_eval.v_bqaa_otel_spans`;
+
+CREATE OR REPLACE VIEW `agent_eval.v_mode_a_trace_payloads` AS
+SELECT * FROM `agent_eval.v_bqaa_trace_payloads`;
+
+CREATE OR REPLACE VIEW `agent_eval.v_mode_c_hybrid_otel_spans` AS
+SELECT * FROM `agent_eval.v_otel_allspans_only`
+UNION ALL
+SELECT b.*
+FROM `agent_eval.v_bqaa_otel_spans` AS b
+WHERE NOT EXISTS (
+  SELECT 1 FROM `agent_eval.v_otel_allspans_only` AS f WHERE f.trace_id = b.trace_id
+);
+
+CREATE OR REPLACE VIEW `agent_eval.v_mode_c_hybrid_trace_payloads` AS
+SELECT * FROM `agent_eval.v_otel_logs_payloads_only`
+UNION ALL
+SELECT b.*
+FROM `agent_eval.v_bqaa_trace_payloads` AS b
+WHERE NOT EXISTS (
+  SELECT 1 FROM `agent_eval.v_otel_logs_payloads_only` AS f WHERE f.trace_id = b.trace_id
+);

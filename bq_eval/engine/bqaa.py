@@ -14,6 +14,7 @@ from bq_eval.contract.otel import (
     GenAISpanKind,
     OTelGenAISpanRecord,
     TracePayloadRecord,
+    normalize_serving_traffic_type,
 )
 
 SPAN_EVENT_TYPES: frozenset[str] = frozenset(
@@ -59,7 +60,7 @@ def _resolve_strict_apphub_id(custom_metadata: dict[str, Any]) -> str | None:
     )
 
 
-def _extract_usage_tokens(attrs: dict[str, Any]) -> tuple[int, int, int, int]:
+def _extract_usage_tokens(attrs: dict[str, Any]) -> tuple[int, int, int, int, int, int]:
     usage_raw = attrs.get("usage_metadata")
     usage = usage_raw if isinstance(usage_raw, dict) else {}
     input_tokens = max(0, int(usage.get("prompt_token_count", 0) or 0))
@@ -67,9 +68,22 @@ def _extract_usage_tokens(attrs: dict[str, Any]) -> tuple[int, int, int, int]:
         input_tokens,
         max(0, int(usage.get("cached_content_token_count", 0) or 0)),
     )
+    rem = max(0, input_tokens - cached_tokens)
+    cw5_raw = usage.get("cache_write_5m_tokens", usage.get("ephemeral_5m_input_tokens", 0))
+    cache_write_5m = min(rem, max(0, int(cw5_raw or 0)))
+    rem -= cache_write_5m
+    cw1_raw = usage.get("cache_write_1h_tokens", usage.get("ephemeral_1h_input_tokens", 0))
+    cache_write_1h = min(rem, max(0, int(cw1_raw or 0)))
     output_tokens = max(0, int(usage.get("candidates_token_count", 0) or 0))
     thinking_tokens = max(0, int(usage.get("thoughts_token_count", 0) or 0))
-    return input_tokens, cached_tokens, output_tokens, thinking_tokens
+    return (
+        input_tokens,
+        cached_tokens,
+        output_tokens,
+        thinking_tokens,
+        cache_write_5m,
+        cache_write_1h,
+    )
 
 
 def _resolve_traffic_type(meta: dict[str, Any]) -> FinOpsTrafficType:
@@ -147,7 +161,37 @@ def _bqaa_event_to_span(ev: BQAAAgentEvent) -> OTelGenAISpanRecord | None:
         or "unknown_service"
     )
     apphub_app_id = _resolve_strict_apphub_id(meta)
-    input_tokens, cached_tokens, output_tokens, thinking_tokens = _extract_usage_tokens(attrs)
+    (
+        input_tokens,
+        cached_tokens,
+        output_tokens,
+        thinking_tokens,
+        cache_write_5m,
+        cache_write_1h,
+    ) = _extract_usage_tokens(attrs)
+    usage_raw = attrs.get("usage_metadata")
+    usage_map = usage_raw if isinstance(usage_raw, dict) else {}
+    serving_tier = normalize_serving_traffic_type(
+        usage_map.get("traffic_type") or meta.get("serving.traffic_type")
+    )
+    req_hdr = _first_non_empty(
+        meta.get("x-vertex-ai-llm-request-type"),
+        meta.get("request_type_header"),
+    )
+    raw_http = ev.content.get("code", attrs.get("http.response.status_code"))
+    http_code = (
+        int(raw_http)
+        if isinstance(raw_http, (int, float)) and 100 <= int(raw_http) <= 599
+        else (500 if is_error else 200)
+    )
+    raw_turn = meta.get("interaction.turn_index", attrs.get("turn_index"))
+    turn_idx = (
+        int(raw_turn)
+        if isinstance(raw_turn, (int, float))
+        and not isinstance(raw_turn, bool)
+        and int(raw_turn) >= 0
+        else None
+    )
     promoted_attrs: dict[str, Any] = dict(attrs)
     for pass_key in (
         "business_unit",
@@ -196,6 +240,13 @@ def _bqaa_event_to_span(ev: BQAAAgentEvent) -> OTelGenAISpanRecord | None:
         skill_id=_first_non_empty(meta.get("skill_id")),
         skill_version=_first_non_empty(meta.get("skill_version")),
         entity_id=_first_non_empty(meta.get("entity_id"), ev.session_id),
+        serving_traffic_type=serving_tier,
+        request_type_header=req_hdr,
+        http_status_code=http_code,
+        cache_write_5m_tokens=cache_write_5m,
+        cache_write_1h_tokens=cache_write_1h,
+        session_id=_first_non_empty(meta.get("interaction.session_id"), ev.session_id),
+        turn_index=turn_idx,
         attributes=promoted_attrs,
     )
 

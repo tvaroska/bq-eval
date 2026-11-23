@@ -60,6 +60,9 @@ def test_ddl_and_views_table_parity() -> None:
         "agent_eval.eval_results",
         "agent_eval.sme_labels",
         "agent_eval.model_pricing_catalog",
+        "agent_eval.inference_request_logs",
+        "agent_eval.bq_query_jobs",
+        "agent_eval.remote_trace_slices",
         "agent_eval.fleet_labels",
         "agent_eval.fleet_case_outcomes",
         "agent_eval.fleet_runs",
@@ -83,12 +86,18 @@ def test_ddl_and_views_table_parity() -> None:
     assert "CREATE MODEL IF NOT EXISTS `agent_eval.gemini_4_argon_judge`" in ddl_sql
 
     expected_views = {
+        "agent_eval.v_bq_query_cost_attribution",
         "agent_eval.v_trace_waterfall",
         "agent_eval.v_trace_sql_evaluation",
         "agent_eval.v_enterprise_cost_per_verified_outcome",
         "agent_eval.v_counterparty_spend",
         "agent_eval.v_agent_eval_and_finops_summary",
         "agent_eval.v_capacity_hourly_burndown_export",
+        "agent_eval.v_inference_request_reconciliation",
+        "agent_eval.v_app_risk_governance",
+        "agent_eval.v_focus_three_pool_hourly_chargeback",
+        "agent_eval.v_interaction_session_lineage",
+        "agent_eval.v_live_slo_and_429_breaches",
     }
     created_views = set(re.findall(r"CREATE OR REPLACE VIEW `(agent_eval\.[a-z0-9_]+)`", views_sql))
     assert created_views == expected_views

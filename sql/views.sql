@@ -1,10 +1,11 @@
 -- BigQuery Agent Evaluation, Observability & FinOps Enterprise Extension Views
 --   * Zero duplicate view names with `sql/step1_trace_views.sql` (deploy Step 1 first)
---   * Joins `model_pricing_catalog`, `v_default_model_pricing`, `app_registry`, `eval_results`, and `sme_labels`
+--   * Joins `model_pricing_catalog`, `v_default_model_pricing`, `app_registry`,
+--     `eval_results`, `sme_labels`, `inference_request_logs`, and `bq_query_jobs`
 --   * Domain-agnostic core: per-app storage overrides live in `app_registry.storage_usd_per_outcome`
--- Standard: EVAL-P01, EVAL-P03, EVAL-P04, EVAL-P05, EVAL-P08, EVAL-P11 (v2026.11.3)
+-- Standard: EVAL-P01, EVAL-P03, EVAL-P04, EVAL-P05, EVAL-P08, EVAL-P09, EVAL-P11 (v2026.11.3)
 
--- View 1: Span-Level Waterfall with Effective-Dated Pricing & Burndown Weights
+-- View 1: Span-Level Waterfall with Effective-Dated 1P/3P Pricing, Burndown Weights & PayGo Multipliers
 CREATE OR REPLACE VIEW `agent_eval.v_trace_waterfall` AS
 SELECT
   s.trace_id,
@@ -22,17 +23,24 @@ SELECT
   s.otel_span_kind,
   s.span_kind,
   s.model_name,
+  COALESCE(m.provider, d.provider, 'google') AS provider,
+  COALESCE(m.lifecycle_track, d.lifecycle_track, 'long_term_ga') AS lifecycle_track,
   s.tool_name,
   s.tool_call_status,
   s.status_code,
   s.rule0_pass,
   s.finops_traffic_type,
+  COALESCE(s.serving_traffic_type, 'STANDARD') AS serving_traffic_type,
+  s.request_type_header,
+  s.http_status_code,
   s.outcome_id,
   s.outcome_owner,
   s.source_mode,
   s.skill_id,
   s.skill_version,
   s.entity_id,
+  s.session_id,
+  s.turn_index,
   s.start_time,
   s.end_time,
   s.receive_time,
@@ -40,45 +48,86 @@ SELECT
   TIMESTAMP_DIFF(s.receive_time, s.end_time, MILLISECOND) AS ingestion_lag_ms,
   s.input_tokens,
   s.cached_input_tokens,
-  GREATEST(0, s.input_tokens - s.cached_input_tokens) AS uncached_input_tokens,
+  COALESCE(s.cache_write_5m_tokens, 0) AS cache_write_5m_tokens,
+  COALESCE(s.cache_write_1h_tokens, 0) AS cache_write_1h_tokens,
+  GREATEST(
+    0,
+    s.input_tokens
+      - s.cached_input_tokens
+      - COALESCE(s.cache_write_5m_tokens, 0)
+      - COALESCE(s.cache_write_1h_tokens, 0)
+  ) AS uncached_input_tokens,
   s.output_tokens,
   s.thinking_tokens,
-  s.input_tokens > COALESCE(m.long_context_threshold_tokens, d.long_context_threshold_tokens, 200000) AS is_long_context_cliff,
   CASE
-    WHEN s.input_tokens > COALESCE(m.long_context_threshold_tokens, d.long_context_threshold_tokens, 200000) THEN
-      (COALESCE(m.burndown_long_uncached_weight, 2.0) * GREATEST(0, s.input_tokens - s.cached_input_tokens))
-      + (COALESCE(m.burndown_long_cached_weight, 0.2) * s.cached_input_tokens)
-      + (COALESCE(m.burndown_long_output_weight, 7.5) * (s.output_tokens + s.thinking_tokens))
+    WHEN m.model_name IS NOT NULL THEN (m.long_context_threshold_tokens IS NOT NULL AND s.input_tokens > m.long_context_threshold_tokens)
+    ELSE (d.long_context_threshold_tokens IS NOT NULL AND s.input_tokens > d.long_context_threshold_tokens)
+  END AS is_long_context_cliff,
+  CASE
+    WHEN (
+      CASE
+        WHEN m.model_name IS NOT NULL THEN (m.long_context_threshold_tokens IS NOT NULL AND s.input_tokens > m.long_context_threshold_tokens)
+        ELSE (d.long_context_threshold_tokens IS NOT NULL AND s.input_tokens > d.long_context_threshold_tokens)
+      END
+    ) THEN
+      (COALESCE(m.burndown_long_uncached_weight, d.burndown_long_uncached_weight, 2.0) * GREATEST(0, s.input_tokens - s.cached_input_tokens - COALESCE(s.cache_write_5m_tokens, 0) - COALESCE(s.cache_write_1h_tokens, 0)))
+      + (COALESCE(m.burndown_long_cached_weight, d.burndown_long_cached_weight, 0.2) * s.cached_input_tokens)
+      + (COALESCE(m.burndown_cache_write_5m_weight, d.burndown_cache_write_5m_weight, 1.0) * COALESCE(s.cache_write_5m_tokens, 0))
+      + (COALESCE(m.burndown_cache_write_1h_weight, d.burndown_cache_write_1h_weight, 1.0) * COALESCE(s.cache_write_1h_tokens, 0))
+      + (COALESCE(m.burndown_long_output_weight, d.burndown_long_output_weight, 7.5) * (s.output_tokens + s.thinking_tokens))
     ELSE
-      (COALESCE(m.burndown_uncached_weight, 1.0) * GREATEST(0, s.input_tokens - s.cached_input_tokens))
-      + (COALESCE(m.burndown_cached_weight, 0.1) * s.cached_input_tokens)
-      + (COALESCE(m.burndown_output_weight, 4.0) * (s.output_tokens + s.thinking_tokens))
+      (COALESCE(m.burndown_uncached_weight, d.burndown_uncached_weight, 1.0) * GREATEST(0, s.input_tokens - s.cached_input_tokens - COALESCE(s.cache_write_5m_tokens, 0) - COALESCE(s.cache_write_1h_tokens, 0)))
+      + (COALESCE(m.burndown_cached_weight, d.burndown_cached_weight, 0.1) * s.cached_input_tokens)
+      + (COALESCE(m.burndown_cache_write_5m_weight, d.burndown_cache_write_5m_weight, 1.0) * COALESCE(s.cache_write_5m_tokens, 0))
+      + (COALESCE(m.burndown_cache_write_1h_weight, d.burndown_cache_write_1h_weight, 1.0) * COALESCE(s.cache_write_1h_tokens, 0))
+      + (COALESCE(m.burndown_output_weight, d.burndown_output_weight, 4.0) * (s.output_tokens + s.thinking_tokens))
   END AS weighted_burndown_tokens,
   CASE
     WHEN s.model_name IS NULL OR s.model_name = 'none' OR (s.input_tokens = 0 AND s.output_tokens = 0 AND s.thinking_tokens = 0) THEN
       0.0
-    WHEN s.input_tokens > COALESCE(m.long_context_threshold_tokens, d.long_context_threshold_tokens, 200000) THEN
-      (GREATEST(0, s.input_tokens - s.cached_input_tokens) / 1e6) * COALESCE(m.long_context_input_usd_per_1m, d.long_context_input_usd_per_1m)
-      + (s.cached_input_tokens / 1e6) * COALESCE(m.long_context_cached_usd_per_1m, d.long_context_cached_usd_per_1m)
-      + ((s.output_tokens + s.thinking_tokens) / 1e6) * COALESCE(m.long_context_output_usd_per_1m, d.long_context_output_usd_per_1m)
     ELSE
-      (GREATEST(0, s.input_tokens - s.cached_input_tokens) / 1e6) * COALESCE(m.input_usd_per_1m, d.input_usd_per_1m)
-      + (s.cached_input_tokens / 1e6) * COALESCE(m.cached_input_usd_per_1m, d.cached_input_usd_per_1m)
-      + ((s.output_tokens + s.thinking_tokens) / 1e6) * COALESCE(m.output_usd_per_1m, d.output_usd_per_1m)
+      (
+        CASE UPPER(COALESCE(s.serving_traffic_type, 'STANDARD'))
+          WHEN 'PRIORITY' THEN COALESCE(m.priority_paygo_multiplier, d.priority_paygo_multiplier, 1.8)
+          WHEN 'FLEX' THEN COALESCE(m.flex_paygo_multiplier, d.flex_paygo_multiplier, 0.5)
+          ELSE 1.0
+        END
+      ) * (
+        CASE
+          WHEN (
+            CASE
+              WHEN m.model_name IS NOT NULL THEN (m.long_context_threshold_tokens IS NOT NULL AND s.input_tokens > m.long_context_threshold_tokens)
+              ELSE (d.long_context_threshold_tokens IS NOT NULL AND s.input_tokens > d.long_context_threshold_tokens)
+            END
+          ) THEN
+            (GREATEST(0, s.input_tokens - s.cached_input_tokens - COALESCE(s.cache_write_5m_tokens, 0) - COALESCE(s.cache_write_1h_tokens, 0)) / 1e6) * COALESCE(m.long_context_input_usd_per_1m, d.long_context_input_usd_per_1m)
+            + (s.cached_input_tokens / 1e6) * COALESCE(m.long_context_cached_usd_per_1m, d.long_context_cached_usd_per_1m)
+            + (COALESCE(s.cache_write_5m_tokens, 0) / 1e6) * COALESCE(m.cache_write_5m_usd_per_1m, d.cache_write_5m_usd_per_1m, m.long_context_input_usd_per_1m, d.long_context_input_usd_per_1m)
+            + (COALESCE(s.cache_write_1h_tokens, 0) / 1e6) * COALESCE(m.cache_write_1h_usd_per_1m, d.cache_write_1h_usd_per_1m, m.long_context_input_usd_per_1m, d.long_context_input_usd_per_1m)
+            + ((s.output_tokens + s.thinking_tokens) / 1e6) * COALESCE(m.long_context_output_usd_per_1m, d.long_context_output_usd_per_1m)
+          ELSE
+            (GREATEST(0, s.input_tokens - s.cached_input_tokens - COALESCE(s.cache_write_5m_tokens, 0) - COALESCE(s.cache_write_1h_tokens, 0)) / 1e6) * COALESCE(m.input_usd_per_1m, d.input_usd_per_1m)
+            + (s.cached_input_tokens / 1e6) * COALESCE(m.cached_input_usd_per_1m, d.cached_input_usd_per_1m)
+            + (COALESCE(s.cache_write_5m_tokens, 0) / 1e6) * COALESCE(m.cache_write_5m_usd_per_1m, d.cache_write_5m_usd_per_1m, m.input_usd_per_1m, d.input_usd_per_1m)
+            + (COALESCE(s.cache_write_1h_tokens, 0) / 1e6) * COALESCE(m.cache_write_1h_usd_per_1m, d.cache_write_1h_usd_per_1m, m.input_usd_per_1m, d.input_usd_per_1m)
+            + ((s.output_tokens + s.thinking_tokens) / 1e6) * COALESCE(m.output_usd_per_1m, d.output_usd_per_1m)
+        END
+      )
   END AS span_cost_usd,
   s.attributes
 FROM `agent_eval.otel_spans` AS s
 LEFT JOIN `agent_eval.model_pricing_catalog` AS m
-  ON REGEXP_REPLACE(s.model_name, r'-(?:\d{3}|ga|rc|qcd|preview)$', '') = m.model_name
+  ON REGEXP_REPLACE(REGEXP_REPLACE(s.model_name, r'^.*/', ''), r'-(?:\d{3}|ga|rc|qcd|preview)$', '') = m.model_name
   AND s.start_time >= m.effective_start
   AND s.start_time < m.effective_end
 LEFT JOIN `agent_eval.v_default_model_pricing` AS d
-  ON REGEXP_REPLACE(s.model_name, r'-(?:\d{3}|ga|rc|qcd|preview)$', '') = d.model_name;
+  ON REGEXP_REPLACE(REGEXP_REPLACE(s.model_name, r'^.*/', ''), r'-(?:\d{3}|ga|rc|qcd|preview)$', '') = d.model_name;
 
 -- -----------------------------------------------------------------------------
 -- View 2: Tier 1 Trace-Level Deterministic SQL Evaluation (100% Traces, $0 LLM)
 --   * Mirrors Step-1 Rule 0 gate (zero span/tool errors and <= 8 tool calls)
---   * Enriches with app_registry SLA and FinOps chargeback metadata
+--   * Isolates `'optimize'` traffic lane alongside prod and eval buckets
+--   * Enriches with app_registry SLA, RL-1..RL-5 risk tier, and cost center metadata
 -- -----------------------------------------------------------------------------
 CREATE OR REPLACE VIEW `agent_eval.v_trace_sql_evaluation` AS
 WITH trace_agg AS (
@@ -108,6 +157,8 @@ WITH trace_agg AS (
       w.span_kind = 'execute_tool'
       AND (w.status_code = 'ERROR' OR COALESCE(w.tool_call_status, 'SUCCESS') != 'SUCCESS')
     ) AS tool_error_count,
+    COUNTIF(w.http_status_code = 429) AS http_429_count,
+    COUNTIF(UPPER(COALESCE(w.serving_traffic_type, 'STANDARD')) IN ('PRIORITY', 'STANDARD', 'FLEX')) AS spillover_span_count,
     (
       LOGICAL_AND(w.rule0_pass)
       AND COUNTIF(w.status_code = 'ERROR') = 0
@@ -125,13 +176,15 @@ WITH trace_agg AS (
         WHEN 'conflict_escalation' THEN 2
         WHEN 'agent_gym_eval' THEN 3
         WHEN 'autorater_judge' THEN 4
-        ELSE 5
+        WHEN 'optimize' THEN 5
+        ELSE 6
       END
     )
       WHEN 1 THEN 'production_inference'
       WHEN 2 THEN 'conflict_escalation'
       WHEN 3 THEN 'agent_gym_eval'
       WHEN 4 THEN 'autorater_judge'
+      WHEN 5 THEN 'optimize'
       ELSE COALESCE(MAX(w.finops_traffic_type), 'unclassified')
     END AS primary_traffic_type,
     SUM(w.input_tokens) AS total_input_tokens,
@@ -144,9 +197,10 @@ WITH trace_agg AS (
     SUM(CASE WHEN w.finops_traffic_type = 'conflict_escalation' THEN COALESCE(w.span_cost_usd, 0.0) ELSE 0.0 END) AS conflict_escalation_usd,
     SUM(CASE WHEN w.finops_traffic_type = 'agent_gym_eval' THEN COALESCE(w.span_cost_usd, 0.0) ELSE 0.0 END) AS agent_gym_eval_usd,
     SUM(CASE WHEN w.finops_traffic_type = 'autorater_judge' THEN COALESCE(w.span_cost_usd, 0.0) ELSE 0.0 END) AS span_autorater_judge_usd,
+    SUM(CASE WHEN w.finops_traffic_type = 'optimize' THEN COALESCE(w.span_cost_usd, 0.0) ELSE 0.0 END) AS optimize_usd,
     SUM(
       CASE
-        WHEN w.finops_traffic_type NOT IN ('production_inference', 'conflict_escalation', 'agent_gym_eval', 'autorater_judge')
+        WHEN w.finops_traffic_type NOT IN ('production_inference', 'conflict_escalation', 'agent_gym_eval', 'autorater_judge', 'optimize')
           THEN COALESCE(w.span_cost_usd, 0.0)
         ELSE 0.0
       END
@@ -161,6 +215,8 @@ SELECT
   COALESCE(r.business_unit, 'unassigned_bu') AS business_unit,
   COALESCE(r.sla_latency_ms, 5000.0) AS sla_latency_ms,
   COALESCE(r.cost_center, 'UNASSIGNED') AS cost_center,
+  COALESCE(r.risk_tier, 'RL-3b') AS risk_tier,
+  COALESCE(r.funded_gsus, 0.0) AS funded_gsus,
   SAFE_DIVIDE(t.total_cached_input_tokens, NULLIF(t.total_input_tokens, 0)) AS cache_hit_ratio,
   SAFE_DIVIDE(t.total_thinking_tokens, NULLIF(t.total_output_tokens + t.total_thinking_tokens, 0)) AS thinking_token_ratio
 FROM trace_agg AS t
@@ -168,11 +224,32 @@ LEFT JOIN `agent_eval.app_registry` AS r
   ON t.apphub_application_id = r.apphub_application_id;
 
 -- -----------------------------------------------------------------------------
+-- View 2B: Attributed BigQuery INFORMATION_SCHEMA.JOBS Query Cost (`M10-3`)
+--   * Rolls up on-demand bytes-billed ($6.25/TiB) and slot-ms query costs per app
+-- -----------------------------------------------------------------------------
+CREATE OR REPLACE VIEW `agent_eval.v_bq_query_cost_attribution` AS
+SELECT
+  apphub_application_id,
+  COUNT(*) AS query_job_count,
+  SUM(total_bytes_billed) AS total_bytes_billed,
+  SUM(total_slot_ms) AS total_slot_ms,
+  SUM(
+    COALESCE(
+      NULLIF(query_cost_usd, 0.0),
+      CASE
+        WHEN pricing_mode = 'capacity_slot' THEN (total_slot_ms / 3600000.0) * 0.04
+        ELSE (total_bytes_billed / 1099511627776.0) * 6.25
+      END
+    )
+  ) AS bq_query_cost_usd
+FROM `agent_eval.bq_query_jobs`
+GROUP BY apphub_application_id;
+
+-- -----------------------------------------------------------------------------
 -- View 3: Enterprise Cost per Verified Outcome (`v_enterprise_cost_per_verified_outcome`)
---   * Extends Step-1 `v_cost_per_verified_outcome` with effective-dated pricing
---     catalog rates + Step-2 `eval_results` judge verdicts & spend
---   * Domain-agnostic: any outcome with Step-2 `eval_results` enforces `step2_all_pass`
---   * Proportionally allocates 1.0x outcome infra & table-only judge cost across slices
+--   * Extends Step-1 `v_cost_per_verified_outcome` with effective-dated pricing,
+--     Step-2 `eval_results` judge verdicts & spend, and `INFORMATION_SCHEMA.JOBS`
+--     BigQuery query cost folded cleanly into `CPVO` (`M10-3`).
 -- -----------------------------------------------------------------------------
 CREATE OR REPLACE VIEW `agent_eval.v_enterprise_cost_per_verified_outcome` AS
 WITH deduped_eval_runs AS (
@@ -214,11 +291,11 @@ step2_spend_by_outcome AS (
   LEFT JOIN `agent_eval.v_trace_sql_evaluation` AS t
     ON e.trace_id = t.trace_id
   LEFT JOIN `agent_eval.model_pricing_catalog` AS m
-    ON REGEXP_REPLACE(e.judge_model, r'-(?:\d{3}|ga|rc|qcd|preview)$', '') = m.model_name
+    ON REGEXP_REPLACE(REGEXP_REPLACE(e.judge_model, r'^.*/', ''), r'-(?:\d{3}|ga|rc|qcd|preview)$', '') = m.model_name
     AND e.evaluated_at >= m.effective_start
     AND e.evaluated_at < m.effective_end
   LEFT JOIN `agent_eval.v_default_model_pricing` AS d
-    ON REGEXP_REPLACE(e.judge_model, r'-(?:\d{3}|ga|rc|qcd|preview)$', '') = d.model_name
+    ON REGEXP_REPLACE(REGEXP_REPLACE(e.judge_model, r'^.*/', ''), r'-(?:\d{3}|ga|rc|qcd|preview)$', '') = d.model_name
   WHERE COALESCE(e.outcome_id, t.outcome_id) IS NOT NULL
   GROUP BY 1
 ),
@@ -268,6 +345,7 @@ weighted_outcome_spans AS (
   SELECT
     os.*,
     SUM(os.span_count) OVER (PARTITION BY os.outcome_id) AS outcome_total_spans,
+    SUM(os.span_count) OVER (PARTITION BY os.apphub_application_id) AS app_total_spans,
     SUM(os.span_judge_cost_usd) OVER (PARTITION BY os.outcome_id) AS outcome_span_judge_usd
   FROM outcome_spans AS os
 ),
@@ -280,10 +358,13 @@ allocated_outcome_spans AS (
     (
       COALESCE(inf.estimated_compute_usd, 0.0)
       + COALESCE(inf.explicit_storage_usd, os.app_storage_usd_per_outcome, inf.estimated_storage_usd, 0.0)
-    ) * COALESCE(SAFE_DIVIDE(os.span_count, os.outcome_total_spans), 0.0) AS allocated_infra_cost_usd
+    ) * COALESCE(SAFE_DIVIDE(os.span_count, os.outcome_total_spans), 0.0) AS allocated_infra_cost_usd,
+    COALESCE(qc.bq_query_cost_usd, 0.0) * COALESCE(SAFE_DIVIDE(os.span_count, os.app_total_spans), 0.0) AS allocated_bq_query_cost_usd
   FROM weighted_outcome_spans AS os
   LEFT JOIN `agent_eval.v_infra_cost_estimate` AS inf
     ON os.outcome_id = inf.outcome_id
+  LEFT JOIN `agent_eval.v_bq_query_cost_attribution` AS qc
+    ON os.apphub_application_id = qc.apphub_application_id
 )
 SELECT
   os.apphub_application_id,
@@ -299,14 +380,15 @@ SELECT
   SUM(os.measured_model_cost_usd) AS measured_model_cost_usd,
   SUM(os.measured_judge_cost_usd) AS measured_judge_cost_usd,
   SUM(os.allocated_infra_cost_usd) AS estimated_infra_cost_usd,
+  SUM(os.allocated_bq_query_cost_usd) AS bq_query_cost_usd,
   SUM(os.measured_model_cost_usd + os.measured_judge_cost_usd) AS total_ai_cost_usd,
-  SUM(os.measured_model_cost_usd + os.measured_judge_cost_usd + os.allocated_infra_cost_usd) AS total_cost_with_infra_usd,
+  SUM(os.measured_model_cost_usd + os.measured_judge_cost_usd + os.allocated_infra_cost_usd + os.allocated_bq_query_cost_usd) AS total_cost_with_infra_usd,
   SAFE_DIVIDE(
     SUM(os.measured_model_cost_usd + os.measured_judge_cost_usd),
     NULLIF(COUNT(DISTINCT IF(os.is_verified, os.outcome_id, NULL)), 0)
   ) AS cost_per_verified_outcome_ai_usd,
   SAFE_DIVIDE(
-    SUM(os.measured_model_cost_usd + os.measured_judge_cost_usd + os.allocated_infra_cost_usd),
+    SUM(os.measured_model_cost_usd + os.measured_judge_cost_usd + os.allocated_infra_cost_usd + os.allocated_bq_query_cost_usd),
     NULLIF(COUNT(DISTINCT IF(os.is_verified, os.outcome_id, NULL)), 0)
   ) AS cost_per_verified_outcome_usd
 FROM allocated_outcome_spans AS os
@@ -317,7 +399,6 @@ GROUP BY
 
 -- -----------------------------------------------------------------------------
 -- View 4: External Counterparty Telemetry & Spend (`v_counterparty_spend` — EVAL-P11)
---   * Reports counterparty spans/tokens/spend separately from internal CPVO
 -- -----------------------------------------------------------------------------
 CREATE OR REPLACE VIEW `agent_eval.v_counterparty_spend` AS
 SELECT
@@ -343,11 +424,10 @@ GROUP BY
   source_mode;
 
 -- -----------------------------------------------------------------------------
--- View 5: Unified Tier 1-3 Calibrated Quality & 4-Bucket FinOps Summary
---   * Conditional Rule 0 conditioning: p_hat_obs estimated strictly on rule0_pass = TRUE
---   * Exact Quadratic Gwet's AC2 (`gwet_ac2`, `passes_irr_gate`) in SQL (EVAL-P03)
---   * Rogan-Gladen prevalence adjustment + 95% delta-method CI (EVAL-P04)
---   * Fail-closed NULL guard when judged_samples = 0 or Youden J <= 1e-6
+-- View 5: Unified Tier 1-3 Calibrated Quality & 5-Bucket FinOps Summary
+--   * Conditional Rule 0 conditioning + StratPPI + Quadratic Gwet's AC2 + Rogan-Gladen
+--   * Enforces RL-1..RL-5 tiered AC2 IRR gates (0.85 / 0.80 / 0.75) from app_registry
+--   * Isolates `'optimize'` and `bq_query_cost_usd` inside total_spend_usd
 -- -----------------------------------------------------------------------------
 CREATE OR REPLACE VIEW `agent_eval.v_agent_eval_and_finops_summary` AS
 WITH trace_metrics AS (
@@ -364,6 +444,7 @@ WITH trace_metrics AS (
     SUM(conflict_escalation_usd) AS conflict_escalation_usd,
     SUM(agent_gym_eval_usd) AS agent_gym_eval_usd,
     SUM(span_autorater_judge_usd) AS span_autorater_judge_usd,
+    SUM(optimize_usd) AS optimize_usd,
     SUM(unclassified_usd) AS unclassified_usd
   FROM `agent_eval.v_trace_sql_evaluation`
   GROUP BY apphub_application_id
@@ -399,11 +480,11 @@ judge_spend AS (
     ) AS eval_table_judge_usd
   FROM deduped_eval_results AS e
   LEFT JOIN `agent_eval.model_pricing_catalog` AS m
-    ON REGEXP_REPLACE(e.judge_model, r'-(?:\d{3}|ga|rc|qcd|preview)$', '') = m.model_name
+    ON REGEXP_REPLACE(REGEXP_REPLACE(e.judge_model, r'^.*/', ''), r'-(?:\d{3}|ga|rc|qcd|preview)$', '') = m.model_name
     AND e.evaluated_at >= m.effective_start
     AND e.evaluated_at < m.effective_end
   LEFT JOIN `agent_eval.v_default_model_pricing` AS d
-    ON REGEXP_REPLACE(e.judge_model, r'-(?:\d{3}|ga|rc|qcd|preview)$', '') = d.model_name
+    ON REGEXP_REPLACE(REGEXP_REPLACE(e.judge_model, r'^.*/', ''), r'-(?:\d{3}|ga|rc|qcd|preview)$', '') = d.model_name
   GROUP BY e.apphub_application_id, e.rubric_id
 ),
 latest_rule0_evals AS (
@@ -491,14 +572,8 @@ sme_raw AS (
     COUNTIF(human_pass AND NOT judge_pass) AS fn,
     COUNTIF(NOT human_pass AND NOT judge_pass) AS tn,
     COUNTIF(NOT human_pass AND judge_pass) AS fp,
-    SAFE_DIVIDE(
-      COUNTIF(human_pass AND judge_pass),
-      NULLIF(COUNTIF(human_pass), 0)
-    ) AS tpr,
-    SAFE_DIVIDE(
-      COUNTIF(NOT human_pass AND NOT judge_pass),
-      NULLIF(COUNTIF(NOT human_pass), 0)
-    ) AS tnr,
+    SAFE_DIVIDE(COUNTIF(human_pass AND judge_pass), NULLIF(COUNTIF(human_pass), 0)) AS tpr,
+    SAFE_DIVIDE(COUNTIF(NOT human_pass AND NOT judge_pass), NULLIF(COUNTIF(NOT human_pass), 0)) AS tnr,
     COUNTIF(human_ordinal_score BETWEEN 1 AND 4 AND judge_ordinal_score BETWEEN 1 AND 4) AS ordinal_pairs,
     AVG(
       CASE
@@ -538,7 +613,6 @@ sme_calibration AS (
     sr.fp,
     sr.tpr,
     sr.tnr,
-    -- Quadratic-weighted Gwet's AC2 on 4-point ordinal scale (1..4): t_w / (q * (q - 1)) = 26 / 27
     CASE
       WHEN sr.ordinal_pairs = 0 THEN NULL
       WHEN ABS(
@@ -570,6 +644,16 @@ calibrated AS (
   SELECT
     tm.apphub_application_id,
     COALESCE(jm.rubric_id, 'groundedness_4pt_v1') AS rubric_id,
+    COALESCE(r.risk_tier, 'RL-3b') AS risk_tier,
+    CASE COALESCE(r.risk_tier, 'RL-3b')
+      WHEN 'RL-1' THEN 0.85
+      WHEN 'RL-2' THEN 0.85
+      WHEN 'RL-3a' THEN 0.80
+      WHEN 'RL-3b' THEN 0.80
+      WHEN 'RL-4' THEN 0.75
+      WHEN 'RL-5' THEN 0.75
+      ELSE 0.80
+    END AS required_ac2_gate,
     tm.total_traces,
     tm.production_traces,
     tm.rule0_pass_rate,
@@ -588,7 +672,6 @@ calibrated AS (
       WHEN sc.tpr IS NULL OR sc.tnr IS NULL OR (sc.tpr + sc.tnr - 1.0) <= 1e-6 THEN 'UNCALIBRATED'
       ELSE 'CALIBRATED'
     END AS calibration_status,
-    -- Rogan-Gladen point estimate: theta_RG = clip((p_obs + TNR - 1) / (TPR + TNR - 1), 0, 1)
     CASE
       WHEN COALESCE(jm.judged_samples, 0) = 0 OR jm.raw_judge_pass_rate IS NULL THEN NULL
       WHEN sc.tpr IS NULL OR sc.tnr IS NULL OR (sc.tpr + sc.tnr - 1.0) <= 1e-6 THEN NULL
@@ -600,22 +683,21 @@ calibrated AS (
         )
       )
     END AS theta_rg,
-    -- Stratified variance components for 95% delta-method CI propagation (StratPPI)
     jm.var_p_obs AS var_p_obs,
-    SAFE_DIVIDE(
-      sc.tpr * (1.0 - sc.tpr),
-      NULLIF(sc.tp + sc.fn, 0)
-    ) AS var_tpr,
-    SAFE_DIVIDE(
-      sc.tnr * (1.0 - sc.tnr),
-      NULLIF(sc.tn + sc.fp, 0)
-    ) AS var_tnr,
+    SAFE_DIVIDE(sc.tpr * (1.0 - sc.tpr), NULLIF(sc.tp + sc.fn, 0)) AS var_tpr,
+    SAFE_DIVIDE(sc.tnr * (1.0 - sc.tnr), NULLIF(sc.tn + sc.fp, 0)) AS var_tnr,
     tm.production_inference_usd,
     tm.conflict_escalation_usd,
     tm.agent_gym_eval_usd,
     GREATEST(tm.span_autorater_judge_usd, COALESCE(jm.eval_table_judge_usd, 0.0)) AS autorater_judge_usd,
+    tm.optimize_usd,
+    COALESCE(qc.bq_query_cost_usd, 0.0) AS bq_query_cost_usd,
     tm.unclassified_usd
   FROM trace_metrics AS tm
+  LEFT JOIN `agent_eval.app_registry` AS r
+    ON tm.apphub_application_id = r.apphub_application_id
+  LEFT JOIN `agent_eval.v_bq_query_cost_attribution` AS qc
+    ON tm.apphub_application_id = qc.apphub_application_id
   LEFT JOIN judge_metrics AS jm
     ON tm.apphub_application_id = jm.apphub_application_id
   LEFT JOIN sme_calibration AS sc
@@ -625,6 +707,8 @@ calibrated AS (
 SELECT
   c.apphub_application_id,
   c.rubric_id,
+  c.risk_tier,
+  c.required_ac2_gate,
   c.total_traces,
   c.production_traces,
   c.rule0_pass_rate,
@@ -635,7 +719,7 @@ SELECT
   c.judged_samples,
   c.calibration_status,
   c.gwet_ac2,
-  IF(c.gwet_ac2 IS NULL, NULL, c.gwet_ac2 >= 0.80) AS passes_irr_gate,
+  IF(c.gwet_ac2 IS NULL, NULL, c.gwet_ac2 >= c.required_ac2_gate) AS passes_irr_gate,
   c.raw_judge_pass_rate,
   c.theta_rg AS calibrated_pass_rate,
   CASE
@@ -676,19 +760,21 @@ SELECT
   c.conflict_escalation_usd,
   c.agent_gym_eval_usd,
   c.autorater_judge_usd,
+  c.optimize_usd,
+  c.bq_query_cost_usd,
   c.unclassified_usd,
-  (c.production_inference_usd + c.conflict_escalation_usd + c.agent_gym_eval_usd + c.autorater_judge_usd + c.unclassified_usd) AS total_spend_usd,
+  (c.production_inference_usd + c.conflict_escalation_usd + c.agent_gym_eval_usd + c.autorater_judge_usd + c.optimize_usd + c.bq_query_cost_usd + c.unclassified_usd) AS total_spend_usd,
   CASE
     WHEN c.theta_rg IS NULL OR c.theta_rg <= 0.0 OR c.rule0_pass_rate <= 0.0 OR c.production_traces = 0 THEN NULL
     ELSE SAFE_DIVIDE(
-      c.production_inference_usd + c.conflict_escalation_usd + c.agent_gym_eval_usd + c.autorater_judge_usd + c.unclassified_usd,
+      c.production_inference_usd + c.conflict_escalation_usd + c.agent_gym_eval_usd + c.autorater_judge_usd + c.optimize_usd + c.bq_query_cost_usd + c.unclassified_usd,
       c.production_traces * c.rule0_pass_rate * c.theta_rg
     )
   END AS cost_per_verified_outcome_usd
 FROM calibrated AS c;
 
 -- -----------------------------------------------------------------------------
--- View 6: Hourly Weighted Burndown Export for Provisioned Throughput & FOCUS 1.2
+-- View 6: Hourly Weighted Burndown Export for Provisioned Throughput & `capacity` BQ-G1 (`M11-2`)
 -- -----------------------------------------------------------------------------
 CREATE OR REPLACE VIEW `agent_eval.v_capacity_hourly_burndown_export` AS
 SELECT
@@ -699,11 +785,18 @@ SELECT
   w.model_name,
   w.model_name AS model,
   w.finops_traffic_type,
+  w.serving_traffic_type,
   COUNT(DISTINCT w.trace_id) AS distinct_traces,
   COUNT(*) AS span_count,
+  COUNTIF(w.status_code = 'OK') AS ok_span_count,
+  COUNTIF(w.status_code = 'ERROR') AS error_span_count,
+  COUNTIF(w.http_status_code = 429) AS http_429_count,
+  COUNTIF(UPPER(COALESCE(w.serving_traffic_type, 'STANDARD')) IN ('PRIORITY', 'STANDARD', 'FLEX')) AS spillover_span_count,
   SUM(w.input_tokens) AS input_tokens,
   SUM(w.cached_input_tokens) AS cached_input_tokens,
   SUM(w.cached_input_tokens) AS cached_tokens,
+  SUM(w.cache_write_5m_tokens) AS cache_write_5m_tokens,
+  SUM(w.cache_write_1h_tokens) AS cache_write_1h_tokens,
   SUM(w.uncached_input_tokens) AS uncached_input_tokens,
   SUM(w.output_tokens) AS output_tokens,
   SUM(w.thinking_tokens) AS thinking_tokens,
@@ -718,4 +811,283 @@ GROUP BY
   timestamp,
   w.apphub_application_id,
   w.model_name,
-  w.finops_traffic_type;
+  w.finops_traffic_type,
+  w.serving_traffic_type;
+
+-- -----------------------------------------------------------------------------
+-- View 7: Client OTel vs. Server-Side `inference_request` Reconciliation (`M11-1`)
+--   * Detects telemetry-vs-billing drift, 429 drops, and involuntary PT spillover
+-- -----------------------------------------------------------------------------
+CREATE OR REPLACE VIEW `agent_eval.v_inference_request_reconciliation` AS
+WITH otel_hourly AS (
+  SELECT
+    TIMESTAMP_TRUNC(start_time, HOUR) AS usage_hour,
+    apphub_application_id,
+    model_name,
+    COUNT(*) AS otel_span_count,
+    COUNTIF(http_status_code = 429) AS otel_429_count,
+    SUM(input_tokens + output_tokens + thinking_tokens) AS otel_total_tokens,
+    COUNTIF(
+      UPPER(COALESCE(serving_traffic_type, 'STANDARD')) != 'PROVISIONED_THROUGHPUT'
+      AND LOWER(COALESCE(request_type_header, '')) != 'shared'
+    ) AS otel_pt_eligible_spillover_count,
+    COUNTIF(LOWER(COALESCE(request_type_header, '')) = 'shared') AS otel_shared_bypass_count
+  FROM `agent_eval.v_trace_waterfall`
+  WHERE model_name IS NOT NULL AND model_name != 'none'
+  GROUP BY usage_hour, apphub_application_id, model_name
+),
+server_hourly AS (
+  SELECT
+    TIMESTAMP_TRUNC(request_timestamp, HOUR) AS usage_hour,
+    apphub_application_id,
+    model_name,
+    COUNT(*) AS server_request_count,
+    COUNTIF(http_status_code = 429) AS server_429_count,
+    SUM(input_tokens + output_tokens + thinking_tokens) AS server_total_tokens,
+    COUNTIF(
+      UPPER(COALESCE(serving_traffic_type, 'STANDARD')) != 'PROVISIONED_THROUGHPUT'
+      AND LOWER(COALESCE(request_type_header, '')) != 'shared'
+    ) AS pt_eligible_involuntary_spillover_count,
+    COUNTIF(LOWER(COALESCE(request_type_header, '')) = 'shared') AS intentional_shared_bypass_count
+  FROM `agent_eval.inference_request_logs`
+  GROUP BY usage_hour, apphub_application_id, model_name
+)
+SELECT
+  COALESCE(o.usage_hour, s.usage_hour) AS usage_hour,
+  COALESCE(o.apphub_application_id, s.apphub_application_id) AS apphub_application_id,
+  COALESCE(o.model_name, s.model_name) AS model_name,
+  COALESCE(o.otel_span_count, 0) AS otel_span_count,
+  COALESCE(s.server_request_count, 0) AS server_request_count,
+  COALESCE(o.otel_429_count, 0) AS otel_429_count,
+  COALESCE(s.server_429_count, 0) AS server_429_count,
+  COALESCE(o.otel_total_tokens, 0) AS otel_total_tokens,
+  COALESCE(s.server_total_tokens, 0) AS server_total_tokens,
+  100.0 * COALESCE(
+    SAFE_DIVIDE(
+      CAST(COALESCE(o.otel_total_tokens, 0) - COALESCE(s.server_total_tokens, 0) AS FLOAT64),
+      NULLIF(CAST(COALESCE(s.server_total_tokens, o.otel_total_tokens) AS FLOAT64), 0.0)
+    ),
+    0.0
+  ) AS token_drift_pct,
+  COALESCE(s.pt_eligible_involuntary_spillover_count, o.otel_pt_eligible_spillover_count, 0) AS pt_eligible_involuntary_spillover_count,
+  COALESCE(s.intentional_shared_bypass_count, o.otel_shared_bypass_count, 0) AS intentional_shared_bypass_count,
+  CASE
+    WHEN ABS(
+      100.0 * COALESCE(
+        SAFE_DIVIDE(
+          CAST(COALESCE(o.otel_total_tokens, 0) - COALESCE(s.server_total_tokens, 0) AS FLOAT64),
+          NULLIF(CAST(COALESCE(s.server_total_tokens, o.otel_total_tokens) AS FLOAT64), 0.0)
+        ),
+        0.0
+      )
+    ) <= 2.0 THEN 'RECONCILED'
+    ELSE 'DRIFT_ALERT'
+  END AS reconciliation_status
+FROM otel_hourly AS o
+FULL OUTER JOIN server_hourly AS s
+  ON o.usage_hour = s.usage_hour
+  AND o.apphub_application_id = s.apphub_application_id
+  AND o.model_name = s.model_name;
+
+-- -----------------------------------------------------------------------------
+-- View 8: `RL-1`-`RL-5` Application Governance & PT Lifecycle Gate (`M11-1`)
+--   * Blocks long-term PT commitments on short_term_ga / preview / legacy_sunset models
+--   * Enforces tiered AC2 IRR gates (0.85 RL-1/2, 0.80 RL-3a/3b, 0.75 RL-4/5)
+-- -----------------------------------------------------------------------------
+CREATE OR REPLACE VIEW `agent_eval.v_app_risk_governance` AS
+WITH app_models AS (
+  SELECT
+    apphub_application_id,
+    model_name,
+    ANY_VALUE(lifecycle_track) AS model_lifecycle_track,
+    COUNT(*) AS model_span_count
+  FROM `agent_eval.v_trace_waterfall`
+  WHERE model_name IS NOT NULL AND model_name != 'none'
+  GROUP BY apphub_application_id, model_name
+)
+SELECT
+  r.apphub_application_id,
+  COALESCE(r.risk_tier, 'RL-3b') AS risk_tier,
+  COALESCE(r.autonomy_tier, 'HUMAN_IN_LOOP') AS autonomy_tier,
+  COALESCE(r.lifecycle_track_policy, 'long_term_ga_only') AS lifecycle_track_policy,
+  COALESCE(r.funded_gsus, 0.0) AS funded_gsus,
+  COALESCE(r.pt_commitment_months, 0) AS pt_commitment_months,
+  COALESCE(r.spillover_tier, 'standard') AS spillover_tier,
+  am.model_name,
+  COALESCE(am.model_lifecycle_track, 'long_term_ga') AS model_lifecycle_track,
+  CASE COALESCE(r.risk_tier, 'RL-3b')
+    WHEN 'RL-1' THEN 0.85
+    WHEN 'RL-2' THEN 0.85
+    WHEN 'RL-3a' THEN 0.80
+    WHEN 'RL-3b' THEN 0.80
+    WHEN 'RL-4' THEN 0.75
+    WHEN 'RL-5' THEN 0.75
+    ELSE 0.80
+  END AS required_ac2_gate,
+  s.gwet_ac2,
+  IF(
+    s.gwet_ac2 IS NULL,
+    NULL,
+    s.gwet_ac2 >= CASE COALESCE(r.risk_tier, 'RL-3b')
+      WHEN 'RL-1' THEN 0.85
+      WHEN 'RL-2' THEN 0.85
+      WHEN 'RL-3a' THEN 0.80
+      WHEN 'RL-3b' THEN 0.80
+      WHEN 'RL-4' THEN 0.75
+      WHEN 'RL-5' THEN 0.75
+      ELSE 0.80
+    END
+  ) AS passes_ac2_gate,
+  NOT (
+    (COALESCE(r.pt_commitment_months, 0) >= 3 OR (COALESCE(r.funded_gsus, 0.0) > 0.0 AND COALESCE(r.lifecycle_track_policy, 'long_term_ga_only') = 'long_term_ga_only'))
+    AND COALESCE(am.model_lifecycle_track, 'long_term_ga') IN ('short_term_ga', 'preview', 'legacy_sunset')
+  ) AS pt_commitment_allowed
+FROM `agent_eval.app_registry` AS r
+LEFT JOIN app_models AS am
+  ON r.apphub_application_id = am.apphub_application_id
+LEFT JOIN `agent_eval.v_agent_eval_and_finops_summary` AS s
+  ON r.apphub_application_id = s.apphub_application_id;
+
+-- -----------------------------------------------------------------------------
+-- View 9: 3-Pool Hourly FOCUS 1.2 & Spillover Attribution (`M11-2`)
+--   * Isolates prod | eval | optimize lanes and separates Involuntary vs. TenantBurst
+--     overflow using app_registry.funded_gsus entitlement share.
+-- -----------------------------------------------------------------------------
+CREATE OR REPLACE VIEW `agent_eval.v_focus_three_pool_hourly_chargeback` AS
+WITH lane_hourly AS (
+  SELECT
+    e.usage_hour,
+    e.apphub_application_id,
+    COALESCE(r.cost_center, 'UNASSIGNED') AS cost_center,
+    COALESCE(r.funded_gsus, 0.0) AS funded_gsus,
+    CASE
+      WHEN e.finops_traffic_type IN ('production_inference', 'conflict_escalation') THEN 'prod'
+      WHEN e.finops_traffic_type IN ('agent_gym_eval', 'autorater_judge') THEN 'eval'
+      WHEN e.finops_traffic_type = 'optimize' THEN 'optimize'
+      ELSE 'prod'
+    END AS traffic_lane,
+    SUM(IF(UPPER(e.serving_traffic_type) = 'PROVISIONED_THROUGHPUT', e.weighted_burndown_tokens, 0.0)) AS pt_burndown_tokens,
+    SUM(IF(UPPER(e.serving_traffic_type) != 'PROVISIONED_THROUGHPUT', e.weighted_burndown_tokens, 0.0)) AS paygo_burndown_tokens,
+    SUM(IF(UPPER(e.serving_traffic_type) != 'PROVISIONED_THROUGHPUT', e.total_cost_usd, 0.0)) AS paygo_spillover_usd,
+    SUM(e.weighted_burndown_tokens) AS total_weighted_burndown_tokens,
+    SUM(e.total_cost_usd) AS list_equivalent_cost_usd
+  FROM `agent_eval.v_capacity_hourly_burndown_export` AS e
+  LEFT JOIN `agent_eval.app_registry` AS r
+    ON e.apphub_application_id = r.apphub_application_id
+  GROUP BY 1, 2, 3, 4, 5
+),
+hourly_totals AS (
+  SELECT
+    lh.*,
+    SUM(lh.total_weighted_burndown_tokens) OVER (PARTITION BY lh.usage_hour) AS hour_total_burndown_tokens,
+    SUM(lh.funded_gsus) OVER (PARTITION BY lh.usage_hour) AS hour_total_funded_gsus
+  FROM lane_hourly AS lh
+)
+SELECT
+  usage_hour,
+  apphub_application_id,
+  cost_center,
+  traffic_lane,
+  funded_gsus,
+  pt_burndown_tokens,
+  paygo_burndown_tokens,
+  total_weighted_burndown_tokens,
+  COALESCE(SAFE_DIVIDE(funded_gsus, NULLIF(hour_total_funded_gsus, 0.0)), 0.0) AS funded_gsu_share,
+  COALESCE(SAFE_DIVIDE(total_weighted_burndown_tokens, NULLIF(hour_total_burndown_tokens, 0.0)), 0.0) AS demand_share,
+  CASE
+    WHEN paygo_spillover_usd <= 0.0 THEN 0.0
+    WHEN funded_gsus <= 0.0
+      OR SAFE_DIVIDE(total_weighted_burndown_tokens, NULLIF(hour_total_burndown_tokens, 0.0))
+         > COALESCE(SAFE_DIVIDE(funded_gsus, NULLIF(hour_total_funded_gsus, 0.0)), 0.0)
+      THEN paygo_spillover_usd
+    ELSE 0.0
+  END AS pool3_tenant_burst_spillover_usd,
+  CASE
+    WHEN paygo_spillover_usd <= 0.0 THEN 0.0
+    WHEN funded_gsus > 0.0
+      AND SAFE_DIVIDE(total_weighted_burndown_tokens, NULLIF(hour_total_burndown_tokens, 0.0))
+         <= COALESCE(SAFE_DIVIDE(funded_gsus, NULLIF(hour_total_funded_gsus, 0.0)), 0.0)
+      THEN paygo_spillover_usd
+    ELSE 0.0
+  END AS pool3_involuntary_spillover_usd,
+  list_equivalent_cost_usd
+FROM hourly_totals;
+
+-- -----------------------------------------------------------------------------
+-- View 10: Stateful `/interactions` Session & Turn Lineage (`M11-4`)
+-- -----------------------------------------------------------------------------
+CREATE OR REPLACE VIEW `agent_eval.v_interaction_session_lineage` AS
+WITH session_spans AS (
+  SELECT
+    apphub_application_id,
+    session_id,
+    COALESCE(
+      turn_index,
+      ROW_NUMBER() OVER (PARTITION BY apphub_application_id, session_id ORDER BY start_time, span_id) - 1
+    ) AS resolved_turn_index,
+    trace_id,
+    start_time,
+    end_time,
+    input_tokens,
+    output_tokens,
+    thinking_tokens,
+    span_cost_usd,
+    (rule0_pass AND status_code != 'ERROR') AS turn_ok
+  FROM `agent_eval.v_trace_waterfall`
+  WHERE session_id IS NOT NULL AND session_id != ''
+)
+SELECT
+  apphub_application_id,
+  session_id,
+  COUNT(DISTINCT resolved_turn_index) AS turn_count,
+  MAX(resolved_turn_index) AS max_turn_index,
+  COUNT(DISTINCT trace_id) AS trace_count,
+  MIN(start_time) AS session_start_time,
+  MAX(end_time) AS session_end_time,
+  TIMESTAMP_DIFF(MAX(end_time), MIN(start_time), MILLISECOND) AS session_duration_ms,
+  SUM(input_tokens) AS cumulative_input_tokens,
+  SUM(output_tokens + thinking_tokens) AS cumulative_output_tokens,
+  SUM(COALESCE(span_cost_usd, 0.0)) AS cumulative_cost_usd,
+  LOGICAL_AND(turn_ok) AS session_rule0_pass,
+  MIN(IF(NOT turn_ok, resolved_turn_index, NULL)) AS first_failure_turn_index
+FROM session_spans
+GROUP BY apphub_application_id, session_id;
+
+-- -----------------------------------------------------------------------------
+-- View 11: 5-Minute Streaming SLO Latency & HTTP 429 Breach Monitor (`M11-4`)
+-- -----------------------------------------------------------------------------
+CREATE OR REPLACE VIEW `agent_eval.v_live_slo_and_429_breaches` AS
+WITH bucketed AS (
+  SELECT
+    TIMESTAMP_SECONDS(300 * DIV(UNIX_SECONDS(w.start_time), 300)) AS window_5m_start,
+    w.apphub_application_id,
+    COUNT(*) AS span_count,
+    COUNTIF(w.http_status_code = 429) AS http_429_count,
+    COUNTIF(NOT w.rule0_pass OR w.status_code = 'ERROR') AS rule0_fail_count,
+    APPROX_QUANTILES(w.latency_ms, 100)[OFFSET(95)] AS p95_latency_ms
+  FROM `agent_eval.v_trace_waterfall` AS w
+  GROUP BY window_5m_start, w.apphub_application_id
+)
+SELECT
+  b.window_5m_start,
+  b.apphub_application_id,
+  b.span_count,
+  b.http_429_count,
+  100.0 * SAFE_DIVIDE(b.http_429_count, NULLIF(b.span_count, 0)) AS http_429_rate_pct,
+  100.0 * SAFE_DIVIDE(b.rule0_fail_count, NULLIF(b.span_count, 0)) AS rule0_fail_rate_pct,
+  b.p95_latency_ms,
+  COALESCE(r.sla_latency_ms, 5000.0) AS sla_latency_ms,
+  (
+    b.p95_latency_ms > COALESCE(r.sla_latency_ms, 5000.0)
+    OR 100.0 * SAFE_DIVIDE(b.http_429_count, NULLIF(b.span_count, 0)) >= 1.0
+    OR 100.0 * SAFE_DIVIDE(b.rule0_fail_count, NULLIF(b.span_count, 0)) >= 5.0
+  ) AS is_breach,
+  CASE
+    WHEN 100.0 * SAFE_DIVIDE(b.http_429_count, NULLIF(b.span_count, 0)) >= 1.0 THEN 'HTTP_429_STORM'
+    WHEN b.p95_latency_ms > COALESCE(r.sla_latency_ms, 5000.0) THEN 'SLA_LATENCY'
+    WHEN 100.0 * SAFE_DIVIDE(b.rule0_fail_count, NULLIF(b.span_count, 0)) >= 5.0 THEN 'RULE0_SPIKE'
+    ELSE 'OK'
+  END AS breach_reason
+FROM bucketed AS b
+LEFT JOIN `agent_eval.app_registry` AS r
+  ON b.apphub_application_id = r.apphub_application_id;

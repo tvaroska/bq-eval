@@ -360,6 +360,12 @@ def export_time_shifted_jsonl(
                 "skill_id": s.skill_id or "default-skill",
                 "skill_version": s.skill_version or "1.0.0",
                 "entity_id": s.entity_id or s.trace_id,
+                "serving_traffic_type": str(s.serving_traffic_type),
+                "request_type_header": s.request_type_header,
+                "cache_write_5m_tokens": s.cache_write_5m_tokens,
+                "cache_write_1h_tokens": s.cache_write_1h_tokens,
+                "session_id": s.session_id or f"sess-{s.trace_id}",
+                "turn_index": s.turn_index if s.turn_index is not None else 0,
                 "attributes": json.dumps(s.attributes),
             }
             sf.write(json.dumps(row) + "\n")

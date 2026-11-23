@@ -107,6 +107,13 @@ shifted_spans AS (
     s.gcp_apphub_application_id AS outcome_owner,
     'SEED_DEMO' AS source_mode, 'default-skill' AS skill_id, '1.0.0' AS skill_version,
     CONCAT('entity-', CAST(s.template_idx AS STRING), '-r', LPAD(CAST(r.replica_id AS STRING), 3, '0')) AS entity_id,
+    'STANDARD' AS serving_traffic_type,
+    CAST(NULL AS STRING) AS request_type_header,
+    IF(s.tool_call_status = 'TIMEOUT', 504, IF(s.status_code = 'ERROR', 500, 200)) AS http_status_code,
+    0 AS cache_write_5m_tokens,
+    0 AS cache_write_1h_tokens,
+    CONCAT('sess-', s.trace_id, '-r', LPAD(CAST(r.replica_id AS STRING), 3, '0')) AS session_id,
+    0 AS turn_index,
     s.attributes
   FROM `agent_eval_seed.seed_otel_spans` AS s
   CROSS JOIN replicas AS r

@@ -38,22 +38,8 @@ def _projected_columns_of_view(sql_text: str, view_name: str) -> list[str]:
     raise AssertionError(f"View {view_name!r} not found")
 
 
-def _uncomment_mode_c_sql(adapter_sql: str) -> str:
-    start_marker = "-- Mode C:"
-    idx = adapter_sql.index(start_marker)
-    lines: list[str] = []
-    started = False
-    for raw in adapter_sql[idx:].splitlines():
-        candidate = raw[3:] if raw.startswith("-- ") else ("" if raw == "--" else raw)
-        if not started and not candidate.strip().upper().startswith("CREATE "):
-            continue
-        started = True
-        lines.append(candidate)
-    return "\n".join(lines)
-
-
 def test_bqaa_adapter_sql_contract_and_strict_adr003_fallback() -> None:
-    """Verify `sql/bqaa_adapter_views.sql` 32/32 ordered column parity, dedup, and strict ADR-003 fallback (`M9-2`, `M9-4`)."""
+    """Verify `sql/bqaa_adapter_views.sql` 39/39 ordered column parity, live Mode A/C views, dedup, and strict ADR-003 fallback (`M9-2`, `M10-1`, `M11-1`)."""
     adapter_sql = (REPO_ROOT / "sql" / "bqaa_adapter_views.sql").read_text(encoding="utf-8")
     ddl_sql = (REPO_ROOT / "sql" / "ddl.sql").read_text(encoding="utf-8")
     schema_cols = tuple(
@@ -62,13 +48,17 @@ def test_bqaa_adapter_sql_contract_and_strict_adr003_fallback() -> None:
             (REPO_ROOT / "sql" / "otel_spans_schema.json").read_text(encoding="utf-8")
         )
     )
-    assert len(REQUIRED_OTEL_SPANS_VIEW_COLUMNS) == 32
+    assert len(REQUIRED_OTEL_SPANS_VIEW_COLUMNS) == 39
     assert REQUIRED_OTEL_SPANS_VIEW_COLUMNS == schema_cols
 
     for view_name in (
         "agent_eval.v_bqaa_otel_spans",
         "agent_eval.v_bqaa_trace_payloads",
         "agent_eval.v_bqaa_eval_turn_filtered",
+        "agent_eval.v_mode_a_otel_spans",
+        "agent_eval.v_mode_a_trace_payloads",
+        "agent_eval.v_mode_c_hybrid_otel_spans",
+        "agent_eval.v_mode_c_hybrid_trace_payloads",
     ):
         assert f"CREATE OR REPLACE VIEW `{view_name}`" in adapter_sql
 
@@ -76,13 +66,12 @@ def test_bqaa_adapter_sql_contract_and_strict_adr003_fallback() -> None:
 
     ddl_allspans_cols = _projected_columns_of_view(ddl_sql, "agent_eval.v_otel_allspans_only")
     bqaa_cols = _projected_columns_of_view(adapter_sql, "agent_eval.v_bqaa_otel_spans")
-    mode_c_sql = _uncomment_mode_c_sql(adapter_sql)
     expected_cols = list(REQUIRED_OTEL_SPANS_VIEW_COLUMNS)
     assert ddl_allspans_cols == expected_cols
     assert bqaa_cols == expected_cols
     assert "SELECT * FROM `agent_eval.v_otel_allspans_only`" in ddl_sql
-    assert "SELECT * FROM `agent_eval.v_otel_allspans_only`" in mode_c_sql
-    assert "FROM `agent_eval.v_bqaa_otel_spans`" in mode_c_sql
+    assert "SELECT * FROM `agent_eval.v_otel_allspans_only`" in adapter_sql
+    assert "FROM `agent_eval.v_bqaa_otel_spans`" in adapter_sql
 
     spans_match = re.search(
         r"CREATE\s+OR\s+REPLACE\s+VIEW\s+`agent_eval\.v_bqaa_otel_spans`\s+AS(.*?);",

@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-import math
 import re
 import sqlite3
 from collections.abc import Mapping, Sequence
-from datetime import UTC
 
+from bq_eval.contract.governance import BqQueryCostRow
 from bq_eval.contract.otel import OTelGenAISpanRecord
 from bq_eval.contract.pricing import (
     JUDGE_MODEL_ENDPOINTS,
@@ -16,11 +15,17 @@ from bq_eval.contract.pricing import (
 )
 from bq_eval.contract.results import (
     ConfusionMatrix,
-    HourlyBurndownExportRow,
     SQLTraceEvalSummary,
 )
 from bq_eval.contract.rubrics import CANONICAL_RUBRICS, build_autorater_system_prompt
-from bq_eval.engine.finops import compute_span_cost_usd
+from bq_eval.engine.sqlite_analytics import (
+    evaluate_5m_breaches_in_sqlite,
+    evaluate_hourly_burndown_in_sqlite,
+    evaluate_interaction_lineage_in_sqlite,
+    insert_sqlite_bq_query_jobs,
+    insert_sqlite_spans,
+    open_sqlite_twin,
+)
 from bq_eval.engine.sqlite_views import SQLITE_TABLES_DDL, SQLITE_VIEWS_DDL
 
 __all__ = [
@@ -29,8 +34,10 @@ __all__ = [
     "build_ai_evaluate_agent_sql",
     "build_ai_generate_table_judge_sql",
     "escape_sql_xml_expr",
+    "evaluate_5m_breaches_in_sqlite",
     "evaluate_all_rubrics_in_sqlite",
     "evaluate_hourly_burndown_in_sqlite",
+    "evaluate_interaction_lineage_in_sqlite",
     "evaluate_step1_traces_in_sqlite",
     "evaluate_traces_in_sqlite",
     "normalize_model_name",
@@ -369,105 +376,6 @@ FROM AI.EVALUATE_AGENT(
 """  # noqa: S608
 
 
-def _parse_outcome_verified_flag(raw_value: object) -> int | None:
-    if isinstance(raw_value, bool):
-        return 1 if raw_value else 0
-    if isinstance(raw_value, str):
-        lowered = raw_value.strip().lower()
-        if lowered == "true":
-            return 1
-        if lowered == "false":
-            return 0
-    return None
-
-
-def _parse_optional_float(raw_value: object, default: float | None = None) -> float | None:
-    if raw_value is None or isinstance(raw_value, bool):
-        return default
-    try:
-        parsed = float(str(raw_value))
-    except ValueError:
-        return default
-    return parsed if math.isfinite(parsed) else default
-
-
-def _insert_sqlite_spans(
-    cur: sqlite3.Cursor,
-    spans: Sequence[OTelGenAISpanRecord],
-    *,
-    external_apps: frozenset[str] = frozenset(),
-) -> None:
-    for s in spans:
-        cost_usd = compute_span_cost_usd(s)
-        raw_status = s.attributes.get("outcome.status")
-        outcome_status = str(raw_status) if isinstance(raw_status, str) and raw_status else None
-        outcome_verified = _parse_outcome_verified_flag(s.attributes.get("outcome.verified"))
-        is_ext = (
-            1
-            if (
-                s.resolved_application_id in external_apps
-                or (s.outcome_owner is not None and s.outcome_owner in external_apps)
-                or str(s.attributes.get("apphub.external", "")).strip().lower() == "true"
-            )
-            else 0
-        )
-        service_vcpu = _parse_optional_float(s.attributes.get("service.vcpu"), 2.0) or 2.0
-        service_gib = _parse_optional_float(s.attributes.get("service.gib"), 2.0) or 2.0
-        outcome_storage_usd = _parse_optional_float(s.attributes.get("outcome.storage_usd"), None)
-        start_utc = (
-            s.start_time.replace(tzinfo=UTC)
-            if s.start_time.tzinfo is None
-            else s.start_time.astimezone(UTC)
-        )
-        hour_iso = start_utc.replace(minute=0, second=0, microsecond=0).strftime(
-            "%Y-%m-%dT%H:%M:%SZ"
-        )
-        cur.execute(
-            """
-            INSERT INTO otel_spans VALUES (
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-            )
-            """,
-            (
-                s.trace_id,
-                s.span_id,
-                s.parent_span_id,
-                s.span_name,
-                s.resolved_application_id,
-                s.outcome_id,
-                s.outcome_owner,
-                s.source_mode,
-                s.agent_name,
-                s.service_name,
-                s.otel_span_kind,
-                str(s.span_kind),
-                s.model_name,
-                s.tool_call_status,
-                s.status_code,
-                1 if s.rule0_pass else 0,
-                str(s.finops_traffic_type),
-                is_ext,
-                service_vcpu,
-                service_gib,
-                outcome_storage_usd,
-                outcome_status,
-                outcome_verified,
-                hour_iso,
-                s.start_time.timestamp() * 1000.0,
-                s.end_time.timestamp() * 1000.0,
-                s.latency_ms,
-                s.input_tokens,
-                s.cached_input_tokens,
-                s.uncached_input_tokens,
-                s.output_tokens,
-                s.thinking_tokens,
-                1 if s.is_long_context_cliff else 0,
-                s.weighted_burndown_tokens,
-                cost_usd,
-            ),
-        )
-
-
 def _seed_sqlite_sme_tables(  # noqa: PLR0913
     cur: sqlite3.Cursor,
     *,
@@ -576,6 +484,8 @@ def _row_to_summary(row: sqlite3.Row) -> SQLTraceEvalSummary:
         conflict_escalation_usd=float(row["conflict_escalation_usd"]),
         agent_gym_eval_usd=float(row["agent_gym_eval_usd"]),
         autorater_judge_usd=float(row["autorater_judge_usd"]),
+        optimize_usd=float(row["optimize_usd"]),
+        bq_query_cost_usd=float(row["bq_query_cost_usd"]),
         unclassified_usd=float(row["unclassified_usd"]),
         total_spend_usd=float(row["total_spend_usd"]),
         cost_per_verified_outcome_usd=(
@@ -598,15 +508,6 @@ def _row_to_summary(row: sqlite3.Row) -> SQLTraceEvalSummary:
     )
 
 
-def _open_sqlite_twin() -> sqlite3.Connection:
-    conn = sqlite3.connect(":memory:")
-    conn.row_factory = sqlite3.Row
-    conn.create_function("SQRT", 1, math.sqrt)
-    conn.create_function("POW", 2, math.pow)
-    conn.create_function("CEIL", 1, math.ceil)
-    return conn
-
-
 def evaluate_all_rubrics_in_sqlite(  # noqa: PLR0913
     spans: Sequence[OTelGenAISpanRecord],
     judge_outcomes: Mapping[str, bool] | None = None,
@@ -627,20 +528,22 @@ def evaluate_all_rubrics_in_sqlite(  # noqa: PLR0913
     sla_latency_ms: float = 5000.0,
     extra_rubric_outcomes: Mapping[str, Mapping[str, bool]] | None = None,
     external_apps: frozenset[str] = frozenset(),
+    bq_query_jobs: Sequence[BqQueryCostRow] | None = None,
 ) -> dict[tuple[str, str], SQLTraceEvalSummary]:
     """Execute pure-SQLite twin returning every `(apphub_application_id, rubric_id)` row (`M9-2`)."""
     if not spans:
         return {}
 
     strata_map = sampling_strata or {}
-    conn = _open_sqlite_twin()
+    conn = open_sqlite_twin()
     cur = conn.cursor()
     cur.executescript(SQLITE_TABLES_DDL)
     cur.execute(
         "INSERT INTO eval_config (rubric_id, irr_threshold, sla_latency_ms) VALUES (?, ?, ?)",
         (rubric_id, float(irr_threshold), float(sla_latency_ms)),
     )
-    _insert_sqlite_spans(cur, spans, external_apps=external_apps)
+    insert_sqlite_spans(cur, spans, external_apps=external_apps)
+    insert_sqlite_bq_query_jobs(cur, bq_query_jobs)
     cur.executescript(SQLITE_VIEWS_DDL)
 
     trace_meta = {
@@ -716,6 +619,7 @@ def evaluate_traces_in_sqlite(  # noqa: PLR0913
     sla_latency_ms: float = 5000.0,
     extra_rubric_outcomes: Mapping[str, Mapping[str, bool]] | None = None,
     external_apps: frozenset[str] = frozenset(),
+    bq_query_jobs: Sequence[BqQueryCostRow] | None = None,
 ) -> dict[str, SQLTraceEvalSummary]:
     """Execute pure-SQLite twin of `sql/views.sql`, returning 1 summary per app for `rubric_id`."""
     all_rows = evaluate_all_rubrics_in_sqlite(
@@ -731,6 +635,7 @@ def evaluate_traces_in_sqlite(  # noqa: PLR0913
         sla_latency_ms=sla_latency_ms,
         extra_rubric_outcomes=extra_rubric_outcomes,
         external_apps=external_apps,
+        bq_query_jobs=bq_query_jobs,
     )
     selected: dict[str, SQLTraceEvalSummary] = {}
     for (app_id, row_rubric), summary in all_rows.items():
@@ -747,13 +652,13 @@ def evaluate_step1_traces_in_sqlite(
     """Return canonical Step-1 per-trace metrics from SQLite `v_trace_sql_evaluation` (`M9-4`)."""
     if not spans:
         return {}
-    conn = _open_sqlite_twin()
+    conn = open_sqlite_twin()
     cur = conn.cursor()
     cur.executescript(SQLITE_TABLES_DDL)
     cur.execute(
         "INSERT INTO eval_config (rubric_id, irr_threshold, sla_latency_ms) VALUES ('groundedness_4pt_v1', 0.80, 5000.0)"
     )
-    _insert_sqlite_spans(cur, spans)
+    insert_sqlite_spans(cur, spans)
     cur.executescript(SQLITE_VIEWS_DDL)
     rows: dict[str, dict[str, object]] = {
         str(r["trace_id"]): {
@@ -771,48 +676,5 @@ def evaluate_step1_traces_in_sqlite(
             "tool_error_count, cache_hit_ratio, trace_span_cost_usd FROM v_trace_sql_evaluation"
         ).fetchall()
     }
-    conn.close()
-    return rows
-
-
-def evaluate_hourly_burndown_in_sqlite(
-    spans: Sequence[OTelGenAISpanRecord],
-) -> list[HourlyBurndownExportRow]:
-    """Execute SQLite twin of `v_capacity_hourly_burndown_export` (`M7-3` / `BQ-G1`)."""
-    if not spans:
-        return []
-    conn = _open_sqlite_twin()
-    cur = conn.cursor()
-    cur.executescript(SQLITE_TABLES_DDL)
-    cur.execute(
-        "INSERT INTO eval_config (rubric_id, irr_threshold, sla_latency_ms) VALUES ('groundedness_4pt_v1', 0.80, 5000.0)"
-    )
-    _insert_sqlite_spans(cur, spans)
-    cur.executescript(SQLITE_VIEWS_DDL)
-    rows = [
-        HourlyBurndownExportRow(
-            usage_hour=str(r["usage_hour"]),
-            timestamp=str(r["timestamp"]),
-            apphub_application_id=str(r["apphub_application_id"]),
-            tenant=str(r["tenant"]),
-            model_name=str(r["model_name"]),
-            model=str(r["model"]),
-            finops_traffic_type=str(r["finops_traffic_type"]),
-            distinct_traces=int(r["distinct_traces"]),
-            span_count=int(r["span_count"]),
-            input_tokens=int(r["input_tokens"]),
-            cached_input_tokens=int(r["cached_input_tokens"]),
-            cached_tokens=int(r["cached_tokens"]),
-            uncached_input_tokens=int(r["uncached_input_tokens"]),
-            output_tokens=int(r["output_tokens"]),
-            thinking_tokens=int(r["thinking_tokens"]),
-            thoughts_tokens=int(r["thoughts_tokens"]),
-            long_context_cliff_spans=int(r["long_context_cliff_spans"]),
-            weighted_burndown_tokens=float(r["weighted_burndown_tokens"]),
-            precomputed_weighted_burndown_tokens=float(r["precomputed_weighted_burndown_tokens"]),
-            total_cost_usd=float(r["total_cost_usd"]),
-        )
-        for r in cur.execute("SELECT * FROM v_capacity_hourly_burndown_export").fetchall()
-    ]
     conn.close()
     return rows

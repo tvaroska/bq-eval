@@ -207,6 +207,7 @@ def test_capacity_wire_contract_hourly_burndown_jsonl_and_hourly_focus_chargebac
 ) -> None:
     """M7-3: Verify `v_capacity_hourly_burndown_export`, `otel_spans.jsonl`, and `allocate_focus_hourly_chargeback`."""
     from tests.test_sql_contracts import (
+        ENTERPRISE_OTEL_SPANS_BASE_INSERT,
         _create_enterprise_sqlite_fixture,
         _install_enterprise_views,
         _new_sqlite_bq_conn,
@@ -244,7 +245,7 @@ def test_capacity_wire_contract_hourly_burndown_jsonl_and_hourly_focus_chargebac
     _install_enterprise_views(conn)
     for s in spans:
         conn.execute(
-            "INSERT INTO otel_spans VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ENTERPRISE_OTEL_SPANS_BASE_INSERT,
             (
                 s.trace_id,
                 s.span_id,
@@ -342,6 +343,7 @@ def test_capacity_wire_contract_hourly_burndown_jsonl_and_hourly_focus_chargebac
 def test_docubridge_p10_5_canonical_select_views_contract() -> None:
     """M7-3: Execute DocuBridge's 4 canonical `SELECT` queries against transpiled `bq-eval` views."""
     from tests.test_sql_contracts import (
+        ENTERPRISE_OTEL_SPANS_BASE_INSERT,
         _create_enterprise_sqlite_fixture,
         _extract_view_sql_text,
         _install_enterprise_views,
@@ -361,7 +363,7 @@ def test_docubridge_p10_5_canonical_select_views_contract() -> None:
     t0 = "2026-11-21T12:00:00+00:00"
     t1 = "2026-11-21T12:00:02+00:00"
     conn.executemany(
-        "INSERT INTO otel_spans VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        ENTERPRISE_OTEL_SPANS_BASE_INSERT,
         [
             (
                 "tr-db-1",

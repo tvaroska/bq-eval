@@ -14,13 +14,13 @@
 -- 1. Remote Gemini Judge Models (Workhorse + High-Reasoning Escalation)
 -- -----------------------------------------------------------------------------
 CREATE MODEL IF NOT EXISTS `agent_eval.gemini_3_8_flash_judge`
-REMOTE WITH CONNECTION `us.vertex_ai_connection`
+REMOTE WITH CONNECTION `${CONNECTION_ID}`
 OPTIONS (
   endpoint = 'gemini-3.8-flash'
 );
 
 CREATE MODEL IF NOT EXISTS `agent_eval.gemini_4_argon_judge`
-REMOTE WITH CONNECTION `us.vertex_ai_connection`
+REMOTE WITH CONNECTION `${CONNECTION_ID}`
 OPTIONS (
   endpoint = 'gemini-4-argon'
 );
