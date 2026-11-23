@@ -11,6 +11,10 @@ export PYTHONDONTWRITEBYTECODE=1
 if [[ ! -x ".venv/bin/pytest" ]]; then
   uv sync --extra dev --offline --no-config
 fi
+if [[ "${1:-}" == "cli" ]]; then
+  shift
+  exec uv run --no-sync python -m bq_eval.cli "$@"
+fi
 uv lock --check --offline --no-config
 
 if [[ -x ".venv/bin/ast-grep" ]]; then
