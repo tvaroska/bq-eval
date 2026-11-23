@@ -31,6 +31,9 @@ packages = ["bq_eval"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+markers = [
+  "port: Ports, Adapters and Contracts tests (loopback HTTP and EvalBackend adapters).",
+]
 
 [tool.ruff]
 line-length = 100

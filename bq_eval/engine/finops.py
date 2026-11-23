@@ -70,11 +70,6 @@ def compute_span_cost_usd(
     )
 
 
-def compute_default_span_cost_usd(span: OTelGenAISpanRecord) -> float:
-    """Compute span USD cost from `DEFAULT_MODEL_SKUS`."""
-    return compute_span_cost_usd(span)
-
-
 def compute_eval_finops_roi(
     total_production_traces: int,
     error_or_sla_tail_rate: float = 0.03,
@@ -174,7 +169,7 @@ def diagnose_prefix_cache_dilution(  # noqa: PLR0913
     dilution_detected = (
         distinct_prompt_variants > 1
         and observed_ratio < target_cache_hit_ratio
-        and (ceiling < target_cache_hit_ratio or observed_ratio <= ceiling)
+        and observed_ratio <= ceiling
     )
     rec = (
         f"Consolidate {distinct_prompt_variants} prompt variants into 1 canonical static "

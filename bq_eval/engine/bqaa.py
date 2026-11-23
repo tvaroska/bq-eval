@@ -190,7 +190,7 @@ def _bqaa_event_to_span(ev: BQAAAgentEvent) -> OTelGenAISpanRecord | None:
         tool_call_status=_resolve_tool_call_status(ev),
         rule0_pass=not is_error,
         finops_traffic_type=_resolve_traffic_type(meta),
-        outcome_id=_first_non_empty(meta.get("outcome.id"), ev.trace_id, ev.invocation_id),
+        outcome_id=_first_non_empty(meta.get("outcome.id")),
         outcome_owner=_first_non_empty(meta.get("outcome.owner"), apphub_app_id),
         source_mode=_first_non_empty(meta.get("source_mode")),
         skill_id=_first_non_empty(meta.get("skill_id")),

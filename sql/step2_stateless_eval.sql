@@ -25,28 +25,8 @@ OPTIONS (
   endpoint = 'gemini-4-argon'
 );
 
--- -----------------------------------------------------------------------------
--- 2A. Option A: Mount `step2_rubrics.csv` Directly from a Cloud Storage Bucket
--- -----------------------------------------------------------------------------
--- CREATE OR REPLACE EXTERNAL TABLE `agent_eval.rubrics` (
---   rubric_id STRING,
---   title STRING,
---   dimension STRING,
---   passing_score INT64,
---   judge_model STRING,
---   rubric_prompt STRING
--- )
--- OPTIONS (
---   format = 'CSV',
---   uris = ['gs://YOUR_EVAL_BUCKET/step2_rubrics.csv'],
---   skip_leading_rows = 1
--- );
-
--- -----------------------------------------------------------------------------
--- 2B. Option B: Native BigQuery `agent_eval.rubrics` Table + 8 Canonical Rubrics
---   * Uses CREATE OR REPLACE TABLE ... AS SELECT so it runs in both billed
---     projects and BigQuery Sandbox free-tier scratchpads without DML blocks
--- -----------------------------------------------------------------------------
+-- Optional GCS CSV mount: replace Option B with `CREATE OR REPLACE EXTERNAL TABLE `agent_eval.rubrics` ...` over `step2_rubrics.csv`.
+-- Native BigQuery `agent_eval.rubrics` Table + 8 Canonical Rubrics (Sandbox-compatible CTAS).
 CREATE OR REPLACE TABLE `agent_eval.rubrics`
 CLUSTER BY rubric_id
 OPTIONS (
@@ -244,84 +224,5 @@ WHERE rubric_id = 'groundedness_4pt_v1'
     OR NOT step1_pass
   );
 
--- =============================================================================
--- 4. Static SQL Example 2A: Run Stateless Eval on FULL Traces (100%, No Saving)
---    * Uses `v_step2_trace_rubric_prompts` (`step1_pass = TRUE`) so routine
---      semantic scoring skips $0 deterministic rejects; switch to
---      `v_step2_all_trace_rubric_prompts` only for diagnostic error-tail sweeps.
---    * Commented so deploying this file via `bq query < sql/step2_stateless_eval.sql`
---      stays $0 and never triggers accidental live Vertex AI billing.
--- =============================================================================
--- SELECT
---   trace_id,
---   apphub_application_id,
---   business_unit,
---   rubric_id,
---   step1_pass,
---   reasoning_trace,
---   ordinal_score,
---   (step1_pass AND ordinal_score >= passing_score) AS verified_pass,
---   trace_cost_usd
--- FROM AI.GENERATE_TABLE(
---   MODEL `agent_eval.gemini_3_8_flash_judge`,
---   (
---     SELECT *
---     FROM `agent_eval.v_step2_trace_rubric_prompts`
---     WHERE rubric_id = 'groundedness_4pt_v1'
---   ),
---   STRUCT(
---     'reasoning_trace STRING NOT NULL, ordinal_score INT64 NOT NULL' AS output_schema,
---     '{"generation_config": {"temperature": 0.0, "max_output_tokens": 2048, "thinking_config": {"thinking_level": "LOW"}}}' AS model_params
---   )
--- );
-
--- =============================================================================
--- 5. Static SQL Example 2B: Run Stateless Eval on 10% Sample of Traces (No Saving)
---   * Deterministic 10% sample over `step1_pass = TRUE` via FARM_FINGERPRINT(trace_id)
---   * Use `v_step2_all_trace_rubric_prompts` only for diagnostic Rule 0 tail inspection
--- =============================================================================
--- SELECT
---   trace_id,
---   apphub_application_id,
---   business_unit,
---   rubric_id,
---   step1_pass,
---   reasoning_trace,
---   ordinal_score,
---   (step1_pass AND ordinal_score >= passing_score) AS verified_pass,
---   trace_cost_usd
--- FROM AI.GENERATE_TABLE(
---   MODEL `agent_eval.gemini_3_8_flash_judge`,
---   (
---     SELECT *
---     FROM `agent_eval.v_step2_trace_rubric_prompts`
---     WHERE rubric_id = 'groundedness_4pt_v1'
---       AND MOD(ABS(FARM_FINGERPRINT(trace_id)), 100) < 10
---   ),
---   STRUCT(
---     'reasoning_trace STRING NOT NULL, ordinal_score INT64 NOT NULL' AS output_schema,
---     '{"generation_config": {"temperature": 0.0, "max_output_tokens": 2048, "thinking_config": {"thinking_level": "LOW"}}}' AS model_params
---   )
--- );
-
--- =============================================================================
--- 6. Engine B (`AI.EVALUATE_AGENT` over Light Capture `BQAA` AgentData Turns)
---   * Zero `CREATE MODEL` / `CREATE CONNECTION` required (single-region datasets)
---   * Pre-filtered through Step-1 `$0` SQL checks (`v_bqaa_eval_turn_filtered`)
---     and `10%` deterministic `FARM_FINGERPRINT(trace_id)` sampling to save 90%+ judge cost
--- =============================================================================
--- SELECT *
--- FROM AI.EVALUATE_AGENT(
---   TABLE (
---     SELECT *
---     FROM `agent_eval.v_bqaa_eval_turn_filtered`
---     WHERE MOD(ABS(FARM_FINGERPRINT(trace_id)), 100) < 10
---   ),
---   trace_col => 'trace',
---   managed_metrics => [
---     'tool_use_quality_v1',
---     'final_response_quality_v1',
---     'hallucination_v1',
---     'safety_v1'
---   ]
--- );
+-- Stateless judge queries (`AI.GENERATE_TABLE(` and private preview / non-public `AI.EVALUATE_AGENT(`) are emitted on demand via
+-- `bq-eval judge-sql --engine generate-table|evaluate-agent` (see `skills/bq-eval/references/sql_recipes.md`).

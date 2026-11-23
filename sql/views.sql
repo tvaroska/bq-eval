@@ -1,14 +1,10 @@
--- =============================================================================
 -- BigQuery Agent Evaluation, Observability & FinOps Enterprise Extension Views
 --   * Zero duplicate view names with `sql/step1_trace_views.sql` (deploy Step 1 first)
---   * Joins `model_pricing_catalog`, `app_registry`, `eval_results`, and `sme_labels`
---   * Domain-agnostic core: demo-specific overlays live in `sql/demo_docubridge_extensions.sql`
+--   * Joins `model_pricing_catalog`, `v_default_model_pricing`, `app_registry`, `eval_results`, and `sme_labels`
+--   * Domain-agnostic core: per-app storage overrides live in `app_registry.storage_usd_per_outcome`
 -- Standard: EVAL-P01, EVAL-P03, EVAL-P04, EVAL-P05, EVAL-P08, EVAL-P11 (v2026.11.3)
--- =============================================================================
 
--- -----------------------------------------------------------------------------
 -- View 1: Span-Level Waterfall with Effective-Dated Pricing & Burndown Weights
--- -----------------------------------------------------------------------------
 CREATE OR REPLACE VIEW `agent_eval.v_trace_waterfall` AS
 SELECT
   s.trace_id,
@@ -47,10 +43,9 @@ SELECT
   GREATEST(0, s.input_tokens - s.cached_input_tokens) AS uncached_input_tokens,
   s.output_tokens,
   s.thinking_tokens,
-  s.input_tokens > COALESCE(m.long_context_threshold_tokens, 200000) AS is_long_context_cliff,
-  -- Span-level weighted GSU burndown driven by model_pricing_catalog
+  s.input_tokens > COALESCE(m.long_context_threshold_tokens, d.long_context_threshold_tokens, 200000) AS is_long_context_cliff,
   CASE
-    WHEN s.input_tokens > COALESCE(m.long_context_threshold_tokens, 200000) THEN
+    WHEN s.input_tokens > COALESCE(m.long_context_threshold_tokens, d.long_context_threshold_tokens, 200000) THEN
       (COALESCE(m.burndown_long_uncached_weight, 2.0) * GREATEST(0, s.input_tokens - s.cached_input_tokens))
       + (COALESCE(m.burndown_long_cached_weight, 0.2) * s.cached_input_tokens)
       + (COALESCE(m.burndown_long_output_weight, 7.5) * (s.output_tokens + s.thinking_tokens))
@@ -59,79 +54,26 @@ SELECT
       + (COALESCE(m.burndown_cached_weight, 0.1) * s.cached_input_tokens)
       + (COALESCE(m.burndown_output_weight, 4.0) * (s.output_tokens + s.thinking_tokens))
   END AS weighted_burndown_tokens,
-  -- Span-level USD cost joined against effective-dated model_pricing_catalog (strips version suffixes)
   CASE
     WHEN s.model_name IS NULL OR s.model_name = 'none' OR (s.input_tokens = 0 AND s.output_tokens = 0 AND s.thinking_tokens = 0) THEN
       0.0
-    WHEN s.input_tokens > COALESCE(m.long_context_threshold_tokens, 200000) THEN
-      (GREATEST(0, s.input_tokens - s.cached_input_tokens) / 1e6) * COALESCE(
-        m.long_context_input_usd_per_1m,
-        CASE REGEXP_REPLACE(s.model_name, r'-(?:\d{3}|ga|rc|qcd|preview)$', '')
-          WHEN 'gemini-4-argon' THEN 2.50
-          WHEN 'gemini-3.5-flash-lite' THEN 0.15
-          WHEN 'gemini-3.8-flash' THEN 0.30
-          WHEN 'ai_evaluate_agent_managed' THEN 0.30
-          ELSE NULL
-        END
-      )
-      + (s.cached_input_tokens / 1e6) * COALESCE(
-        m.long_context_cached_usd_per_1m,
-        CASE REGEXP_REPLACE(s.model_name, r'-(?:\d{3}|ga|rc|qcd|preview)$', '')
-          WHEN 'gemini-4-argon' THEN 0.250
-          WHEN 'gemini-3.5-flash-lite' THEN 0.015
-          WHEN 'gemini-3.8-flash' THEN 0.030
-          WHEN 'ai_evaluate_agent_managed' THEN 0.030
-          ELSE NULL
-        END
-      )
-      + ((s.output_tokens + s.thinking_tokens) / 1e6) * COALESCE(
-        m.long_context_output_usd_per_1m,
-        CASE REGEXP_REPLACE(s.model_name, r'-(?:\d{3}|ga|rc|qcd|preview)$', '')
-          WHEN 'gemini-4-argon' THEN 18.75
-          WHEN 'gemini-3.5-flash-lite' THEN 1.125
-          WHEN 'gemini-3.8-flash' THEN 2.25
-          WHEN 'ai_evaluate_agent_managed' THEN 2.25
-          ELSE NULL
-        END
-      )
+    WHEN s.input_tokens > COALESCE(m.long_context_threshold_tokens, d.long_context_threshold_tokens, 200000) THEN
+      (GREATEST(0, s.input_tokens - s.cached_input_tokens) / 1e6) * COALESCE(m.long_context_input_usd_per_1m, d.long_context_input_usd_per_1m)
+      + (s.cached_input_tokens / 1e6) * COALESCE(m.long_context_cached_usd_per_1m, d.long_context_cached_usd_per_1m)
+      + ((s.output_tokens + s.thinking_tokens) / 1e6) * COALESCE(m.long_context_output_usd_per_1m, d.long_context_output_usd_per_1m)
     ELSE
-      (GREATEST(0, s.input_tokens - s.cached_input_tokens) / 1e6) * COALESCE(
-        m.input_usd_per_1m,
-        CASE REGEXP_REPLACE(s.model_name, r'-(?:\d{3}|ga|rc|qcd|preview)$', '')
-          WHEN 'gemini-4-argon' THEN 1.25
-          WHEN 'gemini-3.5-flash-lite' THEN 0.075
-          WHEN 'gemini-3.8-flash' THEN 0.15
-          WHEN 'ai_evaluate_agent_managed' THEN 0.15
-          ELSE NULL
-        END
-      )
-      + (s.cached_input_tokens / 1e6) * COALESCE(
-        m.cached_input_usd_per_1m,
-        CASE REGEXP_REPLACE(s.model_name, r'-(?:\d{3}|ga|rc|qcd|preview)$', '')
-          WHEN 'gemini-4-argon' THEN 0.125
-          WHEN 'gemini-3.5-flash-lite' THEN 0.0075
-          WHEN 'gemini-3.8-flash' THEN 0.015
-          WHEN 'ai_evaluate_agent_managed' THEN 0.015
-          ELSE NULL
-        END
-      )
-      + ((s.output_tokens + s.thinking_tokens) / 1e6) * COALESCE(
-        m.output_usd_per_1m,
-        CASE REGEXP_REPLACE(s.model_name, r'-(?:\d{3}|ga|rc|qcd|preview)$', '')
-          WHEN 'gemini-4-argon' THEN 5.00
-          WHEN 'gemini-3.5-flash-lite' THEN 0.30
-          WHEN 'gemini-3.8-flash' THEN 0.60
-          WHEN 'ai_evaluate_agent_managed' THEN 0.60
-          ELSE NULL
-        END
-      )
+      (GREATEST(0, s.input_tokens - s.cached_input_tokens) / 1e6) * COALESCE(m.input_usd_per_1m, d.input_usd_per_1m)
+      + (s.cached_input_tokens / 1e6) * COALESCE(m.cached_input_usd_per_1m, d.cached_input_usd_per_1m)
+      + ((s.output_tokens + s.thinking_tokens) / 1e6) * COALESCE(m.output_usd_per_1m, d.output_usd_per_1m)
   END AS span_cost_usd,
   s.attributes
 FROM `agent_eval.otel_spans` AS s
 LEFT JOIN `agent_eval.model_pricing_catalog` AS m
   ON REGEXP_REPLACE(s.model_name, r'-(?:\d{3}|ga|rc|qcd|preview)$', '') = m.model_name
   AND s.start_time >= m.effective_start
-  AND s.start_time < m.effective_end;
+  AND s.start_time < m.effective_end
+LEFT JOIN `agent_eval.v_default_model_pricing` AS d
+  ON REGEXP_REPLACE(s.model_name, r'-(?:\d{3}|ga|rc|qcd|preview)$', '') = d.model_name;
 
 -- -----------------------------------------------------------------------------
 -- View 2: Tier 1 Trace-Level Deterministic SQL Evaluation (100% Traces, $0 LLM)
@@ -177,7 +119,21 @@ WITH trace_agg AS (
     ) AS rule0_pass,
     LOGICAL_OR(w.finops_traffic_type = 'conflict_escalation') AS escalated_to_high_reasoning,
     LOGICAL_OR(w.is_long_context_cliff) AS hit_long_context_cliff,
-    MAX(w.finops_traffic_type) AS primary_traffic_type,
+    CASE MIN(
+      CASE w.finops_traffic_type
+        WHEN 'production_inference' THEN 1
+        WHEN 'conflict_escalation' THEN 2
+        WHEN 'agent_gym_eval' THEN 3
+        WHEN 'autorater_judge' THEN 4
+        ELSE 5
+      END
+    )
+      WHEN 1 THEN 'production_inference'
+      WHEN 2 THEN 'conflict_escalation'
+      WHEN 3 THEN 'agent_gym_eval'
+      WHEN 4 THEN 'autorater_judge'
+      ELSE COALESCE(MAX(w.finops_traffic_type), 'unclassified')
+    END AS primary_traffic_type,
     SUM(w.input_tokens) AS total_input_tokens,
     SUM(w.cached_input_tokens) AS total_cached_input_tokens,
     SUM(w.uncached_input_tokens) AS total_uncached_input_tokens,
@@ -251,28 +207,8 @@ step2_spend_by_outcome AS (
   SELECT
     COALESCE(e.outcome_id, t.outcome_id) AS outcome_id,
     SUM(
-      (
-        (e.judge_input_tokens / 1e6) * COALESCE(
-          m.input_usd_per_1m,
-          CASE REGEXP_REPLACE(e.judge_model, r'-(?:\d{3}|ga|rc|qcd|preview)$', '')
-            WHEN 'gemini-4-argon' THEN 1.25
-            WHEN 'gemini-3.5-flash-lite' THEN 0.075
-            WHEN 'ai_evaluate_agent_managed' THEN 0.15
-            ELSE 0.15
-          END
-        )
-      )
-      + (
-        ((e.judge_output_tokens + e.judge_thinking_tokens) / 1e6) * COALESCE(
-          m.output_usd_per_1m,
-          CASE REGEXP_REPLACE(e.judge_model, r'-(?:\d{3}|ga|rc|qcd|preview)$', '')
-            WHEN 'gemini-4-argon' THEN 5.00
-            WHEN 'gemini-3.5-flash-lite' THEN 0.30
-            WHEN 'ai_evaluate_agent_managed' THEN 0.60
-            ELSE 0.60
-          END
-        )
-      )
+      ((e.judge_input_tokens / 1e6) * COALESCE(m.input_usd_per_1m, d.input_usd_per_1m))
+      + (((e.judge_output_tokens + e.judge_thinking_tokens) / 1e6) * COALESCE(m.output_usd_per_1m, d.output_usd_per_1m))
     ) AS eval_table_judge_usd
   FROM deduped_eval_runs AS e
   LEFT JOIN `agent_eval.v_trace_sql_evaluation` AS t
@@ -281,6 +217,8 @@ step2_spend_by_outcome AS (
     ON REGEXP_REPLACE(e.judge_model, r'-(?:\d{3}|ga|rc|qcd|preview)$', '') = m.model_name
     AND e.evaluated_at >= m.effective_start
     AND e.evaluated_at < m.effective_end
+  LEFT JOIN `agent_eval.v_default_model_pricing` AS d
+    ON REGEXP_REPLACE(e.judge_model, r'-(?:\d{3}|ga|rc|qcd|preview)$', '') = d.model_name
   WHERE COALESCE(e.outcome_id, t.outcome_id) IS NOT NULL
   GROUP BY 1
 ),
@@ -312,7 +250,8 @@ outcome_spans AS (
     SUM(w.thinking_tokens) AS thinking_tokens,
     SUM(CASE WHEN w.finops_traffic_type != 'autorater_judge' THEN w.span_cost_usd ELSE 0.0 END) AS measured_model_cost_usd,
     SUM(CASE WHEN w.finops_traffic_type = 'autorater_judge' THEN w.span_cost_usd ELSE 0.0 END) AS span_judge_cost_usd,
-    COALESCE(MAX(j.eval_table_judge_usd), 0.0) AS outcome_table_judge_usd
+    COALESCE(MAX(j.eval_table_judge_usd), 0.0) AS outcome_table_judge_usd,
+    MAX(r.storage_usd_per_outcome) AS app_storage_usd_per_outcome
   FROM `agent_eval.v_trace_waterfall` AS w
   LEFT JOIN `agent_eval.v_outcomes` AS o
     ON w.outcome_id = o.outcome_id
@@ -338,8 +277,10 @@ allocated_outcome_spans AS (
     os.span_judge_cost_usd
       + GREATEST(0.0, os.outcome_table_judge_usd - os.outcome_span_judge_usd)
       * COALESCE(SAFE_DIVIDE(os.span_count, os.outcome_total_spans), 0.0) AS measured_judge_cost_usd,
-    COALESCE(inf.estimated_infra_cost_usd, 0.0)
-      * COALESCE(SAFE_DIVIDE(os.span_count, os.outcome_total_spans), 0.0) AS allocated_infra_cost_usd
+    (
+      COALESCE(inf.estimated_compute_usd, 0.0)
+      + COALESCE(inf.explicit_storage_usd, os.app_storage_usd_per_outcome, inf.estimated_storage_usd, 0.0)
+    ) * COALESCE(SAFE_DIVIDE(os.span_count, os.outcome_total_spans), 0.0) AS allocated_infra_cost_usd
   FROM weighted_outcome_spans AS os
   LEFT JOIN `agent_eval.v_infra_cost_estimate` AS inf
     ON os.outcome_id = inf.outcome_id
@@ -417,7 +358,7 @@ WITH trace_metrics AS (
     AVG(IF(rule0_pass, 1.0, 0.0)) AS rule0_pass_rate,
     AVG(IF(tool_error_count = 0, 1.0, 0.0)) AS tool_success_rate,
     APPROX_QUANTILES(trace_latency_ms, 100)[OFFSET(95)] AS p95_latency_ms,
-    AVG(cache_hit_ratio) AS avg_cache_hit_ratio,
+    COALESCE(AVG(cache_hit_ratio), 0.0) AS avg_cache_hit_ratio,
     SUM(weighted_burndown_tokens) AS total_weighted_burndown_tokens,
     SUM(production_inference_usd) AS production_inference_usd,
     SUM(conflict_escalation_usd) AS conflict_escalation_usd,
@@ -453,34 +394,16 @@ judge_spend AS (
     e.rubric_id,
     COUNT(*) AS total_judge_invocations,
     SUM(
-      (
-        (e.judge_input_tokens / 1e6) * COALESCE(
-          m.input_usd_per_1m,
-          CASE REGEXP_REPLACE(e.judge_model, r'-(?:\d{3}|ga|rc|qcd|preview)$', '')
-            WHEN 'gemini-4-argon' THEN 1.25
-            WHEN 'gemini-3.5-flash-lite' THEN 0.075
-            WHEN 'ai_evaluate_agent_managed' THEN 0.15
-            ELSE 0.15
-          END
-        )
-      )
-      + (
-        ((e.judge_output_tokens + e.judge_thinking_tokens) / 1e6) * COALESCE(
-          m.output_usd_per_1m,
-          CASE REGEXP_REPLACE(e.judge_model, r'-(?:\d{3}|ga|rc|qcd|preview)$', '')
-            WHEN 'gemini-4-argon' THEN 5.00
-            WHEN 'gemini-3.5-flash-lite' THEN 0.30
-            WHEN 'ai_evaluate_agent_managed' THEN 0.60
-            ELSE 0.60
-          END
-        )
-      )
+      ((e.judge_input_tokens / 1e6) * COALESCE(m.input_usd_per_1m, d.input_usd_per_1m))
+      + (((e.judge_output_tokens + e.judge_thinking_tokens) / 1e6) * COALESCE(m.output_usd_per_1m, d.output_usd_per_1m))
     ) AS eval_table_judge_usd
   FROM deduped_eval_results AS e
   LEFT JOIN `agent_eval.model_pricing_catalog` AS m
     ON REGEXP_REPLACE(e.judge_model, r'-(?:\d{3}|ga|rc|qcd|preview)$', '') = m.model_name
     AND e.evaluated_at >= m.effective_start
     AND e.evaluated_at < m.effective_end
+  LEFT JOIN `agent_eval.v_default_model_pricing` AS d
+    ON REGEXP_REPLACE(e.judge_model, r'-(?:\d{3}|ga|rc|qcd|preview)$', '') = d.model_name
   GROUP BY e.apphub_application_id, e.rubric_id
 ),
 latest_rule0_evals AS (

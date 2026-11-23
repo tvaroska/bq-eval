@@ -10,16 +10,15 @@ from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from bq_eval.contract.otel import GenAISpanKind, OTelGenAISpanRecord, TracePayloadRecord
+from bq_eval.contract.otel import OTelGenAISpanRecord, TracePayloadRecord
 from bq_eval.contract.results import (
     GoldenSpanTemplate,
     GoldenTraceTemplate,
     Step1CostOutcomeRow,
     TimeShiftLoadgenReport,
 )
-from bq_eval.engine.finops import compute_default_span_cost_usd
-from bq_eval.showcase.seeds_banking import build_banking_and_quoting_templates
-from bq_eval.showcase.seeds_claims import build_claims_and_audit_templates
+from bq_eval.engine.sql_eval import evaluate_step1_traces_in_sqlite
+from bq_eval.showcase.golden_seeds import build_golden_seed_templates
 
 DEFAULT_SEED_DATASET_ID: str = "agent_eval_seed"
 _REPLICA_TAG_RE = re.compile(r"-r(\d+)-\d{8}$")
@@ -37,11 +36,6 @@ __all__ = [
     "generate_time_shifted_corpus",
     "render_loadgen_markdown_report",
 ]
-
-
-def build_golden_seed_templates() -> tuple[GoldenTraceTemplate, ...]:
-    """Return all 16 golden trace templates across 4 enterprise agent workloads."""
-    return build_banking_and_quoting_templates() + build_claims_and_audit_templates()
 
 
 def _deterministic_bucket_100(trace_id: str) -> int:
@@ -142,15 +136,17 @@ def _select_root_span(trace_spans: Sequence[OTelGenAISpanRecord]) -> OTelGenAISp
 
 def _summarize_app_group(
     group_key: tuple[str, str, str, str],
-    t_list: list[dict[str, float | int | bool]],
+    t_list: list[dict[str, float | int | bool | None]],
 ) -> Step1CostOutcomeRow:
     app_id, bu, cc, fw = group_key
     n_traces = len(t_list)
     n_last_1h = sum(1 for x in t_list if x["in_last_1h"])
     n_pass = sum(1 for x in t_list if x["step1_pass"])
-    latencies = sorted(float(x["latency_ms"]) for x in t_list)
+    latencies = sorted(float(x["latency_ms"] or 0.0) for x in t_list)
     p95_idx = min(len(latencies) - 1, max(0, math.ceil(0.95 * len(latencies)) - 1))
-    tot_cost = sum(float(x["cost_usd"]) for x in t_list)
+    tot_cost = sum(float(x["cost_usd"] or 0.0) for x in t_list)
+    cache_vals = [float(x["cache_ratio"]) for x in t_list if x["cache_ratio"] is not None]
+    avg_cache = (sum(cache_vals) / len(cache_vals)) if cache_vals else 0.0
     return Step1CostOutcomeRow(
         apphub_application_id=app_id,
         business_unit=bu,
@@ -162,7 +158,7 @@ def _summarize_app_group(
         step1_pass_rate=n_pass / n_traces,
         tool_success_rate=sum(1 for x in t_list if x["tool_ok"]) / n_traces,
         p95_latency_ms=latencies[p95_idx],
-        avg_cache_hit_ratio=sum(float(x["cache_ratio"]) for x in t_list) / n_traces,
+        avg_cache_hit_ratio=avg_cache,
         total_cost_usd=tot_cost,
         cost_per_trace_usd=tot_cost / n_traces,
         step1_cost_per_outcome_usd=(tot_cost / n_pass) if n_pass > 0 else None,
@@ -173,7 +169,7 @@ def evaluate_time_shifted_corpus(
     spans: Sequence[OTelGenAISpanRecord],
     reference_time: datetime,
 ) -> TimeShiftLoadgenReport:
-    """Evaluate Step 1 Cost per App/BU/Outcome and Step 2/2.5 slices on time-shifted traces."""
+    """Evaluate Step 1 Cost per App/BU/Outcome via canonical SQLite Step-1 views (`M9-4`)."""
     if not spans:
         raise ValueError("spans must be non-empty.")
 
@@ -181,8 +177,9 @@ def evaluate_time_shifted_corpus(
     traces_by_id: dict[str, list[OTelGenAISpanRecord]] = {}
     for s in spans:
         traces_by_id.setdefault(s.trace_id, []).append(s)
+    sqlite_step1 = evaluate_step1_traces_in_sqlite(spans)
 
-    app_groups: dict[tuple[str, str, str, str], list[dict[str, float | int | bool]]] = {}
+    app_groups: dict[tuple[str, str, str, str], list[dict[str, float | int | bool | None]]] = {}
     last_1h_count = 0
     sample_10pct_count = 0
     sample_5pct_count = 0
@@ -192,28 +189,14 @@ def evaluate_time_shifted_corpus(
 
     for trace_id, t_spans in traces_by_id.items():
         root = _select_root_span(t_spans)
+        step1_row = sqlite_step1[trace_id]
         group_key = (
-            root.resolved_application_id,
+            str(step1_row["apphub_application_id"]),
             str(root.attributes.get("business_unit", "unassigned_bu")),
             str(root.attributes.get("cost_center", "UNASSIGNED")),
             f"{root.attributes.get('framework', 'unknown')} ({root.attributes.get('runtime', 'unknown')})",
         )
         trace_start = min(s.start_time for s in t_spans)
-        trace_latency_ms = (max(s.end_time for s in t_spans) - trace_start).total_seconds() * 1000.0
-        tool_calls = sum(1 for s in t_spans if s.span_kind == GenAISpanKind.EXECUTE_TOOL)
-        tool_errors = sum(
-            1
-            for s in t_spans
-            if s.span_kind == GenAISpanKind.EXECUTE_TOOL
-            and (s.status_code == "ERROR" or (s.tool_call_status or "SUCCESS") != "SUCCESS")
-        )
-        step1_pass = (
-            all(s.rule0_pass for s in t_spans)
-            and all(s.status_code != "ERROR" for s in t_spans)
-            and tool_errors == 0
-            and tool_calls <= 8
-        )
-        total_in = sum(s.input_tokens for s in t_spans)
         in_last_1h = trace_start >= one_hour_ago
         bucket = _deterministic_bucket_100(trace_id)
         last_1h_count += int(in_last_1h)
@@ -228,16 +211,15 @@ def evaluate_time_shifted_corpus(
             if in_last_1h:
                 last_hour_replica_ids.add(rep)
 
+        raw_cache = step1_row["cache_hit_ratio"]
         app_groups.setdefault(group_key, []).append(
             {
                 "in_last_1h": in_last_1h,
-                "step1_pass": step1_pass,
-                "tool_ok": tool_errors == 0,
-                "latency_ms": trace_latency_ms,
-                "cache_ratio": (sum(s.cached_input_tokens for s in t_spans) / total_in)
-                if total_in > 0
-                else 0.0,
-                "cost_usd": sum(compute_default_span_cost_usd(s) for s in t_spans),
+                "step1_pass": bool(step1_row["rule0_pass"]),
+                "tool_ok": int(str(step1_row["tool_error_count"])) == 0,
+                "latency_ms": float(str(step1_row["trace_latency_ms"])),
+                "cache_ratio": float(str(raw_cache)) if raw_cache is not None else None,
+                "cost_usd": float(str(step1_row["trace_span_cost_usd"])),
             }
         )
 
@@ -245,7 +227,7 @@ def evaluate_time_shifted_corpus(
         _summarize_app_group(group_key, t_list)
         for group_key, t_list in sorted(
             app_groups.items(),
-            key=lambda item: sum(float(x["cost_usd"]) for x in item[1]),
+            key=lambda item: sum(float(x["cost_usd"] or 0.0) for x in item[1]),
             reverse=True,
         )
     ]

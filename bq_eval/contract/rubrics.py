@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html
+import re
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -61,10 +62,16 @@ class OrdinalScoreOutput(BaseModel):
         return self
 
 
+_XML_TAG_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_.-]*$")
+
+
 def wrap_untrusted_text(raw_text: str, tag: str = "untrusted_text") -> str:
     """XML-escape untrusted user/model text and wrap in `<untrusted_text>` tags (EVAL-P02)."""
+    cleaned_tag = tag.strip()
+    if not cleaned_tag or not _XML_TAG_RE.fullmatch(cleaned_tag):
+        raise ValueError(f"Invalid XML wrapper tag {tag!r}: must match ^[a-zA-Z_][a-zA-Z0-9_.-]*$.")
     escaped = html.escape(raw_text or "", quote=False)
-    return f"<{tag}>\n{escaped}\n</{tag}>"
+    return f"<{cleaned_tag}>\n{escaped}\n</{cleaned_tag}>"
 
 
 def build_autorater_system_prompt(rubric: RubricSpec) -> str:

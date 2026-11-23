@@ -13,8 +13,10 @@ REQUIRED_OTEL_SPANS_VIEW_COLUMNS: tuple[str, ...] = (
     "span_name",
     "start_time",
     "end_time",
+    "receive_time",
     "latency_ms",
     "status_code",
+    "otel_span_kind",
     "span_kind",
     "service_name",
     "gcp_apphub_application_id",
@@ -31,6 +33,11 @@ REQUIRED_OTEL_SPANS_VIEW_COLUMNS: tuple[str, ...] = (
     "rule0_pass",
     "finops_traffic_type",
     "outcome_id",
+    "outcome_owner",
+    "source_mode",
+    "skill_id",
+    "skill_version",
+    "entity_id",
     "attributes",
 )
 

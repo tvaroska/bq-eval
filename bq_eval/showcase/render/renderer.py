@@ -6,11 +6,13 @@ Imports zero calculation modules (`bq_eval.engine` is strictly forbidden here).
 from __future__ import annotations
 
 import base64
+import hashlib
 import html
+import re
 from pathlib import Path
 
 from bq_eval.contract.results import ShowcaseRunArtifacts
-from bq_eval.showcase.view import (
+from bq_eval.showcase.render.view import (
     BadgeView,
     CardView,
     CellView,
@@ -22,6 +24,33 @@ from bq_eval.showcase.view import (
 )
 
 ASSETS_DIR = Path(__file__).resolve().parent / "assets"
+_PLACEHOLDER_RE = re.compile(
+    r"__(?:PAGE_TITLE|FAVICON_URI|STYLESHEET|BRAND_HEADING|BRAND_SUBTITLE|"
+    r"HEADER_RIGHT|MAIN_ATTRS|MAIN_CONTENT|SCRIPT_BLOCK)__"
+)
+
+
+def _sha256_csp_hash(content: str) -> str:
+    digest = hashlib.sha256(content.encode("utf-8")).digest()
+    return f"'sha256-{base64.b64encode(digest).decode('ascii')}'"
+
+
+def workbench_csp_header() -> str:
+    """Return strict Content-Security-Policy pinning the exact inline style/script hashes."""
+    stylesheet = (ASSETS_DIR / "workbench.css").read_text(encoding="utf-8")
+    script = (ASSETS_DIR / "workbench.js").read_text(encoding="utf-8")
+    style_hash = _sha256_csp_hash(f"\n{stylesheet}\n  ")
+    script_hash = _sha256_csp_hash(f"\n{script}\n  ")
+    return (
+        "default-src 'none'; "
+        f"script-src {script_hash}; "
+        f"style-src {style_hash}; "
+        "img-src data:; "
+        "connect-src 'self'; "
+        "base-uri 'none'; "
+        "form-action 'none'; "
+        "frame-ancestors 'none'"
+    )
 
 
 def _esc(value: str) -> str:
@@ -123,7 +152,7 @@ def render_page_view_html(view: PageView) -> str:
         header_parts.insert(
             0,
             '<label for="corpus-select" class="kpi-caption">Corpus:</label>'
-            f'<select id="corpus-select" class="corpus-select" onchange="switchCorpus(this)">'
+            f'<select id="corpus-select" class="corpus-select">'
             f"{options}</select>",
         )
 
@@ -135,7 +164,7 @@ def render_page_view_html(view: PageView) -> str:
     tab_buttons = "\n    ".join(
         f'<button type="button" class="tab-btn{" active" if idx == 0 else ""}" '
         f'role="tab" aria-selected="{"true" if idx == 0 else "false"}" '
-        f"onclick=\"switchTab('{_esc(tab.panel_id)}', this)\">{_esc(tab.label)}</button>"
+        f'data-panel-id="{_esc(tab.panel_id)}">{_esc(tab.label)}</button>'
         for idx, tab in enumerate(view.tabs)
     )
     tab_nav = f'  <nav class="tabs" role="tablist">\n    {tab_buttons}\n  </nav>'
@@ -147,17 +176,19 @@ def render_page_view_html(view: PageView) -> str:
     main_content = f"{kpi_grid}\n{tab_nav}\n{tab_panels}"
     script_block = f"  <script>\n{script}\n  </script>"
 
-    return (
-        template.replace("__PAGE_TITLE__", _esc(view.page_title))
-        .replace("__FAVICON_URI__", _favicon_data_uri())
-        .replace("__STYLESHEET__", stylesheet)
-        .replace("__BRAND_HEADING__", _esc(view.brand_heading))
-        .replace("__BRAND_SUBTITLE__", _esc(view.brand_subtitle))
-        .replace("__HEADER_RIGHT__", " ".join(header_parts))
-        .replace("__MAIN_ATTRS__", main_attrs)
-        .replace("__MAIN_CONTENT__", main_content)
-        .replace("__SCRIPT_BLOCK__", script_block)
-    )
+    replacements = {
+        "__PAGE_TITLE__": _esc(view.page_title),
+        "__FAVICON_URI__": _favicon_data_uri(),
+        "__STYLESHEET__": stylesheet,
+        "__BRAND_HEADING__": _esc(view.brand_heading),
+        "__BRAND_SUBTITLE__": _esc(view.brand_subtitle),
+        "__HEADER_RIGHT__": " ".join(header_parts),
+        "__MAIN_ATTRS__": main_attrs,
+        "__MAIN_CONTENT__": main_content,
+        "__SCRIPT_BLOCK__": script_block,
+    }
+    # Single-pass regex substitution prevents untrusted data matching placeholder tokens from re-expanding.
+    return _PLACEHOLDER_RE.sub(lambda m: replacements[m.group(0)], template)
 
 
 def render_html_scorecard(

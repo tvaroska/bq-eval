@@ -43,7 +43,7 @@ from bq_eval.showcase.loadgen import (
     generate_time_shifted_corpus,
 )
 from bq_eval.showcase.pipeline import render_markdown_report, run_showcase_pipeline
-from bq_eval.showcase.renderer import render_html_scorecard, write_html_scorecard
+from bq_eval.showcase.render.renderer import render_html_scorecard, write_html_scorecard
 from tests.conftest import make_span
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -70,7 +70,9 @@ def test_ddl_and_views_table_parity() -> None:
     assert created_tables == expected_tables
 
     expected_ddl_views = {
+        "agent_eval.v_otel_allspans_only",
         "agent_eval.otel_spans",
+        "agent_eval.v_otel_logs_payloads_only",
         "agent_eval.trace_payloads",
     }
     created_ddl_views = set(
@@ -90,18 +92,7 @@ def test_ddl_and_views_table_parity() -> None:
     }
     created_views = set(re.findall(r"CREATE OR REPLACE VIEW `(agent_eval\.[a-z0-9_]+)`", views_sql))
     assert created_views == expected_views
-
-    demo_sql = (REPO_ROOT / "sql" / "demo_docubridge_extensions.sql").read_text(encoding="utf-8")
-    expected_demo_views = {
-        "agent_eval.v_demo_infra_cost_estimate",
-        "agent_eval.v_demo_cost_per_verified_outcome",
-        "agent_eval.v_demo_skill_lineage_roi",
-        "agent_eval.v_m2_kyc_trap_eval",
-    }
-    created_demo_views = set(
-        re.findall(r"CREATE OR REPLACE VIEW `(agent_eval\.[a-z0-9_]+)`", demo_sql)
-    )
-    assert created_demo_views == expected_demo_views
+    assert not (REPO_ROOT / "sql" / "demo_docubridge_extensions.sql").exists()
 
 
 def test_weighted_burndown_standard_and_long_context_cliff() -> None:

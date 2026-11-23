@@ -477,10 +477,11 @@ def test_step3_paired_run_comparison_temporal_order_and_dedup() -> None:
     conn = _new_sqlite_bq_conn()
     conn.execute(
         "CREATE TABLE eval_results (apphub_application_id TEXT, rubric_id TEXT, eval_run_id TEXT, "
-        "trace_id TEXT, ordinal_score INT, binary_pass INT, reasoning_trace TEXT, evaluated_at TEXT)"
+        "trace_id TEXT, ordinal_score INT, binary_pass INT, reasoning_trace TEXT, "
+        "policy_sha256 TEXT, amended_clause_ids TEXT, evaluated_at TEXT)"
     )
     conn.executemany(
-        "INSERT INTO eval_results VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO eval_results VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [
             (
                 "app-1",
@@ -490,6 +491,8 @@ def test_step3_paired_run_comparison_temporal_order_and_dedup() -> None:
                 2,
                 0,
                 "stale",
+                "a" * 64,
+                None,
                 "2026-11-10T09:00:00+00:00",
             ),
             (
@@ -500,6 +503,8 @@ def test_step3_paired_run_comparison_temporal_order_and_dedup() -> None:
                 4,
                 1,
                 "good",
+                "a" * 64,
+                None,
                 "2026-11-10T10:00:00+00:00",
             ),
             (
@@ -510,18 +515,21 @@ def test_step3_paired_run_comparison_temporal_order_and_dedup() -> None:
                 2,
                 0,
                 "regressed",
+                "b" * 64,
+                "c_02",
                 "2026-11-11T10:00:00+00:00",
             ),
         ],
     )
     conn.execute(f"CREATE VIEW v_step3_paired_run_comparison AS {view_sql}")
     rows = conn.execute(
-        "SELECT baseline_run_id, candidate_run_id, is_negative_flip, is_positive_flip "
+        "SELECT baseline_run_id, candidate_run_id, is_negative_flip, is_positive_flip, "
+        "policy_changed, amended_clause_ids "
         "FROM v_step3_paired_run_comparison"
     ).fetchall()
     conn.close()
     assert len(rows) == 1
-    assert tuple(rows[0]) == ("run_9", "run_10", 1, 0)
+    assert tuple(rows[0]) == ("run_9", "run_10", 1, 0, 1, "c_02")
 
 
 def _build_stratppi_20_to_1_fixture() -> tuple[
@@ -760,8 +768,12 @@ def test_sqlite_multi_app_w3c_trace_per_app_sme_and_outcome_cpvo() -> None:
     assert alpha.outcome_total_count == 1
     assert alpha.outcome_verified_count == 1
     expected_span_cost = 2 * ((100_000 / 1e6) * 0.15 + (10_000 / 1e6) * 0.60)
-    assert alpha.outcome_cost_per_verified_usd == pytest.approx(
+    expected_infra_cost = (0.6 + 0.3) * (2.0 * 0.00002400 + 2.0 * 0.00000250) + 0.000020
+    assert alpha.outcome_cost_per_verified_ai_usd == pytest.approx(
         expected_span_cost + 0.0025, abs=1e-12
+    )
+    assert alpha.outcome_cost_per_verified_usd == pytest.approx(
+        expected_span_cost + 0.0025 + expected_infra_cost, abs=1e-12
     )
     assert beta.calibration_status == "UNCALIBRATED"
     assert beta.gwet_ac2 is None
@@ -812,3 +824,52 @@ def test_rfp_quote_accuracy_migration_hint() -> None:
             project_id="demo-proj",
             rubric_id="rfp_quote_accuracy_4pt_v1",
         )
+
+
+def test_stratified_wilson_plugin_propagates_stratified_variance() -> None:
+    """20:1 tail-sampling StratPPI variance must propagate into `wilson_plugin` CIs."""
+    cm = ConfusionMatrix(tp=87, fn=2, tn=7, fp=4)
+    strata_unequal = [(950, 50, 48), (50, 50, 10)]
+    res_wilson = stratified_rogan_gladen_calibrate(strata_unequal, cm, ci_method="wilson_plugin")
+    naive_wilson = rogan_gladen_wilson_ci(
+        observed_pass_rate=res_wilson.raw_pass_rate,
+        sample_size=100,
+        confusion=cm,
+    )
+    assert (res_wilson.ci_95_lower, res_wilson.ci_95_upper) != pytest.approx(naive_wilson, abs=1e-6)
+    with pytest.raises(ValueError, match="finite and non-negative"):
+        rogan_gladen_wilson_ci(0.8, 100, cm, stratified_var_p_obs=-0.01)
+
+
+def test_policy_sha256_and_amended_clause_ids_in_judge_sql_and_ddl() -> None:
+    """`M10` policy digest and amended clause IDs wire through DDL, Step-3, and judge SQL."""
+    digest = "a" * 64
+    sql = build_ai_generate_table_judge_sql(
+        project_id="demo-proj",
+        policy_sha256=digest,
+        amended_clause_ids=("c_03", "c_07"),
+    )
+    assert f"'{digest}' AS policy_sha256" in sql
+    assert "'c_03,c_07' AS amended_clause_ids" in sql
+    with pytest.raises(ValueError, match="policy_sha256"):
+        build_ai_generate_table_judge_sql(project_id="demo-proj", policy_sha256="not-a-sha")
+
+    ddl = (REPO_ROOT / "sql" / "ddl.sql").read_text(encoding="utf-8")
+    step3 = (REPO_ROOT / "sql" / "step3_saved_results.sql").read_text(encoding="utf-8")
+    assert "policy_sha256 STRING" in ddl and "amended_clause_ids STRING" in ddl
+    assert "policy_sha256 STRING" in step3 and "policy_changed" in step3
+
+
+def test_f6_public_doc_hygiene_marks_evaluate_agent_preview() -> None:
+    """All public docs citing `AI.EVALUATE_AGENT` explicitly note preview/non-public status (`F6`)."""
+    files = (
+        REPO_ROOT / "README.md",
+        REPO_ROOT / "docs" / "architecture-and-sql.md",
+        REPO_ROOT / "docs" / "bqaa-and-dual-path-architecture.md",
+        REPO_ROOT / "sql" / "step2_stateless_eval.sql",
+        REPO_ROOT / "sql" / "step3_saved_results.sql",
+    )
+    for path in files:
+        lower = path.read_text(encoding="utf-8").lower()
+        assert "ai.evaluate_agent" in lower
+        assert "preview" in lower or "non-public" in lower

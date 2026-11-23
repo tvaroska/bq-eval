@@ -101,6 +101,7 @@ class SQLTraceEvalSummary(BaseModel):
     cost_per_verified_outcome_usd: NonNegFloat | None
     outcome_total_count: int = Field(default=0, ge=0)
     outcome_verified_count: int = Field(default=0, ge=0)
+    outcome_cost_per_verified_ai_usd: NonNegFloat | None = None
     outcome_cost_per_verified_usd: NonNegFloat | None = None
 
 

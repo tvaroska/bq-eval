@@ -20,7 +20,7 @@ from bq_eval.contract.results import (
     SQLTraceEvalSummary,
 )
 from bq_eval.contract.rubrics import CANONICAL_RUBRICS, build_autorater_system_prompt
-from bq_eval.engine.finops import compute_default_span_cost_usd
+from bq_eval.engine.finops import compute_span_cost_usd
 from bq_eval.engine.sqlite_views import SQLITE_TABLES_DDL, SQLITE_VIEWS_DDL
 
 __all__ = [
@@ -28,18 +28,27 @@ __all__ = [
     "MANAGED_EVALUATE_AGENT_METRICS",
     "build_ai_evaluate_agent_sql",
     "build_ai_generate_table_judge_sql",
-    "compute_default_span_cost_usd",
     "escape_sql_xml_expr",
+    "evaluate_all_rubrics_in_sqlite",
     "evaluate_hourly_burndown_in_sqlite",
+    "evaluate_step1_traces_in_sqlite",
     "evaluate_traces_in_sqlite",
     "normalize_model_name",
 ]
 
 
+_COLUMN_EXPR_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*(?:\.[a-zA-Z_][a-zA-Z0-9_]*)*$")
+
+
 def escape_sql_xml_expr(column_expr: str) -> str:
     """Return BigQuery SQL expression that XML-escapes `&`, `<`, and `>` in untrusted columns."""
+    cleaned = column_expr.strip()
+    if not cleaned or not _COLUMN_EXPR_RE.fullmatch(cleaned):
+        raise ValueError(
+            f"Invalid column_expr {column_expr!r}: must be a simple or dotted SQL identifier."
+        )
     return (
-        f"REPLACE(REPLACE(REPLACE(COALESCE({column_expr}, ''), "
+        f"REPLACE(REPLACE(REPLACE(COALESCE({cleaned}, ''), "
         "'&', '&amp;'), '<', '&lt;'), '>', '&gt;')"
     )
 
@@ -74,6 +83,29 @@ def _escape_googlesql_string_literal(text: str) -> str:
     )
 
 
+def _validate_policy_sha256(policy_sha256: str | None) -> str | None:
+    if policy_sha256 is None:
+        return None
+    cleaned = policy_sha256.strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", cleaned):
+        raise ValueError(
+            f"Invalid policy_sha256 {policy_sha256!r}: must be 64 lowercase hex chars."
+        )
+    return cleaned
+
+
+def _validate_amended_clause_ids(clause_ids: Sequence[str] | None) -> str | None:
+    if not clause_ids:
+        return None
+    validated: list[str] = []
+    for cid in clause_ids:
+        cleaned = cid.strip()
+        if not cleaned or not re.fullmatch(r"[a-zA-Z0-9_.:-]+", cleaned):
+            raise ValueError(f"Invalid amended clause ID {cid!r}.")
+        validated.append(cleaned)
+    return ",".join(validated)
+
+
 def build_ai_generate_table_judge_sql(  # noqa: PLR0913
     project_id: str,
     dataset_id: str = "agent_eval",
@@ -82,10 +114,14 @@ def build_ai_generate_table_judge_sql(  # noqa: PLR0913
     run_id: str | None = None,
     judge_model: str | None = None,
     include_rule0_failures: bool = True,
+    policy_sha256: str | None = None,
+    amended_clause_ids: Sequence[str] | None = None,
 ) -> str:
     """Build production BigQuery `AI.GENERATE_TABLE` SQL query (EVAL-P02, EVAL-P08)."""
     valid_project = _validate_sql_identifier(project_id, "project_id", allow_hyphen=True)
     valid_dataset = _validate_sql_identifier(dataset_id, "dataset_id")
+    valid_policy_sha256 = _validate_policy_sha256(policy_sha256)
+    valid_clauses_csv = _validate_amended_clause_ids(amended_clause_ids)
     if rubric_id not in CANONICAL_RUBRICS:
         if rubric_id == "rfp_quote_accuracy_4pt_v1":
             raise ValueError(
@@ -93,8 +129,12 @@ def build_ai_generate_table_judge_sql(  # noqa: PLR0913
                 "(renamed to 'rfp_quote_completeness_4pt_v1')."
             )
         raise ValueError(f"Unknown rubric_id: {rubric_id}")
-    if not (0 <= canary_sample_pct <= 100):
-        raise ValueError("canary_sample_pct must be between 0 and 100.")
+    if (
+        isinstance(canary_sample_pct, bool)
+        or not isinstance(canary_sample_pct, int)
+        or not (0 <= canary_sample_pct <= 100)
+    ):
+        raise ValueError("canary_sample_pct must be an integer between 0 and 100 (not bool).")
     valid_run_id = _validate_run_id(run_id)
 
     rubric = CANONICAL_RUBRICS[rubric_id]
@@ -126,6 +166,8 @@ def build_ai_generate_table_judge_sql(  # noqa: PLR0913
         else ""
     )
     eval_run_col = f"  '{valid_run_id}' AS eval_run_id,\n" if valid_run_id else ""
+    policy_sha_expr = f"'{valid_policy_sha256}'" if valid_policy_sha256 else "CAST(NULL AS STRING)"
+    amended_expr = f"'{valid_clauses_csv}'" if valid_clauses_csv else "CAST(NULL AS STRING)"
     if include_rule0_failures:
         stratum_condition = (
             "NOT t.rule0_pass OR t.tool_error_count > 0 OR t.trace_latency_ms > t.sla_latency_ms"
@@ -187,6 +229,8 @@ SELECT
   DIV(LENGTH(prompt), 4) AS judge_input_tokens,
   DIV(LENGTH(COALESCE(reasoning_trace, '')), 4) + 12 AS judge_output_tokens,
   0 AS judge_thinking_tokens,
+  {policy_sha_expr} AS policy_sha256,
+  {amended_expr} AS amended_clause_ids,
   CURRENT_TIMESTAMP() AS evaluated_at
 FROM AI.GENERATE_TABLE(
   MODEL `{valid_project}.{valid_dataset}.{remote_model}`,
@@ -211,8 +255,9 @@ def build_ai_evaluate_agent_sql(  # noqa: PLR0913
     ),
     canary_sample_pct: int = 10,
     run_id: str | None = None,
+    persist_run_id: str | None = None,
 ) -> str:
-    """Build Step-1 pre-filtered BigQuery `AI.EVALUATE_AGENT` SQL query (Engine B, M5)."""
+    """Build Step-1 pre-filtered BigQuery `AI.EVALUATE_AGENT` SQL query (Engine B, M5/M9-4)."""
     valid_project = _validate_sql_identifier(project_id, "project_id", allow_hyphen=True)
     valid_dataset = _validate_sql_identifier(dataset_id, "dataset_id")
     valid_view = _validate_sql_identifier(eval_view, "eval_view")
@@ -221,9 +266,14 @@ def build_ai_evaluate_agent_sql(  # noqa: PLR0913
     unknown = [m for m in managed_metrics if m not in MANAGED_EVALUATE_AGENT_METRICS]
     if unknown:
         raise ValueError(f"Unknown AI.EVALUATE_AGENT managed metric(s): {unknown}")
-    if not (0 <= canary_sample_pct <= 100):
-        raise ValueError("canary_sample_pct must be between 0 and 100.")
+    if (
+        isinstance(canary_sample_pct, bool)
+        or not isinstance(canary_sample_pct, int)
+        or not (0 <= canary_sample_pct <= 100)
+    ):
+        raise ValueError("canary_sample_pct must be an integer between 0 and 100 (not bool).")
     valid_run_id = _validate_run_id(run_id)
+    valid_persist_run_id = _validate_run_id(persist_run_id)
 
     metrics_sql = ",\n      ".join(f"'{m}'" for m in managed_metrics)
     predicates: list[str] = []
@@ -236,6 +286,72 @@ def build_ai_evaluate_agent_sql(  # noqa: PLR0913
             f"WHERE run_id = '{valid_run_id}' AND trace_id IS NOT NULL)"
         )
     sample_clause = f"\n    WHERE {' AND '.join(predicates)}" if predicates else ""
+
+    if valid_persist_run_id is not None:
+        cand_where = f"WHERE {' AND '.join(predicates)} AND " if predicates else "WHERE "
+        return f"""-- Tier 3 Engine B Persistence: Idempotent AI.EVALUATE_AGENT -> eval_results ({canary_sample_pct}% Sample)
+INSERT INTO `{valid_project}.{valid_dataset}.eval_results` (
+  eval_id, eval_run_id, trace_id, outcome_id, apphub_application_id, rubric_id, judge_model,
+  sampling_stratum, rule0_pass, reasoning_trace, ordinal_score, binary_pass,
+  judge_input_tokens, judge_output_tokens, judge_thinking_tokens, evaluated_at
+)
+WITH evaluated AS (
+  SELECT
+    eval_out.trace_id,
+    eval_out.outcome_id,
+    eval_out.apphub_application_id,
+    metric_row.metric_name AS rubric_id,
+    eval_out.step1_pass AS rule0_pass,
+    COALESCE(metric_row.explanation, 'Managed AI.EVALUATE_AGENT verdict') AS reasoning_trace,
+    CAST(ROUND(LEAST(4.0, GREATEST(1.0, metric_row.score * 3.0 + 1.0))) AS INT64) AS ordinal_score,
+    DIV(CHAR_LENGTH(TO_JSON_STRING(eval_out.trace)), 4) AS judge_input_tokens,
+    DIV(CHAR_LENGTH(COALESCE(metric_row.explanation, '')), 4) AS judge_output_tokens
+  FROM AI.EVALUATE_AGENT(
+    TABLE (
+      SELECT cand.*
+      FROM `{valid_project}.{valid_dataset}.{valid_view}` AS cand
+      LEFT JOIN (
+        SELECT trace_id, COUNT(DISTINCT rubric_id) AS scored_metrics
+        FROM `{valid_project}.{valid_dataset}.eval_results`
+        WHERE eval_run_id = '{valid_persist_run_id}'
+          AND rubric_id IN ({metrics_sql})
+        GROUP BY trace_id
+      ) AS completed
+        ON cand.trace_id = completed.trace_id
+      {cand_where}COALESCE(completed.scored_metrics, 0) < {len(managed_metrics)}
+    ),
+    trace_col => 'trace',
+    managed_metrics => [
+      {metrics_sql}
+    ]
+  ) AS eval_out,
+  UNNEST(eval_out.evaluation_results) AS metric_row
+  LEFT JOIN `{valid_project}.{valid_dataset}.eval_results` AS existing
+    ON eval_out.trace_id = existing.trace_id
+    AND metric_row.metric_name = existing.rubric_id
+    AND existing.eval_run_id = '{valid_persist_run_id}'
+  WHERE metric_row.score IS NOT NULL
+    AND existing.eval_id IS NULL
+)
+SELECT
+  GENERATE_UUID() AS eval_id,
+  '{valid_persist_run_id}' AS eval_run_id,
+  trace_id,
+  outcome_id,
+  apphub_application_id,
+  rubric_id,
+  'ai_evaluate_agent_managed' AS judge_model,
+  'SAMPLE_{canary_sample_pct}PCT' AS sampling_stratum,
+  rule0_pass,
+  reasoning_trace,
+  ordinal_score,
+  (ordinal_score >= 3) AS binary_pass,
+  judge_input_tokens,
+  judge_output_tokens,
+  0 AS judge_thinking_tokens,
+  CURRENT_TIMESTAMP() AS evaluated_at
+FROM evaluated;
+"""  # noqa: S608
 
     return f"""-- Tier 2 Engine B: Step-1 Pre-Filtered AI.EVALUATE_AGENT Execution ({canary_sample_pct}% Sample)
 WITH candidate_turns AS (
@@ -265,12 +381,39 @@ def _parse_outcome_verified_flag(raw_value: object) -> int | None:
     return None
 
 
-def _insert_sqlite_spans(cur: sqlite3.Cursor, spans: Sequence[OTelGenAISpanRecord]) -> None:
+def _parse_optional_float(raw_value: object, default: float | None = None) -> float | None:
+    if raw_value is None or isinstance(raw_value, bool):
+        return default
+    try:
+        parsed = float(str(raw_value))
+    except ValueError:
+        return default
+    return parsed if math.isfinite(parsed) else default
+
+
+def _insert_sqlite_spans(
+    cur: sqlite3.Cursor,
+    spans: Sequence[OTelGenAISpanRecord],
+    *,
+    external_apps: frozenset[str] = frozenset(),
+) -> None:
     for s in spans:
-        cost_usd = compute_default_span_cost_usd(s)
+        cost_usd = compute_span_cost_usd(s)
         raw_status = s.attributes.get("outcome.status")
         outcome_status = str(raw_status) if isinstance(raw_status, str) and raw_status else None
         outcome_verified = _parse_outcome_verified_flag(s.attributes.get("outcome.verified"))
+        is_ext = (
+            1
+            if (
+                s.resolved_application_id in external_apps
+                or (s.outcome_owner is not None and s.outcome_owner in external_apps)
+                or str(s.attributes.get("apphub.external", "")).strip().lower() == "true"
+            )
+            else 0
+        )
+        service_vcpu = _parse_optional_float(s.attributes.get("service.vcpu"), 2.0) or 2.0
+        service_gib = _parse_optional_float(s.attributes.get("service.gib"), 2.0) or 2.0
+        outcome_storage_usd = _parse_optional_float(s.attributes.get("outcome.storage_usd"), None)
         start_utc = (
             s.start_time.replace(tzinfo=UTC)
             if s.start_time.tzinfo is None
@@ -282,7 +425,7 @@ def _insert_sqlite_spans(cur: sqlite3.Cursor, spans: Sequence[OTelGenAISpanRecor
         cur.execute(
             """
             INSERT INTO otel_spans VALUES (
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
             )
             """,
             (
@@ -296,12 +439,17 @@ def _insert_sqlite_spans(cur: sqlite3.Cursor, spans: Sequence[OTelGenAISpanRecor
                 s.source_mode,
                 s.agent_name,
                 s.service_name,
+                s.otel_span_kind,
                 str(s.span_kind),
                 s.model_name,
                 s.tool_call_status,
                 s.status_code,
                 1 if s.rule0_pass else 0,
                 str(s.finops_traffic_type),
+                is_ext,
+                service_vcpu,
+                service_gib,
+                outcome_storage_usd,
                 outcome_status,
                 outcome_verified,
                 hour_iso,
@@ -437,6 +585,11 @@ def _row_to_summary(row: sqlite3.Row) -> SQLTraceEvalSummary:
         ),
         outcome_total_count=int(row["outcome_total_count"]),
         outcome_verified_count=int(row["outcome_verified_count"]),
+        outcome_cost_per_verified_ai_usd=(
+            float(row["outcome_cost_per_verified_ai_usd"])
+            if row["outcome_cost_per_verified_ai_usd"] is not None
+            else None
+        ),
         outcome_cost_per_verified_usd=(
             float(row["outcome_cost_per_verified_usd"])
             if row["outcome_cost_per_verified_usd"] is not None
@@ -454,7 +607,7 @@ def _open_sqlite_twin() -> sqlite3.Connection:
     return conn
 
 
-def evaluate_traces_in_sqlite(  # noqa: PLR0913
+def evaluate_all_rubrics_in_sqlite(  # noqa: PLR0913
     spans: Sequence[OTelGenAISpanRecord],
     judge_outcomes: Mapping[str, bool] | None = None,
     sme_confusion: ConfusionMatrix
@@ -473,8 +626,9 @@ def evaluate_traces_in_sqlite(  # noqa: PLR0913
     sampling_strata: Mapping[str, str] | None = None,
     sla_latency_ms: float = 5000.0,
     extra_rubric_outcomes: Mapping[str, Mapping[str, bool]] | None = None,
-) -> dict[str, SQLTraceEvalSummary]:
-    """Execute pure-SQLite twin of `sql/views.sql` with exact BigQuery SQL math parity."""
+    external_apps: frozenset[str] = frozenset(),
+) -> dict[tuple[str, str], SQLTraceEvalSummary]:
+    """Execute pure-SQLite twin returning every `(apphub_application_id, rubric_id)` row (`M9-2`)."""
     if not spans:
         return {}
 
@@ -486,7 +640,7 @@ def evaluate_traces_in_sqlite(  # noqa: PLR0913
         "INSERT INTO eval_config (rubric_id, irr_threshold, sla_latency_ms) VALUES (?, ?, ?)",
         (rubric_id, float(irr_threshold), float(sla_latency_ms)),
     )
-    _insert_sqlite_spans(cur, spans)
+    _insert_sqlite_spans(cur, spans, external_apps=external_apps)
     cur.executescript(SQLITE_VIEWS_DDL)
 
     trace_meta = {
@@ -535,11 +689,90 @@ def evaluate_traces_in_sqlite(  # noqa: PLR0913
     )
 
     summaries = {
-        str(row["apphub_application_id"]): _row_to_summary(row)
+        (str(row["apphub_application_id"]), str(row["rubric_id"])): _row_to_summary(row)
         for row in cur.execute("SELECT * FROM v_agent_eval_and_finops_summary").fetchall()
     }
     conn.close()
     return summaries
+
+
+def evaluate_traces_in_sqlite(  # noqa: PLR0913
+    spans: Sequence[OTelGenAISpanRecord],
+    judge_outcomes: Mapping[str, bool] | None = None,
+    sme_confusion: ConfusionMatrix
+    | Mapping[str, ConfusionMatrix]
+    | Mapping[tuple[str, str], ConfusionMatrix]
+    | None = None,
+    rubric_id: str = "groundedness_4pt_v1",
+    judge_cost_per_call_usd: float = 0.0025,
+    sme_ordinal_pairs: Sequence[tuple[int, int]]
+    | Mapping[str, Sequence[tuple[int, int]]]
+    | Mapping[tuple[str, str], Sequence[tuple[int, int]]]
+    | None = None,
+    passing_score: int = 3,
+    irr_threshold: float = 0.80,
+    *,
+    sampling_strata: Mapping[str, str] | None = None,
+    sla_latency_ms: float = 5000.0,
+    extra_rubric_outcomes: Mapping[str, Mapping[str, bool]] | None = None,
+    external_apps: frozenset[str] = frozenset(),
+) -> dict[str, SQLTraceEvalSummary]:
+    """Execute pure-SQLite twin of `sql/views.sql`, returning 1 summary per app for `rubric_id`."""
+    all_rows = evaluate_all_rubrics_in_sqlite(
+        spans=spans,
+        judge_outcomes=judge_outcomes,
+        sme_confusion=sme_confusion,
+        rubric_id=rubric_id,
+        judge_cost_per_call_usd=judge_cost_per_call_usd,
+        sme_ordinal_pairs=sme_ordinal_pairs,
+        passing_score=passing_score,
+        irr_threshold=irr_threshold,
+        sampling_strata=sampling_strata,
+        sla_latency_ms=sla_latency_ms,
+        extra_rubric_outcomes=extra_rubric_outcomes,
+        external_apps=external_apps,
+    )
+    selected: dict[str, SQLTraceEvalSummary] = {}
+    for (app_id, row_rubric), summary in all_rows.items():
+        if row_rubric == rubric_id or (
+            app_id not in selected and summary.calibration_status == "UNJUDGED"
+        ):
+            selected[app_id] = summary
+    return selected
+
+
+def evaluate_step1_traces_in_sqlite(
+    spans: Sequence[OTelGenAISpanRecord],
+) -> dict[str, dict[str, object]]:
+    """Return canonical Step-1 per-trace metrics from SQLite `v_trace_sql_evaluation` (`M9-4`)."""
+    if not spans:
+        return {}
+    conn = _open_sqlite_twin()
+    cur = conn.cursor()
+    cur.executescript(SQLITE_TABLES_DDL)
+    cur.execute(
+        "INSERT INTO eval_config (rubric_id, irr_threshold, sla_latency_ms) VALUES ('groundedness_4pt_v1', 0.80, 5000.0)"
+    )
+    _insert_sqlite_spans(cur, spans)
+    cur.executescript(SQLITE_VIEWS_DDL)
+    rows: dict[str, dict[str, object]] = {
+        str(r["trace_id"]): {
+            "apphub_application_id": str(r["apphub_application_id"]),
+            "trace_latency_ms": float(r["trace_latency_ms"]),
+            "rule0_pass": bool(r["rule0_pass"]),
+            "tool_error_count": int(r["tool_error_count"]),
+            "cache_hit_ratio": (
+                float(r["cache_hit_ratio"]) if r["cache_hit_ratio"] is not None else None
+            ),
+            "trace_span_cost_usd": float(r["trace_span_cost_usd"]),
+        }
+        for r in cur.execute(
+            "SELECT trace_id, apphub_application_id, trace_latency_ms, rule0_pass, "
+            "tool_error_count, cache_hit_ratio, trace_span_cost_usd FROM v_trace_sql_evaluation"
+        ).fetchall()
+    }
+    conn.close()
+    return rows
 
 
 def evaluate_hourly_burndown_in_sqlite(

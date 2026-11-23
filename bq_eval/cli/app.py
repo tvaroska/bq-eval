@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -10,7 +11,14 @@ from typing import cast
 
 from bq_eval import __version__
 from bq_eval.cli.server import create_workbench_server
+from bq_eval.contract.otel import BQAAAgentEvent
 from bq_eval.contract.pricing import MANAGED_EVALUATE_AGENT_METRICS
+from bq_eval.engine.bqaa import (
+    bqaa_events_to_otel_spans,
+    bqaa_events_to_trace_payloads,
+    deduplicate_bqaa_events,
+)
+from bq_eval.engine.ports import SQLiteEvalBackend
 from bq_eval.engine.sql_eval import (
     build_ai_evaluate_agent_sql,
     build_ai_generate_table_judge_sql,
@@ -27,7 +35,7 @@ from bq_eval.showcase.pipeline import (
     render_markdown_report,
     run_showcase_pipeline,
 )
-from bq_eval.showcase.renderer import write_html_scorecard
+from bq_eval.showcase.render.renderer import write_html_scorecard
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -78,6 +86,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     serve_p.add_argument(
         "--host", default="127.0.0.1", help="Loopback bind host (default: 127.0.0.1)."
+    )
+    serve_p.add_argument(
+        "--allow-non-loopback",
+        action="store_true",
+        help="Explicit opt-in required to bind the HTTP server on a non-loopback host.",
     )
     serve_p.add_argument("--port", type=int, default=8080, help="Bind port (default: 8080).")
     serve_p.add_argument(
@@ -160,6 +173,41 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional fleet run_id filter against fleet_case_outcomes.",
     )
+
+    bqaa_p = sub.add_parser(
+        "bqaa",
+        help="Ingest Light Capture (BQAA) agent_events JSON/JSONL, convert to OTel spans/payloads, and evaluate.",
+    )
+    bqaa_p.add_argument(
+        "--events-file",
+        type=Path,
+        required=True,
+        help="Path to a JSON array or JSONL file of BQAAAgentEvent records.",
+    )
+    bqaa_p.add_argument(
+        "--rubric-id",
+        default="groundedness_4pt_v1",
+        help="Rubric ID for SQLite twin summary evaluation (default: groundedness_4pt_v1).",
+    )
+    bqaa_p.add_argument(
+        "--format",
+        dest="output_format",
+        choices=("markdown", "json"),
+        default="markdown",
+        help="Stdout output format: markdown or json (default: markdown).",
+    )
+    bqaa_p.add_argument(
+        "--spans-out",
+        type=Path,
+        default=None,
+        help="Optional path to export converted OTelGenAISpanRecord rows as JSONL.",
+    )
+    bqaa_p.add_argument(
+        "--payloads-out",
+        type=Path,
+        default=None,
+        help="Optional path to export aggregated TracePayloadRecord rows as JSONL.",
+    )
     return parser
 
 
@@ -182,16 +230,19 @@ def _run_demo(args: argparse.Namespace) -> int:
 
 
 def _run_serve(args: argparse.Namespace) -> int:
-    run_showcase_pipeline(
-        corpus=cast(CorpusChoice, args.corpus),
-        scenario_file=args.scenario_file,
-    )
+    corpus = cast(CorpusChoice, args.corpus)
     server = create_workbench_server(
         host=args.host,
         port=args.port,
-        corpus=cast(CorpusChoice, args.corpus),
+        corpus=corpus,
         scenario_file=args.scenario_file,
+        allow_non_loopback=args.allow_non_loopback,
     )
+    try:
+        server.get_artifacts(corpus)
+    except (ValueError, OSError):
+        server.server_close()
+        raise
     raw_host, actual_port = server.server_address[:2]
     actual_host = (
         raw_host.decode("ascii") if isinstance(raw_host, (bytes, bytearray)) else str(raw_host)
@@ -253,12 +304,85 @@ def _run_judge_sql(args: argparse.Namespace) -> int:
     return 0
 
 
+def _load_bqaa_events_file(path: Path) -> list[BQAAAgentEvent]:
+    if not path.is_file():
+        raise ValueError(f"BQAA events file not found: {path}")
+    raw_text = path.read_text(encoding="utf-8").strip()
+    if not raw_text:
+        return []
+    if raw_text.startswith("["):
+        parsed = json.loads(raw_text)
+        if not isinstance(parsed, list):
+            raise ValueError("Expected JSON array of BQAAAgentEvent objects.")
+        return [BQAAAgentEvent.model_validate(item) for item in parsed]
+    return [
+        BQAAAgentEvent.model_validate(json.loads(line))
+        for line in raw_text.splitlines()
+        if line.strip()
+    ]
+
+
+def _run_bqaa(args: argparse.Namespace) -> int:
+    raw_events = _load_bqaa_events_file(args.events_file)
+    deduped = deduplicate_bqaa_events(raw_events)
+    spans = bqaa_events_to_otel_spans(deduped)
+    payloads = bqaa_events_to_trace_payloads(deduped)
+
+    backend = SQLiteEvalBackend()
+    summaries = backend.evaluate_traces(spans, rubric_id=args.rubric_id)
+
+    if args.spans_out is not None:
+        args.spans_out.parent.mkdir(parents=True, exist_ok=True)
+        args.spans_out.write_text(
+            "".join(json.dumps(s.model_dump(mode="json")) + "\n" for s in spans),
+            encoding="utf-8",
+        )
+    if args.payloads_out is not None:
+        args.payloads_out.parent.mkdir(parents=True, exist_ok=True)
+        args.payloads_out.write_text(
+            "".join(json.dumps(p.model_dump(mode="json")) + "\n" for p in payloads),
+            encoding="utf-8",
+        )
+
+    if args.output_format == "json":
+        print(
+            json.dumps(
+                {
+                    "events_raw": len(raw_events),
+                    "events_deduped": len(deduped),
+                    "spans_emitted": len(spans),
+                    "payloads_emitted": len(payloads),
+                    "summaries": {k: v.model_dump(mode="json") for k, v in summaries.items()},
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
+
+    rows = "\n".join(
+        f"| `{s.apphub_application_id}` | {s.total_traces} | {s.rule0_pass_rate * 100:.1f}% | "
+        f"`{s.calibration_status}` | ${s.total_spend_usd:.5f} |"
+        for s in summaries.values()
+    )
+    print(
+        f"# BQAA Light Capture Ingestion & Evaluation\n\n"
+        f"- **Events:** `{len(raw_events)}` raw -> `{len(deduped)}` deduplicated\n"
+        f"- **Converted:** `{len(spans)}` spans, `{len(payloads)}` trace payloads\n\n"
+        "| Application ID | Traces | Rule 0 Pass | Calibration | Total Spend |\n"
+        "| :--- | ---: | ---: | :--- | ---: |\n"
+        f"{rows}"
+    )
+    return 0
+
+
 def _run_command(args: argparse.Namespace) -> int:
     handlers = {
         "demo": _run_demo,
         "serve": _run_serve,
         "loadgen": _run_loadgen,
         "judge-sql": _run_judge_sql,
+        "bqaa": _run_bqaa,
     }
     handler = handlers.get(args.command)
     return handler(args) if handler is not None else 1

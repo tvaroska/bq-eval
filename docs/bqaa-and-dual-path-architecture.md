@@ -97,7 +97,7 @@ flowchart TB
 ### 4.1 Two Generations of `BQAA` Evaluation
 1. **Generation 1 (Python `bigquery-agent-analytics` SDK)**:
    - Pulls `agent_events` rows out of BigQuery into a Python process (`Client`, `GraderPipeline`, `CodeEvaluator`, `LLMAsJudge`) to reconstruct sessions and score them outside the warehouse.
-2. **Generation 2 (Built-In `AI.EVALUATE_AGENT` SQL TVF — Q1 2027 Preview)**:
+2. **Generation 2 (Built-In `AI.EVALUATE_AGENT` SQL TVF (Q1 2027 Private Preview, Non-Public))**:
    - **Native built-in BigQuery Table-Valued Function (TVF)**: Requires **zero installation, zero `CREATE MODEL`, and zero `CREATE CONNECTION`**.
    - **SQL Signature**:
      ```sql
@@ -127,7 +127,7 @@ flowchart TB
 | Stage | Role in Dual-Path Architecture |
 | :--- | :--- |
 | **Step 1 (`$0` SQL Gate & Cost per Outcome)** | **Pre-filters before any LLM judge runs**: Flags tool errors, infinite tool loops (`has_tool_loop` / `tool_call_count > 8`), and schema failures at `$0`, computes `<=200K` and `>200K` token spend, and selects a deterministic `5–10%` `FARM_FINGERPRINT(trace_id)` sample + `100%` error/SLA tail, saving **90–95% of `AI.EVALUATE_AGENT` or `AI.GENERATE_TABLE` judge spend**. |
-| **Step 2 & 2.5 (Stateless Judge Execution)** | • **Engine A (`AI.GENERATE_TABLE`)**: Works today in all regions (including `US`/`EU`), enforces 4-point ordinal rubrics (`groundedness_4pt_v1` + plain-English Step 2.5 Skill rubrics), escapes `<untrusted_text>` against prompt injection, and records exact judge token usage.<br/>• **Engine B (`AI.EVALUATE_AGENT`)**: Zero-model-setup option (in single regions via `v_bqaa_eval_turn_filtered`) for scoring `BQAA` `AgentData` turns against Google's 7 built-in trajectory metrics (`bq-eval judge-sql --engine evaluate-agent`). |
+| **Step 2 & 2.5 (Stateless Judge Execution)** | • **Engine A (`AI.GENERATE_TABLE`)**: Works today in all regions (including `US`/`EU`), enforces 4-point ordinal rubrics (`groundedness_4pt_v1` + plain-English Step 2.5 Skill rubrics), escapes `<untrusted_text>` against prompt injection, and records exact judge token usage.<br/>• **Engine B (`AI.EVALUATE_AGENT` — Private Preview / Non-Public TVF)**: Zero-model-setup preview option (in single regions via `v_bqaa_eval_turn_filtered`, not yet in public Cloud BigQuery docs) for scoring `BQAA` `AgentData` turns against Google's 7 built-in trajectory metrics (`bq-eval judge-sql --engine evaluate-agent`). |
 | **Step 3 & Enterprise Extensions** | **Turns stateless scores into governed decisions**: Saves verdicts from either engine into `agent_eval.eval_results`, enforces **`0%` negative-flip regression gates** (`v_step3_paired_run_comparison`), debiases raw pass rates via **Rogan-Gladen / Gwet's `AC2 >= 0.80`** (`sme_labels`), and computes **USD Cost per Verified Outcome** (`v_cost_per_verified_outcome`). |
 
 ---
@@ -141,7 +141,7 @@ flowchart TB
 | **Prompts, Context & Responses** | Inline in `agent_events.content` (`USER_MESSAGE_RECEIVED`, `TOOL_COMPLETED`, `AGENT_RESPONSE`) + `content_parts` GCS refs | Joined from `obs_logs._AllLogs` + BigLake `agent_eval.completions` |
 | **Token Usage & `<=200K`/`>200K` Cliffs** | `attributes.usage_metadata.{prompt_token_count, cached_content_token_count, candidates_token_count, thoughts_token_count}` on `LLM_RESPONSE` | `gen_ai.usage.{input_tokens, cache_read.input_tokens, output_tokens, reasoning.output_tokens}` |
 | **Candidate Tool Declarations** | Full OpenAPI tool schemas in `attributes.tools` on `LLM_REQUEST` (enables `AgentData` reconstruction) | Not captured in standard OTel spans (only invoked `gen_ai.tool.name` is recorded) |
-| **Multi-Agent Outcome Attribution (`EVAL-P11`)** | `COALESCE(attributes.custom_metadata."outcome.id", trace_id, invocation_id)` + `OUTCOME_CLOSED` event | Cross-service W3C `baggage` (`outcome.id`, `outcome.owner`) + zero-duration `outcome.closed` span |
+| **Multi-Agent Outcome Attribution (`EVAL-P11`)** | `attributes.custom_metadata."outcome.id"` (`NULL` when absent so shadow workloads surface in `v_attribution_coverage`) + `OUTCOME_CLOSED` event | Cross-service W3C `baggage` (`outcome.id`, `outcome.owner`) + zero-duration `outcome.closed` span |
 
 See [`sql/bqaa_adapter_views.sql`](../sql/bqaa_adapter_views.sql) for the production SQL definitions (`v_bqaa_otel_spans`, `v_bqaa_trace_payloads`, `v_bqaa_eval_turn_filtered`, and the Light / Full / Hybrid mode switchboard) and [`bq_eval/engine/bqaa.py`](../bq_eval/engine/bqaa.py) for the deterministic Python twin.
 

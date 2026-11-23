@@ -38,6 +38,8 @@ SKIP_DRY_RUN_PREFIXES: tuple[str, ...] = (
     "CREATE SCHEMA",
     "CREATE EXTERNAL TABLE",
     "CREATE MODEL",
+    "CREATE OR REPLACE PROCEDURE",
+    "CREATE PROCEDURE",
     "ALTER TABLE",
 )
 
@@ -78,11 +80,34 @@ def should_skip_dry_run(statement: str) -> bool:
     return any(upper.startswith(prefix) for prefix in SKIP_DRY_RUN_PREFIXES)
 
 
-def split_sql_statements(sql: str) -> list[str]:
-    """Split a multi-statement BigQuery SQL script via `sqlglot`'s BigQuery lexer (`F21`).
+def _advance_block_depths(
+    tokens: Sequence[sqlglot.Token],
+    idx: int,
+    block_depth: int,
+    case_depth: int,
+) -> tuple[int, int]:
+    tok = tokens[idx]
+    if tok.token_type == TokenType.CASE:
+        return block_depth, case_depth + 1
+    upper_text = tok.text.upper()
+    if upper_text == "BEGIN":
+        next_text = tokens[idx + 1].text.upper() if idx + 1 < len(tokens) else ""
+        return (block_depth + 1 if next_text != "TRANSACTION" else block_depth), case_depth
+    if upper_text == "END":
+        next_text = tokens[idx + 1].text.upper() if idx + 1 < len(tokens) else ""
+        if next_text in {"IF", "LOOP", "WHILE", "FOR"}:
+            return block_depth, case_depth
+        if case_depth > 0:
+            return block_depth, case_depth - 1
+        return max(0, block_depth - 1), case_depth
+    return block_depth, case_depth
 
-    Strips leading `--`/`#` and `/* ... */` comments so comment-only chunks are omitted
-    and statements begin cleanly at their SQL keyword.
+
+def split_sql_statements(sql: str) -> list[str]:
+    """Split a multi-statement BigQuery SQL script via `sqlglot`'s BigQuery lexer (`F21`, `M9-3`).
+
+    Preserves `BEGIN ... END;` procedure blocks as single statements while stripping leading
+    `--`/`#` and `/* ... */` comments so statements begin cleanly at their SQL keyword.
     """
     tokens = sqlglot.tokenize(sql, read="bigquery")
     if not tokens:
@@ -91,16 +116,20 @@ def split_sql_statements(sql: str) -> list[str]:
     statements: list[str] = []
     chunk_start = 0
     has_non_semicolon = False
+    block_depth = 0
+    case_depth = 0
 
-    for tok in tokens:
-        if tok.token_type == TokenType.SEMICOLON:
+    for idx, tok in enumerate(tokens):
+        if tok.token_type == TokenType.SEMICOLON and block_depth == 0:
             if has_non_semicolon:
                 stmt = strip_leading_sql_comments(sql[chunk_start : tok.start])
                 if stmt:
                     statements.append(stmt)
             chunk_start = tok.end + 1
             has_non_semicolon = False
-        else:
+            continue
+        block_depth, case_depth = _advance_block_depths(tokens, idx, block_depth, case_depth)
+        if tok.token_type != TokenType.SEMICOLON:
             has_non_semicolon = True
 
     if has_non_semicolon:

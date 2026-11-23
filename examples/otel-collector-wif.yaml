@@ -46,8 +46,8 @@ exporters:
       attribute_mappings:
         - key: gcp.apphub.application.id
           replacement: gcp.apphub.application.id
-        - key: gen_ai.finops.traffic_type
-          replacement: gen_ai.finops.traffic_type
+        - key: finops.traffic_type
+          replacement: finops.traffic_type
 
 extensions:
   health_check:

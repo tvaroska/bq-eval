@@ -6,7 +6,7 @@ Agents don't fail loudly on monitoring dashboards: a looping tool or 200K-token 
 
 ## Verified Receipts
 
-Static [rule views](sql/step1_trace_views.sql) check all traces at **`$0` LLM judge cost** (BigQuery scan bytes still apply) over `agent_events` or `_AllSpans` (`32`-col [adapter parity](tests/test_m5_bqaa_dual_path.py)). Scheduled queries persist sampled scores and labeled cases under a `2M`-token/day [quota guard](sql/step3_daily_quota_guard.sql). [Dry-run validation](benchmarks/results/bq_dry_run_receipt.json) parses **`56`** SQL and judge statements via `sqlglot` (`12` DDL skipped; opt-in GCP `--dry_run` via [`bq_dry_run.py`](scripts/bq_dry_run.py)). Math matches BigQuery SQL in SQLite (`< 1e-12` parity, **`115/115` tests**). The [fleet receipt](benchmarks/results/m2_live_receipt.json) (`343` reconstructed cases, `676` spans incl. `333` `outcome.closed`, `0` human SME labels; `gemini-4-argon` reference judge, `AC2` = Quadratic Gwet's agreement) replays below:
+Static [rule views](sql/step1_trace_views.sql) check every trace at **`$0` LLM judge cost** (BigQuery scan bytes apply) over `agent_events` or `_AllSpans` (`32`-col [adapter parity](tests/test_m5_bqaa_dual_path.py)). Scheduled queries persist sampled scores under a `2M`-token/day [quota guard](sql/step3_daily_quota_guard.sql). [Dry-run validation](benchmarks/results/bq_dry_run_receipt.json) parses **`55`** SQL statements via `sqlglot` (`13` DDL/proc skipped; opt-in GCP `--dry_run` in [`bq_dry_run.py`](scripts/bq_dry_run.py)). SQLite mirrors BigQuery math (`< 1e-12` parity, **`135/135` tests**). The [fleet receipt](benchmarks/results/m2_live_receipt.json) (`343` reconstructed cases, `676` spans, `333` `outcome.closed`, `0` human labels; `gemini-4-argon` reference judge; `AC2` = Quadratic Gwet's) replays below:
 
 | Scope | Measured Result | Proof |
 | :--- | :--- | :--- |
@@ -25,18 +25,18 @@ For prompt UIs, annotation queues, or `< 50`-trace slices where `$0` LLM rules p
 | :--- | :--- | :--- |
 | **Langfuse / LangSmith** | Prompt iteration, annotation UIs, dev tracing | Copies traces out of BigQuery; omits warehouse rules, debiased samples, and `>200K` cliffs |
 | **Datadog LLM / Billing** | APM alerts, latency, raw token spend | Stops at cost/trace; misses verified outcomes, judge spend, and `NULL` on unjudged apps |
-| **BQAA + `AI.EVALUATE_AGENT`** | 3-line capture, zero-setup turn scoring | Omits App Hub ownership, calibration, `$0` LLM rule filtering, and outcome cost |
+| **BQAA + `AI.EVALUATE_AGENT` *(preview, non-public)*** | 3-line capture, zero-setup turn scoring | Omits App Hub ownership, calibration, `$0` LLM rule filtering, and outcome cost |
 
 ## Where This Breaks
 
 1. **Reconstructed synthetic docs & model labels:** `m2_live_receipt.json` has `343` reconstructed cases (`676` spans, `0` human SME labels); `AC2 = 0.8605` compares `gemini-3.8-flash` to `gemini-4-argon` (`[87.97%, 95.08%]` uses point judge rates). Regulated use needs `~100` blind human labels.
 2. **Small slices & mixed cliffs:** Skill (`n=8` vs. `n=10`) excludes engineering/SME wages; RFP (`35`) mixes model tier with the `>200K` cliff.
-3. **Scheduled writes, caps & SQLite dialects:** Sampled `AI.GENERATE_TABLE` verdicts persist via scheduled queries under a `2M`-token daily cap. `AI.EVALUATE_AGENT` supports `14` single regions only (`us.vertex_ai_connection` targets `US` multi-region) and estimates tokens via `CHAR_LENGTH / 4`. [`sqlite_views.py`](bq_eval/engine/sqlite_views.py) mirrors `APPROX_QUANTILES(...)[OFFSET(95)]` and `ARRAY_AGG(...)[SAFE_OFFSET(0)]` natively (`< 1e-12` parity).
+3. **Scheduled writes, caps & dialects:** Sampled `AI.GENERATE_TABLE` verdicts persist via scheduled queries under a `2M`-token daily cap. `AI.EVALUATE_AGENT` (private preview, non-public TVF) supports `14` single regions (`us.vertex_ai_connection` targets `US` multi-region) and estimates tokens via `CHAR_LENGTH / 4`. [`sqlite_views.py`](bq_eval/engine/sqlite_views.py) mirrors `APPROX_QUANTILES` and `ARRAY_AGG` natively (`< 1e-12` parity).
 4. **Manual cloud setup:** Local runs use SQLite; [`bq_dry_run.py`](scripts/bq_dry_run.py) needs `--project-id`, `bq` CLI, `gcloud auth`, and replaced `${CONNECTION_ID}` / `${PAYLOAD_BUCKET}` placeholders for live GCP `--dry_run`. Single-command bootstrap is on the [roadmap](docs/roadmap.md).
 
 ## Quick Start
 
-Run the CLI, 4-tab GM3 workbench, load generator, judge SQL generator, or offline dry-run check:
+Run the CLI, 4-tab workbench, load generator, judge SQL, or offline dry-run check:
 
 ```bash
 uv sync --extra dev
@@ -56,7 +56,7 @@ bqaa_plugin = BigQueryAgentAnalyticsPlugin(project_id="my-gcp-project", dataset_
 runner = Runner(agent=root_agent, app_name="my-app", session_service=session_svc, plugins=[bqaa_plugin])
 ```
 
-Also try `--corpus retail-2app`, `--format json`, or `uv run pytest -p no:cacheprovider -v` (`115/115` tests).
+Also try `--corpus retail-2app`, `--format json`, or `uv run pytest -p no:cacheprovider -v` (`135/135` tests).
 
 ### Deep Dives
 

@@ -61,15 +61,23 @@ def test_otel_spans_and_trace_payloads_are_views_over_linked_datasets() -> None:
 
 
 def test_otel_spans_compat_view_projects_all_m1_columns() -> None:
-    """`agent_eval.otel_spans` view maps all required `_AllSpans` columns and semconv keys."""
+    """`agent_eval.v_otel_allspans_only` & `agent_eval.otel_spans` map all required `_AllSpans` columns."""
     ddl = (SQL_DIR / "ddl.sql").read_text(encoding="utf-8")
 
-    view_match = re.search(
+    wrapper_match = re.search(
         r"CREATE\s+OR\s+REPLACE\s+VIEW\s+`?(?:[a-zA-Z0-9_.-]+\.)?agent_eval\.otel_spans`?\s+AS(.*?);",
         ddl,
         re.IGNORECASE | re.DOTALL,
     )
-    assert view_match is not None, "Could not locate agent_eval.otel_spans view body"
+    assert wrapper_match is not None, "Could not locate agent_eval.otel_spans view body"
+    assert "v_otel_allspans_only" in wrapper_match.group(1)
+
+    view_match = re.search(
+        r"CREATE\s+OR\s+REPLACE\s+VIEW\s+`?(?:[a-zA-Z0-9_.-]+\.)?agent_eval\.v_otel_allspans_only`?\s+AS(.*?);",
+        ddl,
+        re.IGNORECASE | re.DOTALL,
+    )
+    assert view_match is not None, "Could not locate agent_eval.v_otel_allspans_only view body"
     view_body = view_match.group(1)
 
     for col in REQUIRED_OTEL_SPANS_VIEW_COLUMNS:

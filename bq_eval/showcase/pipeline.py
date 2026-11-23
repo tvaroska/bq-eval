@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
@@ -11,8 +12,12 @@ from typing import Any, Literal
 from bq_eval.contract.otel import FinOpsTrafficType, GenAISpanKind, OTelGenAISpanRecord
 from bq_eval.contract.results import (
     ConfusionMatrix,
+    EvalFinOpsROI,
+    FocusChargebackRow,
+    HourlyBurndownExportRow,
     LiveFleetReceipt,
     ModelOption,
+    OffPeakSchedulePlan,
     ParetoEvalResult,
     ScenarioCorpusBundle,
     ShowcaseRunArtifacts,
@@ -20,15 +25,16 @@ from bq_eval.contract.results import (
 )
 from bq_eval.engine.calibration import compute_gwet_ac2
 from bq_eval.engine.finops import (
-    allocate_focus_two_pool_chargeback,
+    allocate_focus_hourly_chargeback,
     compute_eval_finops_roi,
     compute_pareto_frontier,
+    compute_span_cost_usd,
     diagnose_prefix_cache_dilution,
     plan_off_peak_eval_schedule,
 )
-from bq_eval.engine.sql_eval import evaluate_traces_in_sqlite
+from bq_eval.engine.ports import EvalBackend, SQLiteEvalBackend
 from bq_eval.showcase.loadgen import generate_time_shifted_corpus
-from bq_eval.showcase.view import (
+from bq_eval.showcase.render.view import (
     format_calibrated_pass,
     format_cpvo_usd,
     format_irr_gate_verdict,
@@ -299,11 +305,164 @@ def _default_pareto_candidates() -> ParetoEvalResult:
     )
 
 
+def _derive_dynamic_eval_roi(
+    bundle: ScenarioCorpusBundle,
+    summaries: dict[str, SQLTraceEvalSummary],
+) -> EvalFinOpsROI:
+    traces_by_id: dict[str, list[OTelGenAISpanRecord]] = {}
+    for span in bundle.spans:
+        traces_by_id.setdefault(span.trace_id, []).append(span)
+    total_traces = max(1, len(traces_by_id))
+    tail_traces = 0
+    for t_spans in traces_by_id.values():
+        trace_latency_ms = (
+            max(s.end_time for s in t_spans) - min(s.start_time for s in t_spans)
+        ).total_seconds() * 1000.0
+        has_error = any(not s.rule0_pass or s.status_code == "ERROR" for s in t_spans)
+        if has_error or trace_latency_ms > 5000.0:
+            tail_traces += 1
+    total_judged = sum(s.judged_samples for s in summaries.values())
+    total_judge_usd = sum(s.autorater_judge_usd for s in summaries.values())
+    judge_cost = (
+        (total_judge_usd / total_judged) if total_judged > 0 and total_judge_usd > 0 else 0.0025
+    )
+    return compute_eval_finops_roi(
+        total_production_traces=total_traces,
+        error_or_sla_tail_rate=tail_traces / total_traces,
+        canary_sample_rate=0.05,
+        judge_cost_per_trace_usd=judge_cost,
+    )
+
+
+def _derive_dynamic_pareto_candidates(
+    bundle: ScenarioCorpusBundle,
+    summaries: dict[str, SQLTraceEvalSummary],
+) -> ParetoEvalResult:
+    traces_by_id: dict[str, list[OTelGenAISpanRecord]] = {}
+    for span in bundle.spans:
+        traces_by_id.setdefault(span.trace_id, []).append(span)
+
+    grouped: dict[tuple[str, str], list[tuple[str, list[OTelGenAISpanRecord]]]] = {}
+    for trace_id, t_spans in traces_by_id.items():
+        app_id = next(
+            (s.resolved_application_id for s in t_spans if s.parent_span_id is None),
+            t_spans[0].resolved_application_id,
+        )
+        llm_spans = [s for s in t_spans if s.model_name and s.model_name != "none"]
+        primary_model = (
+            max(llm_spans, key=lambda s: s.input_tokens + s.output_tokens).model_name
+            if llm_spans
+            else "none"
+        )
+        grouped.setdefault((app_id, primary_model), []).append((trace_id, t_spans))
+
+    candidates: list[ModelOption] = []
+    for (app_id, model_name), group_traces in sorted(grouped.items()):
+        n_traces = len(group_traces)
+        latencies: list[float] = []
+        rule0_ok = 0
+        judged_r0 = 0
+        fab_count = 0
+        spend_usd = 0.0
+
+        for trace_id, t_spans in group_traces:
+            lat_ms = (
+                max(s.end_time for s in t_spans) - min(s.start_time for s in t_spans)
+            ).total_seconds() * 1000.0
+            latencies.append(lat_ms)
+            r0 = all(s.rule0_pass and s.status_code != "ERROR" for s in t_spans)
+            rule0_ok += int(r0)
+            spend_usd += sum(compute_span_cost_usd(s) for s in t_spans)
+            explicit_fab = any(
+                str(s.attributes.get("fabrication", "")).strip().lower() == "true" for s in t_spans
+            )
+            if r0 and trace_id in bundle.judge_outcomes:
+                judged_r0 += 1
+                if explicit_fab or not bundle.judge_outcomes[trace_id]:
+                    fab_count += 1
+            elif explicit_fab:
+                fab_count += 1
+
+        rule0_rate = rule0_ok / n_traces
+        fab_rate = (fab_count / judged_r0) if judged_r0 > 0 else (fab_count / n_traces)
+        summary = summaries.get(app_id)
+        cal_rate = (
+            summary.calibrated_pass_rate
+            if summary is not None and summary.calibrated_pass_rate is not None
+            else (
+                summary.raw_judge_pass_rate
+                if summary is not None and summary.raw_judge_pass_rate is not None
+                else rule0_rate
+            )
+        )
+        verified_est = max(1e-9, n_traces * max(0.01, rule0_rate) * max(0.01, cal_rate))
+        cpvo_usd = spend_usd / verified_est
+        latencies.sort()
+        p95_idx = min(len(latencies) - 1, max(0, math.ceil(0.95 * len(latencies)) - 1))
+        candidates.append(
+            ModelOption(
+                config_id=f"{app_id}::{model_name}",
+                model_name=model_name,
+                rule0_pass_rate=rule0_rate,
+                fabrication_rate=fab_rate,
+                calibrated_pass_rate=cal_rate,
+                cost_per_verified_outcome_usd=cpvo_usd,
+                p95_latency_ms=latencies[p95_idx],
+            )
+        )
+    return compute_pareto_frontier(candidates)
+
+
+def _compute_hourly_chargeback_and_schedule(
+    bundle: ScenarioCorpusBundle,
+    summaries: dict[str, SQLTraceEvalSummary],
+    hourly_rows: list[HourlyBurndownExportRow],
+) -> tuple[list[FocusChargebackRow], OffPeakSchedulePlan]:
+    timestamps = sorted({r.timestamp for r in hourly_rows})
+    app_ids = sorted(summaries)
+    if not timestamps:
+        timestamps = ["1970-01-01T00:00:00Z"]
+
+    ts_index = {ts: idx for idx, ts in enumerate(timestamps)}
+    hourly_by_app: dict[str, list[float]] = {app_id: [0.0] * len(timestamps) for app_id in app_ids}
+    for row in hourly_rows:
+        if row.apphub_application_id in hourly_by_app:
+            hourly_by_app[row.apphub_application_id][ts_index[row.timestamp]] += (
+                row.weighted_burndown_tokens
+            )
+
+    hourly_reserved_pt = bundle.reserved_pt_capacity_tokens / len(timestamps)
+    cost_centers = {
+        app_id: bundle.app_cost_centers.get(app_id, "UNASSIGNED") for app_id in hourly_by_app
+    }
+    focus_rows = allocate_focus_hourly_chargeback(
+        hourly_burndown_by_app=hourly_by_app,
+        app_cost_centers=cost_centers,
+        hourly_reserved_pt_capacity_tokens=hourly_reserved_pt,
+        reserved_pt_fixed_cost_usd=bundle.reserved_pt_fixed_cost_usd,
+        payg_overflow_usd_per_1m_weighted=0.15,
+    )
+
+    hourly_totals = [
+        sum(series[h] for series in hourly_by_app.values()) for h in range(len(timestamps))
+    ]
+    batch_eval_tokens = max(1.0, sum(hourly_totals) * 0.15)
+    off_peak_plan = plan_off_peak_eval_schedule(
+        hourly_production_burndown=hourly_totals,
+        hourly_reserved_pt_capacity=hourly_reserved_pt,
+        total_batch_eval_tokens=batch_eval_tokens,
+    )
+    return focus_rows, off_peak_plan
+
+
 def _evaluate_bundle(
     bundle: ScenarioCorpusBundle,
     *,
     offline_twin_summaries: dict[str, SQLTraceEvalSummary] | None = None,
+    backend: EvalBackend | None = None,
+    dynamic_finops: bool = False,
 ) -> ShowcaseRunArtifacts:
+    active_backend: EvalBackend = backend or SQLiteEvalBackend()
     sme_pairs_arg: dict[str, list[tuple[int, int]]] | None = (
         {app: list(pairs) for app, pairs in bundle.sme_ordinal_pairs_by_app.items()}
         if bundle.sme_ordinal_pairs_by_app
@@ -312,7 +471,7 @@ def _evaluate_bundle(
     sme_conf_arg: dict[str, ConfusionMatrix] | None = (
         dict(bundle.sme_confusion_by_app) if bundle.sme_confusion_by_app else None
     )
-    summaries = evaluate_traces_in_sqlite(
+    summaries = active_backend.evaluate_traces(
         spans=bundle.spans,
         judge_outcomes=bundle.judge_outcomes,
         sme_confusion=sme_conf_arg,
@@ -329,12 +488,17 @@ def _evaluate_bundle(
             [j for _, j in first_pairs],
         )
 
-    eval_roi = compute_eval_finops_roi(
-        total_production_traces=100_000,
-        error_or_sla_tail_rate=0.03,
-        canary_sample_rate=0.05,
-        judge_cost_per_trace_usd=0.0025,
-    )
+    if dynamic_finops:
+        eval_roi = _derive_dynamic_eval_roi(bundle, summaries)
+        pareto = _derive_dynamic_pareto_candidates(bundle, summaries)
+    else:
+        eval_roi = compute_eval_finops_roi(
+            total_production_traces=100_000,
+            error_or_sla_tail_rate=0.03,
+            canary_sample_rate=0.05,
+            judge_cost_per_trace_usd=0.0025,
+        )
+        pareto = _default_pareto_candidates()
 
     target_app = bundle.dilution_target_app_id or next(iter(summaries))
     target_spans = [s for s in bundle.spans if s.resolved_application_id == target_app]
@@ -344,38 +508,9 @@ def _evaluate_bundle(
         target_cache_hit_ratio=0.75,
     )
 
-    if bundle.corpus_id == "retail-2app":
-        burndown_map = {
-            "order-support-agent": 65_000_000.0,
-            "catalog-enrichment-agent": 15_000_000.0,
-        }
-    else:
-        burndown_map = {
-            app_id: summary.total_weighted_burndown_tokens for app_id, summary in summaries.items()
-        }
-    cost_centers = {
-        app_id: bundle.app_cost_centers.get(app_id, "UNASSIGNED") for app_id in burndown_map
-    }
-    focus_rows = allocate_focus_two_pool_chargeback(
-        app_burndown_tokens=burndown_map,
-        app_cost_centers=cost_centers,
-        reserved_pt_capacity_tokens=bundle.reserved_pt_capacity_tokens,
-        reserved_pt_fixed_cost_usd=bundle.reserved_pt_fixed_cost_usd,
-    )
-
-    off_peak_plan = plan_off_peak_eval_schedule(
-        hourly_production_burndown=[
-            2_000_000.0,
-            1_500_000.0,
-            1_200_000.0,
-            1_500_000.0,
-            4_500_000.0,
-            5_000_000.0,
-            4_800_000.0,
-            3_200_000.0,
-        ],
-        hourly_reserved_pt_capacity=5_000_000.0,
-        total_batch_eval_tokens=12_000_000.0,
+    hourly_rows = active_backend.evaluate_hourly_burndown(bundle.spans)
+    focus_rows, off_peak_plan = _compute_hourly_chargeback_and_schedule(
+        bundle, summaries, hourly_rows
     )
 
     return ShowcaseRunArtifacts(
@@ -384,7 +519,7 @@ def _evaluate_bundle(
         gwet_ac2=ac2,
         eval_roi=eval_roi,
         cache_dilution=cache_dilution,
-        pareto=_default_pareto_candidates(),
+        pareto=pareto,
         focus_chargeback=tuple(focus_rows),
         off_peak_plan=off_peak_plan,
         live_receipt=bundle.live_receipt,
@@ -396,22 +531,27 @@ def run_showcase_pipeline(
     corpus: CorpusChoice = "m2-live",
     *,
     scenario_file: Path | None = None,
+    backend: EvalBackend | None = None,
 ) -> ShowcaseRunArtifacts:
-    """Execute the Tier 1-3 SQLite evaluation and FinOps pipeline over the selected corpus."""
+    """Execute the Tier 1-3 evaluation and FinOps pipeline over the selected corpus."""
+    active_backend: EvalBackend = backend or SQLiteEvalBackend()
     if scenario_file is not None:
         custom_bundle = load_scenario_bundle(scenario_file)
-        return _evaluate_bundle(custom_bundle)
+        return _evaluate_bundle(custom_bundle, backend=active_backend, dynamic_finops=True)
 
     if corpus == "retail-2app":
-        return _evaluate_bundle(build_retail_2app_bundle())
+        return _evaluate_bundle(build_retail_2app_bundle(), backend=active_backend)
     if corpus == "golden-4app":
-        return _evaluate_bundle(build_golden_4app_bundle())
+        return _evaluate_bundle(
+            build_golden_4app_bundle(), backend=active_backend, dynamic_finops=True
+        )
     if corpus == "m2-live":
-        twin_artifacts = _evaluate_bundle(build_retail_2app_bundle())
+        twin_artifacts = _evaluate_bundle(build_retail_2app_bundle(), backend=active_backend)
         live_bundle = load_m2_live_bundle()
         return _evaluate_bundle(
             live_bundle,
             offline_twin_summaries=twin_artifacts.summaries,
+            backend=active_backend,
         )
     raise ValueError(
         f"Unsupported corpus '{corpus}'. Expected m2-live, golden-4app, or retail-2app."
@@ -633,7 +773,7 @@ def render_markdown_report(artifacts: ShowcaseRunArtifacts) -> str:
 
 - **Inter-Rater Reliability (`Gwet's AC2`):** `{irr_val}` ({irr_caption})
 
-## 2. 3-Tier Evaluation Funnel FinOps ROI (`100,000` Production Traces)
+## 2. 3-Tier Evaluation Funnel FinOps ROI (`{roi.total_production_traces:,}` Production Traces)
 
 - **Baseline (`100%` LLM-as-a-Judge):** `${roi.baseline_100pct_judge_usd:,.2f}` (`{roi.total_production_traces:,}` judge calls)
 - **3-Tier Stratified Funnel (`5%` Canary + `100%` Error/SLA-Tail):** `${roi.stratified_3tier_judge_usd:,.2f}` (`{roi.tier2_total_judged_traces:,}` judge calls)

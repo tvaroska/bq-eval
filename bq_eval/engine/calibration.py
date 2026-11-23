@@ -37,17 +37,32 @@ def rogan_gladen_wilson_ci(
     sample_size: int,
     confusion: ConfusionMatrix,
     z_value: float = 1.959963984540054,
+    *,
+    stratified_var_p_obs: float | None = None,
 ) -> tuple[float, float]:
     """Compute Lang & Reiczigel (2014) Wilson plug-in Rogan-Gladen CI (boundary-safe)."""
     _validate_rg_inputs(observed_pass_rate, sample_size, z_value)
+    if stratified_var_p_obs is not None and (
+        not math.isfinite(stratified_var_p_obs) or stratified_var_p_obs < 0.0
+    ):
+        raise ValueError("stratified_var_p_obs must be finite and non-negative.")
     n_pos = confusion.tp + confusion.fn
     n_neg = confusion.tn + confusion.fp
     if n_pos == 0 or n_neg == 0:
         raise ValueError("ConfusionMatrix must have positive counts for both human classes.")
 
+    if (
+        stratified_var_p_obs is not None
+        and stratified_var_p_obs > 0.0
+        and 0.0 < observed_pass_rate < 1.0
+    ):
+        eff_n = max(1.0, (observed_pass_rate * (1.0 - observed_pass_rate)) / stratified_var_p_obs)
+    else:
+        eff_n = float(sample_size)
+
     z2 = z_value * z_value
-    n_adj = sample_size + z2
-    p_adj = (observed_pass_rate * sample_size + 0.5 * z2) / n_adj
+    n_adj = eff_n + z2
+    p_adj = (observed_pass_rate * eff_n + 0.5 * z2) / n_adj
 
     n_se_adj = n_pos + 2.0
     n_sp_adj = n_neg + 2.0
@@ -102,6 +117,7 @@ def rogan_gladen_calibrate(  # noqa: PLR0913
             sample_size=sample_size,
             confusion=confusion,
             z_value=z_value,
+            stratified_var_p_obs=stratified_var_p_obs,
         )
     else:
         if stratified_var_p_obs is not None:

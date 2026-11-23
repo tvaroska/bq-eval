@@ -14,12 +14,17 @@ CREATE TABLE otel_spans (
     source_mode TEXT,
     agent_name TEXT NOT NULL,
     service_name TEXT NOT NULL,
+    otel_span_kind TEXT NOT NULL,
     span_kind TEXT NOT NULL,
     model_name TEXT NOT NULL,
     tool_call_status TEXT,
     status_code TEXT NOT NULL,
     rule0_pass INTEGER NOT NULL,
     finops_traffic_type TEXT NOT NULL,
+    is_external_counterparty INTEGER NOT NULL,
+    service_vcpu REAL NOT NULL,
+    service_gib REAL NOT NULL,
+    outcome_storage_usd REAL,
     outcome_status TEXT,
     outcome_verified INTEGER,
     usage_hour_iso TEXT NOT NULL,
@@ -89,71 +94,155 @@ SELECT
             THEN 1 ELSE 0 END) = 0
         AND SUM(CASE WHEN span_kind = 'execute_tool' THEN 1 ELSE 0 END) <= 8
         THEN 1 ELSE 0 END AS rule0_pass,
-    MAX(finops_traffic_type) AS primary_traffic_type,
+    CASE MIN(
+        CASE finops_traffic_type
+            WHEN 'production_inference' THEN 1
+            WHEN 'conflict_escalation' THEN 2
+            WHEN 'agent_gym_eval' THEN 3
+            WHEN 'autorater_judge' THEN 4
+            ELSE 5
+        END
+    )
+        WHEN 1 THEN 'production_inference'
+        WHEN 2 THEN 'conflict_escalation'
+        WHEN 3 THEN 'agent_gym_eval'
+        WHEN 4 THEN 'autorater_judge'
+        ELSE COALESCE(MAX(finops_traffic_type), 'unclassified')
+    END AS primary_traffic_type,
     SUM(input_tokens) AS total_input_tokens,
     SUM(cached_input_tokens) AS total_cached_input_tokens,
     CASE WHEN SUM(input_tokens) > 0
         THEN CAST(SUM(cached_input_tokens) AS REAL) / SUM(input_tokens)
-        ELSE 0.0 END AS cache_hit_ratio,
+        ELSE NULL END AS cache_hit_ratio,
     SUM(weighted_burndown_tokens) AS weighted_burndown_tokens,
     SUM(CASE WHEN finops_traffic_type = 'production_inference' THEN span_cost_usd ELSE 0.0 END) AS production_inference_usd,
     SUM(CASE WHEN finops_traffic_type = 'conflict_escalation' THEN span_cost_usd ELSE 0.0 END) AS conflict_escalation_usd,
     SUM(CASE WHEN finops_traffic_type = 'agent_gym_eval' THEN span_cost_usd ELSE 0.0 END) AS agent_gym_eval_usd,
     SUM(CASE WHEN finops_traffic_type = 'autorater_judge' THEN span_cost_usd ELSE 0.0 END) AS span_autorater_judge_usd,
     SUM(CASE WHEN finops_traffic_type NOT IN ('production_inference', 'conflict_escalation', 'agent_gym_eval', 'autorater_judge')
-        THEN span_cost_usd ELSE 0.0 END) AS unclassified_usd
+        THEN span_cost_usd ELSE 0.0 END) AS unclassified_usd,
+    SUM(span_cost_usd) AS trace_span_cost_usd
 FROM otel_spans
 GROUP BY trace_id;
 
 CREATE VIEW v_outcomes AS
-SELECT
-    outcome_id,
-    COALESCE(MAX(NULLIF(outcome_owner, '')), MAX(NULLIF(apphub_application_id, 'unregistered_app')), 'unregistered_app') AS outcome_owner,
-    COALESCE(MAX(outcome_status), 'succeeded') AS outcome_status,
-    MIN(
+WITH ranked_closed AS (
+    SELECT
+        outcome_id,
+        COALESCE(NULLIF(outcome_owner, ''), NULLIF(apphub_application_id, 'unregistered_app'), 'unregistered_app') AS outcome_owner,
+        COALESCE(outcome_status, 'succeeded') AS outcome_status,
+        source_mode,
+        end_epoch_ms,
         CASE
             WHEN COALESCE(outcome_status, 'succeeded') != 'succeeded' THEN 0
             ELSE COALESCE(outcome_verified, rule0_pass)
-        END
-    ) AS is_verified
+        END AS close_verified,
+        ROW_NUMBER() OVER (
+            PARTITION BY outcome_id
+            ORDER BY end_epoch_ms DESC, span_id DESC
+        ) AS rn
+    FROM otel_spans
+    WHERE span_name = 'outcome.closed' AND outcome_id IS NOT NULL
+),
+latest_closed AS (
+    SELECT outcome_id, outcome_owner, outcome_status, source_mode, end_epoch_ms AS closed_at
+    FROM ranked_closed
+    WHERE rn = 1
+),
+verified_agg AS (
+    SELECT outcome_id, MIN(close_verified) AS is_verified
+    FROM ranked_closed
+    GROUP BY outcome_id
+)
+SELECT
+    l.outcome_id,
+    l.outcome_owner,
+    l.outcome_status,
+    l.source_mode,
+    l.closed_at,
+    v.is_verified
+FROM latest_closed AS l
+INNER JOIN verified_agg AS v ON l.outcome_id = v.outcome_id;
+
+CREATE VIEW v_infra_cost_estimate AS
+SELECT
+    outcome_id,
+    SUM(
+        (latency_ms / 1000.0) * (service_vcpu * 0.00002400 + service_gib * 0.00000250)
+    ) AS estimated_compute_usd,
+    COALESCE(MAX(outcome_storage_usd), 0.000020) AS estimated_storage_usd,
+    SUM(
+        (latency_ms / 1000.0) * (service_vcpu * 0.00002400 + service_gib * 0.00000250)
+    ) + COALESCE(MAX(outcome_storage_usd), 0.000020) AS estimated_infra_cost_usd
 FROM otel_spans
-WHERE span_name = 'outcome.closed' AND outcome_id IS NOT NULL
+WHERE outcome_id IS NOT NULL
+    AND otel_span_kind IN ('2', 'SPAN_KIND_SERVER', 'SPAN_KIND_INTERNAL')
+    AND is_external_counterparty = 0
 GROUP BY outcome_id;
 
 CREATE VIEW v_cost_per_verified_outcome AS
-WITH outcome_agg AS (
+WITH step2_by_outcome AS (
+    SELECT
+        t.outcome_id,
+        MIN(e.binary_pass) AS step2_all_pass,
+        SUM(e.judge_cost_usd) AS outcome_table_judge_usd
+    FROM eval_results AS e
+    INNER JOIN v_trace_sql_evaluation AS t ON e.trace_id = t.trace_id
+    WHERE t.outcome_id IS NOT NULL
+    GROUP BY t.outcome_id
+),
+outcome_agg AS (
     SELECT
         s.outcome_id,
         COALESCE(o.outcome_owner, MAX(NULLIF(s.outcome_owner, '')), MAX(NULLIF(s.apphub_application_id, 'unregistered_app')), 'unregistered_app') AS apphub_application_id,
-        COALESCE(o.is_verified, 0) AS is_verified,
-        SUM(s.span_cost_usd) AS outcome_span_cost_usd
+        CASE
+            WHEN COALESCE(o.outcome_status, 'open') != 'succeeded' THEN 0
+            ELSE COALESCE(s2.step2_all_pass, o.is_verified, 0)
+        END AS is_verified,
+        SUM(CASE WHEN s.finops_traffic_type != 'autorater_judge' THEN s.span_cost_usd ELSE 0.0 END) AS measured_model_cost_usd,
+        SUM(CASE WHEN s.finops_traffic_type = 'autorater_judge' THEN s.span_cost_usd ELSE 0.0 END) AS span_judge_cost_usd,
+        COALESCE(s2.outcome_table_judge_usd, 0.0) AS outcome_table_judge_usd,
+        COALESCE(inf.estimated_infra_cost_usd, 0.0) AS estimated_infra_cost_usd
     FROM otel_spans AS s
     LEFT JOIN v_outcomes AS o ON s.outcome_id = o.outcome_id
+    LEFT JOIN step2_by_outcome AS s2 ON s.outcome_id = s2.outcome_id
+    LEFT JOIN v_infra_cost_estimate AS inf ON s.outcome_id = inf.outcome_id
     WHERE s.outcome_id IS NOT NULL
+        AND s.is_external_counterparty = 0
     GROUP BY s.outcome_id
 ),
-outcome_judge AS (
-    SELECT t.outcome_id, SUM(e.judge_cost_usd) AS outcome_judge_usd
-    FROM eval_results AS e
-    INNER JOIN v_trace_sql_evaluation AS t ON e.trace_id = t.trace_id
-    CROSS JOIN eval_config AS cfg
-    WHERE t.outcome_id IS NOT NULL AND e.rubric_id = cfg.rubric_id
-    GROUP BY t.outcome_id
+outcome_costs AS (
+    SELECT
+        apphub_application_id,
+        outcome_id,
+        is_verified,
+        measured_model_cost_usd
+            + span_judge_cost_usd
+            + MAX(0.0, outcome_table_judge_usd - span_judge_cost_usd) AS total_ai_cost_usd,
+        estimated_infra_cost_usd
+    FROM outcome_agg
 )
 SELECT
-    oa.apphub_application_id,
+    apphub_application_id,
     COUNT(*) AS total_outcomes,
-    SUM(CASE WHEN oa.is_verified = 1 THEN 1 ELSE 0 END) AS verified_outcomes,
-    SUM(oa.outcome_span_cost_usd + COALESCE(oj.outcome_judge_usd, 0.0)) AS total_outcome_cost_usd,
+    SUM(CASE WHEN is_verified = 1 THEN 1 ELSE 0 END) AS verified_outcomes,
+    SUM(total_ai_cost_usd) AS total_ai_cost_usd,
+    SUM(estimated_infra_cost_usd) AS estimated_infra_cost_usd,
+    SUM(total_ai_cost_usd + estimated_infra_cost_usd) AS total_outcome_cost_usd,
     CASE
-        WHEN SUM(CASE WHEN oa.is_verified = 1 THEN 1 ELSE 0 END) > 0
-        THEN SUM(oa.outcome_span_cost_usd + COALESCE(oj.outcome_judge_usd, 0.0))
-             / SUM(CASE WHEN oa.is_verified = 1 THEN 1 ELSE 0 END)
+        WHEN SUM(CASE WHEN is_verified = 1 THEN 1 ELSE 0 END) > 0
+        THEN SUM(total_ai_cost_usd)
+             / SUM(CASE WHEN is_verified = 1 THEN 1 ELSE 0 END)
+        ELSE NULL
+    END AS cost_per_verified_outcome_ai_usd,
+    CASE
+        WHEN SUM(CASE WHEN is_verified = 1 THEN 1 ELSE 0 END) > 0
+        THEN SUM(total_ai_cost_usd + estimated_infra_cost_usd)
+             / SUM(CASE WHEN is_verified = 1 THEN 1 ELSE 0 END)
         ELSE NULL
     END AS cost_per_verified_outcome_usd
-FROM outcome_agg AS oa
-LEFT JOIN outcome_judge AS oj ON oa.outcome_id = oj.outcome_id
-GROUP BY oa.apphub_application_id;
+FROM outcome_costs
+GROUP BY apphub_application_id;
 
 CREATE VIEW v_agent_eval_and_finops_summary AS
 WITH app_traces AS (
@@ -164,7 +253,7 @@ WITH app_traces AS (
             THEN 1 ELSE 0 END) AS production_traces,
         AVG(CAST(rule0_pass AS REAL)) AS rule0_pass_rate,
         AVG(CASE WHEN tool_error_count = 0 THEN 1.0 ELSE 0.0 END) AS tool_success_rate,
-        AVG(cache_hit_ratio) AS avg_cache_hit_ratio,
+        COALESCE(AVG(cache_hit_ratio), 0.0) AS avg_cache_hit_ratio,
         SUM(weighted_burndown_tokens) AS total_weighted_burndown_tokens,
         SUM(production_inference_usd) AS production_inference_usd,
         SUM(conflict_escalation_usd) AS conflict_escalation_usd,
@@ -320,6 +409,7 @@ rg_base AS (
         cfg.irr_threshold,
         COALESCE(oc.total_outcomes, 0) AS outcome_total_count,
         COALESCE(oc.verified_outcomes, 0) AS outcome_verified_count,
+        oc.cost_per_verified_outcome_ai_usd AS outcome_cost_per_verified_ai_usd,
         oc.cost_per_verified_outcome_usd AS outcome_cost_per_verified_usd,
         CASE
             WHEN COALESCE(j.judged_samples, 0) = 0 OR j.raw_judge_pass_rate IS NULL THEN 'UNJUDGED'
@@ -341,7 +431,6 @@ rg_base AS (
         ON a.apphub_application_id = p.apphub_application_id
     LEFT JOIN judge_stats AS j
         ON a.apphub_application_id = j.apphub_application_id
-        AND j.rubric_id = cfg.rubric_id
     LEFT JOIN sme_rates AS s
         ON a.apphub_application_id = s.apphub_application_id
         AND s.rubric_id = j.rubric_id
@@ -406,9 +495,10 @@ SELECT
     END AS cost_per_verified_outcome_usd,
     outcome_total_count,
     outcome_verified_count,
+    outcome_cost_per_verified_ai_usd,
     outcome_cost_per_verified_usd
 FROM rg_ci
-ORDER BY apphub_application_id;
+ORDER BY apphub_application_id, rubric_id;
 
 CREATE VIEW v_capacity_hourly_burndown_export AS
 SELECT

@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS `agent_eval.app_registry` (
   sla_latency_ms FLOAT64 NOT NULL OPTIONS (description = 'Target end-to-end trace SLA latency in milliseconds.'),
   monthly_budget_usd FLOAT64 NOT NULL OPTIONS (description = 'Monthly LLM & evaluation budget cap in USD.'),
   is_external_counterparty BOOL OPTIONS (description = 'TRUE when the registered application represents an external counterparty excluded from internal CPVO.'),
+  storage_usd_per_outcome FLOAT64 OPTIONS (description = 'Optional per-outcome storage/WORM retention proxy override in USD (defaults to 0.000020 when NULL).'),
   owner_email STRING NOT NULL OPTIONS (description = 'Technical owner contact email.'),
   updated_at TIMESTAMP NOT NULL OPTIONS (description = 'Last registry metadata update timestamp.')
 )
@@ -36,7 +37,8 @@ OPTIONS (
 );
 
 ALTER TABLE `agent_eval.app_registry`
-  ADD COLUMN IF NOT EXISTS is_external_counterparty BOOL OPTIONS (description = 'TRUE when the registered application represents an external counterparty excluded from internal CPVO.');
+  ADD COLUMN IF NOT EXISTS is_external_counterparty BOOL OPTIONS (description = 'TRUE when the registered application represents an external counterparty excluded from internal CPVO.'),
+  ADD COLUMN IF NOT EXISTS storage_usd_per_outcome FLOAT64 OPTIONS (description = 'Optional per-outcome storage/WORM retention proxy override in USD (defaults to 0.000020 when NULL).');
 
 -- -----------------------------------------------------------------------------
 -- 1B. BigLake External Table for Uploaded OTel GenAI Completion Payloads
@@ -50,10 +52,9 @@ OPTIONS (
   uris = ['gs://YOUR_GENAI_PAYLOAD_BUCKET/*.jsonl']
 );
 
--- -----------------------------------------------------------------------------
--- 2. Native Telemetry Compatibility View (agent_eval.otel_spans -> obs_traces._AllSpans)
--- -----------------------------------------------------------------------------
-CREATE OR REPLACE VIEW `agent_eval.otel_spans` AS
+-- 2. Native Telemetry Compatibility Views (agent_eval.v_otel_allspans_only -> obs_traces._AllSpans)
+--    Single source shared by Full Capture `otel_spans` and Hybrid Mode C (`sql/bqaa_adapter_views.sql`).
+CREATE OR REPLACE VIEW `agent_eval.v_otel_allspans_only` AS
 SELECT
   trace_id,
   span_id,
@@ -155,11 +156,11 @@ SELECT
   attributes
 FROM `obs_traces._AllSpans`;
 
--- -----------------------------------------------------------------------------
--- 3. Sanitized Trace Text Payloads View (agent_eval.trace_payloads -> obs_logs._AllLogs + completions)
---   * Aggregated to 1 row per trace_id
--- -----------------------------------------------------------------------------
-CREATE OR REPLACE VIEW `agent_eval.trace_payloads` AS
+CREATE OR REPLACE VIEW `agent_eval.otel_spans` AS
+SELECT * FROM `agent_eval.v_otel_allspans_only`;
+
+-- 3. Sanitized Trace Text Payloads Views (1 row per trace_id)
+CREATE OR REPLACE VIEW `agent_eval.v_otel_logs_payloads_only` AS
 SELECT
   COALESCE(
     REGEXP_EXTRACT(l.trace, r'traces/([0-9a-fA-F]+)$'),
@@ -217,6 +218,9 @@ LEFT JOIN `agent_eval.completions` AS c
 WHERE COALESCE(l.trace, JSON_VALUE(l.json_payload, '$."trace_id"')) IS NOT NULL
 GROUP BY trace_id;
 
+CREATE OR REPLACE VIEW `agent_eval.trace_payloads` AS
+SELECT * FROM `agent_eval.v_otel_logs_payloads_only`;
+
 -- -----------------------------------------------------------------------------
 -- 4. Golden Evaluation Dataset Catalog (agent_eval.golden_cases)
 -- -----------------------------------------------------------------------------
@@ -256,6 +260,8 @@ CREATE TABLE IF NOT EXISTS `agent_eval.eval_results` (
   judge_input_tokens INT64 NOT NULL OPTIONS (description = 'Prompt tokens consumed by the judge call.'),
   judge_output_tokens INT64 NOT NULL OPTIONS (description = 'Completion tokens consumed by the judge call.'),
   judge_thinking_tokens INT64 NOT NULL OPTIONS (description = 'Reasoning tokens consumed by the judge call.'),
+  policy_sha256 STRING OPTIONS (description = 'SHA-256 hash of active policy text for zero-day drift tracking.'),
+  amended_clause_ids STRING OPTIONS (description = 'Comma-separated clause IDs modified under the active policy revision.'),
   evaluated_at TIMESTAMP NOT NULL OPTIONS (description = 'UTC judge execution timestamp.')
 )
 PARTITION BY DATE(evaluated_at)

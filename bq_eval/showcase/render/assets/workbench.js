@@ -18,3 +18,17 @@ function switchCorpus(selectEl) {
   const nextCorpus = encodeURIComponent(selectEl.value);
   window.location.assign('/?corpus=' + nextCorpus);
 }
+
+document.addEventListener('DOMContentLoaded', () => {
+  document.querySelectorAll('.tab-btn[data-panel-id]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      switchTab(btn.dataset.panelId || '', btn);
+    });
+  });
+  const corpusSelect = document.getElementById('corpus-select');
+  if (corpusSelect) {
+    corpusSelect.addEventListener('change', () => {
+      switchCorpus(corpusSelect);
+    });
+  }
+});

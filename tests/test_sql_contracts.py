@@ -28,7 +28,7 @@ from bq_eval.contract.pricing import DEFAULT_MODEL_SKUS
 from bq_eval.contract.results import ConfusionMatrix
 from bq_eval.engine.bqaa import bqaa_events_to_trace_payloads
 from bq_eval.engine.calibration import rogan_gladen_calibrate
-from bq_eval.engine.finops import compute_default_span_cost_usd
+from bq_eval.engine.finops import compute_span_cost_usd
 from bq_eval.engine.sql_eval import (
     build_ai_evaluate_agent_sql,
     build_ai_generate_table_judge_sql,
@@ -44,6 +44,12 @@ ALLOWED_BQ_PREVIEW_COMMANDS = (
     "CREATE EXTERNAL TABLE",
     "CREATE MODEL",
     "ALTER TABLE",
+    "CREATE OR REPLACE PROCEDURE",
+    "CREATE PROCEDURE",
+)
+
+_PROC_INNER_SQL_RE = re.compile(
+    r"(?is)\b(CREATE\s+TEMP\s+TABLE\s+.+?;|INSERT\s+INTO\s+.+?;|UPDATE\s+`?[\w.]+`?\s+SET\s+.+?;)"
 )
 
 
@@ -124,17 +130,44 @@ def _find_unescaped_multiline_single_quoted_strings(sql: str) -> list[str]:
     return violations
 
 
+def _validate_procedure_inner_sql(raw_proc_sql: str, label: str) -> None:
+    """Parse DML and temp-table SQL statements inside a BigQuery stored procedure body."""
+    inner_stmts = _PROC_INNER_SQL_RE.findall(raw_proc_sql)
+    assert inner_stmts, f"{label} procedure contained no parseable inner SQL statements"
+    for idx, inner in enumerate(inner_stmts):
+        parsed = [
+            s
+            for s in sqlglot.parse(_normalize_bq_ai_tvf_for_sqlglot(inner), read="bigquery")
+            if s is not None
+        ]
+        assert parsed, f"{label} procedure inner SQL #{idx} parsed to zero statements"
+        for node in parsed:
+            assert not isinstance(node, exp.Command), (
+                f"{label} procedure inner SQL #{idx} fell back to Command AST: {inner[:160]}"
+            )
+
+
 def _parse_bigquery_statements(sql: str, label: str) -> list[exp.Expr]:
     """Parse BigQuery SQL into `sqlglot` AST nodes, failing on any unexpected syntax fallback."""
     cleaned = _normalize_bq_ai_tvf_for_sqlglot(sql)
-    stmts = [s for s in sqlglot.parse(cleaned, read="bigquery") if s is not None]
-    assert stmts, f"{label} parsed to zero SQL statements"
-    for stmt in stmts:
-        if isinstance(stmt, exp.Command):
-            raw = stmt.sql(dialect="bigquery", comments=False).strip().upper()
-            assert any(raw.startswith(prefix) for prefix in ALLOWED_BQ_PREVIEW_COMMANDS), (
-                f"{label} fell back to unparsed Command AST: {raw[:160]}"
-            )
+    chunks = split_sql_statements(cleaned)
+    assert chunks, f"{label} parsed to zero SQL statements"
+    stmts: list[exp.Expr] = []
+    for chunk in chunks:
+        upper = chunk.lstrip().upper()
+        if upper.startswith(("CREATE OR REPLACE PROCEDURE", "CREATE PROCEDURE")):
+            _validate_procedure_inner_sql(chunk, label)
+            stmts.append(exp.Command(this=chunk))
+            continue
+        parsed = [s for s in sqlglot.parse(chunk, read="bigquery") if s is not None]
+        assert parsed, f"{label} chunk parsed to zero SQL statements: {chunk[:120]}"
+        for stmt in parsed:
+            if isinstance(stmt, exp.Command):
+                raw = stmt.sql(dialect="bigquery", comments=False).strip().upper()
+                assert any(raw.startswith(prefix) for prefix in ALLOWED_BQ_PREVIEW_COMMANDS), (
+                    f"{label} fell back to unparsed Command AST: {raw[:160]}"
+                )
+            stmts.append(stmt)
     return stmts
 
 
@@ -527,16 +560,133 @@ def _sqlite_timestamp_trunc_hour(ts: str | None) -> str | None:
     return dt.isoformat()
 
 
-def _sqlite_pack_asc2(val: str | None, k1: str | None, k2: str | None) -> str | None:
-    if val is None:
+def _sqlite_timestamp_sub_ms(ts: str | None, ms: float | int | None) -> str | None:
+    if ts is None:
         return None
-    return f"{k1 or ''}\x1f{k2 or ''}\x1f{val}"
+    dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    delta_ms = int(ms or 0)
+    return (dt - timedelta(milliseconds=delta_ms)).isoformat()
 
 
-def _sqlite_unpack_asc2(packed: str | None) -> str | None:
-    if packed is None:
+def _sqlite_regexp_contains(value: str | None, pattern: str | None) -> int:
+    if value is None or pattern is None:
+        return 0
+    return 1 if re.search(pattern, value) is not None else 0
+
+
+def _sqlite_regexp_extract(value: str | None, pattern: str | None) -> str | None:
+    if value is None or pattern is None:
         return None
-    return packed.split("\x1f", 2)[2]
+    m = re.search(pattern, value)
+    if m is None:
+        return None
+    return m.group(1) if m.lastindex else m.group(0)
+
+
+def _sqlite_starts_with(value: str | None, prefix: str | None) -> int:
+    if value is None or prefix is None:
+        return 0
+    return 1 if str(value).startswith(str(prefix)) else 0
+
+
+def _sqlite_json_set(raw_doc: str | None, *args: object) -> str:
+    doc: dict[str, object]
+    try:
+        parsed = json.loads(raw_doc) if raw_doc else {}
+        doc = parsed if isinstance(parsed, dict) else {}
+    except json.JSONDecodeError:
+        doc = {}
+    for idx in range(0, len(args) - 1, 2):
+        path = str(args[idx])
+        val = args[idx + 1]
+        if val is None:
+            continue
+        key = path.removeprefix("$.").strip('"')
+        doc[key] = val
+    return json.dumps(doc, sort_keys=True)
+
+
+SqliteValue = str | int | float | bytes | None
+
+
+class _SQLiteQuantileAgg:
+    """Exact BigQuery `APPROX_QUANTILES(val, buckets)[OFFSET(offset)]` aggregate for SQLite tests."""
+
+    def __init__(self) -> None:
+        self.values: list[float] = []
+        self.buckets = 100
+        self.offset = 95
+
+    def step(self, *args: object) -> None:
+        value, buckets, offset = args
+        if isinstance(value, (int, float)):
+            self.values.append(float(value))
+        elif value is not None:
+            self.values.append(float(str(value)))
+        self.buckets = int(str(buckets)) if buckets is not None else 100
+        self.offset = int(str(offset)) if offset is not None else 95
+
+    def finalize(self) -> float | None:
+        if not self.values:
+            return None
+        ordered = sorted(self.values)
+        n = len(ordered)
+        idx = min(n - 1, max(0, math.ceil((self.offset / self.buckets) * n) - 1))
+        return ordered[idx]
+
+
+class _SQLiteArrayFirstAgg:
+    """Faithful SQLite aggregate for `ARRAY_AGG(val [IGNORE NULLS] ORDER BY k1 [ASC|DESC], ... LIMIT 1)[SAFE_OFFSET(0)]`."""
+
+    def __init__(self) -> None:
+        self.best_key: tuple[str, str] | None = None
+        self.best_val: SqliteValue = None
+        self.has_val = False
+        self.descending = False
+
+    def step(self, *args: object) -> None:
+        val, k1, k2, ignore_nulls, descending = args
+        if ignore_nulls and val is None:
+            return
+        self.descending = bool(descending)
+        key = ("" if k1 is None else str(k1), "" if k2 is None else str(k2))
+        typed_val: SqliteValue = (
+            val if isinstance(val, (str, int, float, bytes)) or val is None else str(val)
+        )
+        if not self.has_val or self.best_key is None:
+            self.best_key = key
+            self.best_val = typed_val
+            self.has_val = True
+        elif (self.descending and key > self.best_key) or (
+            not self.descending and key < self.best_key
+        ):
+            self.best_key = key
+            self.best_val = typed_val
+
+    def finalize(self) -> SqliteValue:
+        return self.best_val if self.has_val else None
+
+
+class _SQLiteStringAggAsc:
+    """Faithful SQLite aggregate for `STRING_AGG(val, sep ORDER BY k ASC)`."""
+
+    def __init__(self) -> None:
+        self.items: list[tuple[str, int, str]] = []
+        self.sep = ","
+
+    def step(self, *args: object) -> None:
+        val, sep, order_key = args
+        self.sep = str(sep)
+        if val is not None:
+            self.items.append(
+                ("" if order_key is None else str(order_key), len(self.items), str(val))
+            )
+
+    def finalize(self) -> str | None:
+        if not self.items:
+            return None
+        self.items.sort(key=lambda item: (item[0], item[1]))
+        return self.sep.join(item[2] for item in self.items)
 
 
 def _new_sqlite_bq_conn(current_date_utc: str = "2026-11-21") -> sqlite3.Connection:
@@ -544,17 +694,25 @@ def _new_sqlite_bq_conn(current_date_utc: str = "2026-11-21") -> sqlite3.Connect
     conn.row_factory = sqlite3.Row
     conn.create_function("JSON_VALUE", 2, _sqlite_json_value)
     conn.create_function("REGEXP_REPLACE", 3, _sqlite_regexp_replace)
+    conn.create_function("BQ_REGEXP_CONTAINS", 2, _sqlite_regexp_contains)
+    conn.create_function("BQ_REGEXP_EXTRACT", 2, _sqlite_regexp_extract)
+    conn.create_function("BQ_STARTS_WITH", 2, _sqlite_starts_with)
+    conn.create_function("BQ_JSON_SET", -1, _sqlite_json_set)
     conn.create_function("SQRT", 1, math.sqrt)
     conn.create_function("POW", 2, math.pow)
     conn.create_function("CEIL", 1, math.ceil)
     conn.create_function("TIMESTAMP_DIFF_MS", 2, _sqlite_timestamp_diff_ms)
+    conn.create_function("BQ_TIMESTAMP_SUB_MS", 2, _sqlite_timestamp_sub_ms)
     conn.create_function("FORMAT_TIMESTAMP", 2, _sqlite_format_timestamp)
     conn.create_function("BQ_TIMESTAMP_TRUNC_HOUR", 1, _sqlite_timestamp_trunc_hour)
     conn.create_function("BQ_CURRENT_DATE", 0, lambda: current_date_utc)
     conn.create_function("BQ_DATE", 1, lambda ts: str(ts)[:10] if ts is not None else None)
-    conn.create_function("BQ_PACK_ASC2", 3, _sqlite_pack_asc2)
-    conn.create_function("BQ_UNPACK_ASC2", 1, _sqlite_unpack_asc2)
     conn.create_function("JSON_FORMAT", 1, lambda v: None if v is None else str(v))
+    conn.create_function("TO_JSON_STRING", 1, lambda v: None if v is None else str(v))
+    # typeshed's sqlite3._AggregateProtocol models only 1-arg step(); these aggregates take 3-5 SQL args.
+    conn.create_aggregate("BQ_APPROX_QUANTILE", 3, _SQLiteQuantileAgg)  # type: ignore[arg-type]
+    conn.create_aggregate("BQ_ARRAY_FIRST", 5, _SQLiteArrayFirstAgg)  # type: ignore[arg-type]
+    conn.create_aggregate("BQ_STRING_AGG_ASC", 3, _SQLiteStringAggAsc)  # type: ignore[arg-type]
     return conn
 
 
@@ -565,29 +723,62 @@ _SQLITE_AGG_MAP: dict[str, type[exp.Expr]] = {
 }
 
 
+def _extract_bracket_offset(node: exp.Bracket, default: int) -> int:
+    if not node.expressions:
+        return default
+    expr = node.expressions[0]
+    if isinstance(expr, exp.Literal) and expr.is_int:
+        return int(expr.this)
+    if isinstance(expr, (exp.Anonymous, exp.Func)):
+        inner = expr.expressions[0] if expr.expressions else expr.this
+        if isinstance(inner, exp.Literal) and inner.is_int:
+            return int(inner.this)
+    return default
+
+
 def _rewrite_bq_bracket(node: exp.Bracket) -> exp.Expr:
     target = node.this
     if isinstance(target, exp.ApproxQuantiles):
-        return exp.Max(this=target.this.copy())
+        buckets = (
+            target.expression.copy() if target.expression is not None else exp.Literal.number(100)
+        )
+        offset = _extract_bracket_offset(node, default=95)
+        return exp.Anonymous(
+            this="BQ_APPROX_QUANTILE",
+            expressions=[target.this.copy(), buckets, exp.Literal.number(offset)],
+        )
+    ignore_nulls = False
     if isinstance(target, exp.IgnoreNulls):
+        ignore_nulls = True
         target = target.this
     if isinstance(target, exp.ArrayAgg):
         inner = target.this.copy()
         order_node: exp.Order | None = None
         while isinstance(inner, (exp.Limit, exp.Order, exp.IgnoreNulls)):
-            if isinstance(inner, exp.Order):
+            if isinstance(inner, exp.IgnoreNulls):
+                ignore_nulls = True
+            elif isinstance(inner, exp.Order):
                 order_node = inner
             inner = inner.this
-        if (
-            order_node is not None
-            and len(order_node.expressions) == 2
-            and all(not o.args.get("desc") for o in order_node.expressions)
-        ):
-            k1 = order_node.expressions[0].this.copy()
-            k2 = order_node.expressions[1].this.copy()
-            packed = exp.Anonymous(this="BQ_PACK_ASC2", expressions=[inner, k1, k2])
-            return exp.Anonymous(this="BQ_UNPACK_ASC2", expressions=[exp.Min(this=packed)])
-        return exp.Max(this=inner)
+        k1: exp.Expr = exp.Null()
+        k2: exp.Expr = exp.Null()
+        descending = False
+        if order_node is not None and order_node.expressions:
+            first_ord = order_node.expressions[0]
+            k1 = first_ord.this.copy()
+            descending = bool(first_ord.args.get("desc"))
+            if len(order_node.expressions) >= 2:
+                k2 = order_node.expressions[1].this.copy()
+        return exp.Anonymous(
+            this="BQ_ARRAY_FIRST",
+            expressions=[
+                inner,
+                k1,
+                k2,
+                exp.Literal.number(1 if ignore_nulls else 0),
+                exp.Literal.number(1 if descending else 0),
+            ],
+        )
     return node
 
 
@@ -606,26 +797,32 @@ def _rewrite_bq_qualify(node: exp.Select) -> exp.Expr:
 
 
 def _rewrite_bq_temporal(node: exp.Expr) -> exp.Expr | None:
+    rewritten: exp.Expr | None = None
     if isinstance(node, exp.TimestampTrunc):
-        return exp.Anonymous(this="BQ_TIMESTAMP_TRUNC_HOUR", expressions=[node.this.copy()])
-    if isinstance(node, exp.TimestampDiff):
-        return exp.Anonymous(
+        rewritten = exp.Anonymous(this="BQ_TIMESTAMP_TRUNC_HOUR", expressions=[node.this.copy()])
+    elif isinstance(node, exp.TimestampDiff):
+        rewritten = exp.Anonymous(
             this="TIMESTAMP_DIFF_MS",
             expressions=[node.this.copy(), node.expression.copy()],
         )
-    if isinstance(node, exp.CurrentDate):
-        return exp.Anonymous(this="BQ_CURRENT_DATE", expressions=[])
-    if isinstance(node, exp.Date):
-        return exp.Anonymous(this="BQ_DATE", expressions=[node.this.copy()])
-    if isinstance(node, exp.TimeToStr):
-        return exp.Anonymous(
+    elif isinstance(node, exp.TimestampSub):
+        rewritten = exp.Anonymous(
+            this="BQ_TIMESTAMP_SUB_MS",
+            expressions=[node.this.copy(), node.expression.copy()],
+        )
+    elif isinstance(node, exp.CurrentDate):
+        rewritten = exp.Anonymous(this="BQ_CURRENT_DATE", expressions=[])
+    elif isinstance(node, exp.Date):
+        rewritten = exp.Anonymous(this="BQ_DATE", expressions=[node.this.copy()])
+    elif isinstance(node, exp.TimeToStr):
+        rewritten = exp.Anonymous(
             this="FORMAT_TIMESTAMP",
             expressions=[node.args["format"].copy(), node.this.copy()],
         )
-    return None
+    return rewritten
 
 
-def _rewrite_bq_node_for_sqlite(node: exp.Expr) -> exp.Expr:
+def _rewrite_bq_node_for_sqlite(node: exp.Expr) -> exp.Expr:  # noqa: C901, PLR0912
     result: exp.Expr = node
     if isinstance(node, exp.SafeDivide):
         num = node.this.copy().sql("sqlite")
@@ -636,20 +833,62 @@ def _rewrite_bq_node_for_sqlite(node: exp.Expr) -> exp.Expr:
         )
     elif isinstance(node, exp.TryCast):
         result = exp.Cast(this=node.this, to=node.to)
+    elif (
+        isinstance(node, exp.Cast)
+        and isinstance(node.to, exp.DataType)
+        and node.to.is_type(exp.DataType.Type.JSON)
+    ):
+        result = node.this.copy()
     elif isinstance(node, (exp.AnyValue, exp.LogicalOr)):
         result = exp.Max(this=node.this)
     elif isinstance(node, exp.LogicalAnd):
         result = exp.Min(this=node.this)
     elif isinstance(node, exp.Bracket):
         result = _rewrite_bq_bracket(node)
+    elif isinstance(node, exp.GroupConcat):
+        inner = node.this.copy()
+        sep = node.args.get("separator") or exp.Literal.string(",")
+        if isinstance(inner, exp.Order) and inner.expressions:
+            order_key = inner.expressions[0].this.copy()
+            result = exp.Anonymous(
+                this="BQ_STRING_AGG_ASC",
+                expressions=[inner.this.copy(), sep.copy(), order_key],
+            )
+    elif isinstance(node, exp.RegexpLike):
+        result = exp.Anonymous(
+            this="BQ_REGEXP_CONTAINS",
+            expressions=[node.this.copy(), node.expression.copy()],
+        )
+    elif isinstance(node, exp.RegexpExtract):
+        result = exp.Anonymous(
+            this="BQ_REGEXP_EXTRACT",
+            expressions=[node.this.copy(), node.expression.copy()],
+        )
+    elif isinstance(node, exp.StartsWith):
+        result = exp.Anonymous(
+            this="BQ_STARTS_WITH",
+            expressions=[node.this.copy(), node.expression.copy()],
+        )
     elif isinstance(node, exp.Select) and node.args.get("qualify") is not None:
         result = _rewrite_bq_qualify(node)
     elif (temporal := _rewrite_bq_temporal(node)) is not None:
         result = temporal
     elif isinstance(node, exp.Anonymous) and node.expressions:
-        cls = _SQLITE_AGG_MAP.get(node.name.upper())
-        if cls is not None:
-            result = cls(this=node.expressions[0])
+        upper_name = node.name.upper()
+        if upper_name == "JSON_SET":
+            result = exp.Anonymous(
+                this="BQ_JSON_SET",
+                expressions=[e.copy() for e in node.expressions],
+            )
+        elif upper_name == "STARTS_WITH":
+            result = exp.Anonymous(
+                this="BQ_STARTS_WITH",
+                expressions=[e.copy() for e in node.expressions],
+            )
+        else:
+            cls = _SQLITE_AGG_MAP.get(upper_name)
+            if cls is not None:
+                result = cls(this=node.expressions[0])
     return result
 
 
@@ -930,7 +1169,8 @@ def _create_enterprise_sqlite_fixture(conn: sqlite3.Connection) -> None:
             business_unit TEXT,
             sla_latency_ms REAL,
             cost_center TEXT,
-            is_external_counterparty INTEGER DEFAULT 0
+            is_external_counterparty INTEGER DEFAULT 0,
+            storage_usd_per_outcome REAL
         );
         CREATE TABLE eval_results (
             eval_id TEXT,
@@ -967,6 +1207,7 @@ def _install_enterprise_views(conn: sqlite3.Connection) -> None:
     views_path = SQL_DIR / "views.sql"
     step1_path = SQL_DIR / "step1_trace_views.sql"
     for path, name in (
+        (step1_path, "agent_eval.v_default_model_pricing"),
         (step1_path, "agent_eval.v_step1_trace_waterfall"),
         (step1_path, "agent_eval.v_outcomes"),
         (step1_path, "agent_eval.v_infra_cost_estimate"),
@@ -1126,10 +1367,10 @@ def test_pricing_empty_catalog_fallback_suffix_stripping_and_ddl_seed() -> None:
         cached_input_tokens=0,
         output_tokens=10_000,
     )
-    assert compute_default_span_cost_usd(argon_suffixed) == pytest.approx(0.175, abs=1e-12)
+    assert compute_span_cost_usd(argon_suffixed) == pytest.approx(0.175, abs=1e-12)
     unknown_span = argon_suffixed.model_copy(update={"model_name": "mystery-model-99"})
     with pytest.raises(ValueError, match="Unknown model_name"):
-        compute_default_span_cost_usd(unknown_span)
+        compute_span_cost_usd(unknown_span)
 
 
 def test_shipped_enterprise_views_value_parity_dedup_and_latest_verdict() -> None:
@@ -1414,30 +1655,54 @@ def test_unclassified_traffic_type_included_in_total_spend_and_coverage() -> Non
 
 
 def test_daily_quota_guard_no_config_fanout_and_engine_b_quota_trip() -> None:
-    """`v_step2_daily_quota_status` ignores extra config rows (`F10`), dedups, and trips on Engine B tokens (`M6-3`, `F9`)."""
+    """`v_step2_daily_quota_status` ignores extra config rows (`F10`), retains billed retries, and trips on Engine B (`M9-3`)."""
     quota_path = SQL_DIR / "step3_daily_quota_guard.sql"
     quota_sql = quota_path.read_text(encoding="utf-8")
-    assert "cumulative_est_tokens <= COALESCE" in quota_sql
+    assert "CREATE OR REPLACE PROCEDURE `agent_eval.run_daily_quota_guarded_judge`" in quota_sql
+    assert "app_cumulative_tokens <= app_remaining_today" in quota_sql
+    assert "global_cumulative_tokens <= global_remaining_today" in quota_sql
+    assert "BEGIN TRANSACTION;" in quota_sql
+    assert "FAILED_BILLED" in quota_sql
 
-    step3_sql = (SQL_DIR / "step3_saved_results.sql").read_text(encoding="utf-8")
-    assert "DIV(CHAR_LENGTH(TO_JSON_STRING(eval_out.trace)), 4)" in step3_sql
-    assert "DIV(CHAR_LENGTH(COALESCE(metric_row.explanation, '')), 4)" in step3_sql
-    assert "AND metric_row.metric_name = existing.rubric_id" in step3_sql
-    assert "WHERE metric_row.score IS NOT NULL" in step3_sql
-    assert "(ordinal_score >= 3) AS binary_pass" in step3_sql
+    engine_b_persist_sql = build_ai_evaluate_agent_sql(
+        project_id="demo-proj",
+        canary_sample_pct=10,
+        persist_run_id="run_2026_11_21_bqaa_managed",
+    )
+    _parse_bigquery_statements(engine_b_persist_sql, "build_ai_evaluate_agent_sql(persist)")
+    assert "DIV(CHAR_LENGTH(TO_JSON_STRING(eval_out.trace)), 4)" in engine_b_persist_sql
+    assert "DIV(CHAR_LENGTH(COALESCE(metric_row.explanation, '')), 4)" in engine_b_persist_sql
+    assert "AND metric_row.metric_name = existing.rubric_id" in engine_b_persist_sql
+    assert "WHERE metric_row.score IS NOT NULL" in engine_b_persist_sql
+    assert "(ordinal_score >= 3) AS binary_pass" in engine_b_persist_sql
 
     conn = _new_sqlite_bq_conn(current_date_utc="2026-11-21")
     conn.executescript(
         """
         CREATE TABLE eval_daily_quota_config (
             quota_name TEXT,
+            apphub_application_id TEXT,
             daily_judge_token_cap INTEGER,
+            per_app_default_token_cap INTEGER,
+            max_output_tokens INTEGER,
+            thinking_budget_tokens INTEGER,
+            updated_at TEXT
+        );
+        CREATE TABLE eval_daily_quota_reservations (
+            reservation_id TEXT,
+            quota_date_utc TEXT,
+            apphub_application_id TEXT,
+            rubric_id TEXT,
+            reserved_tokens INTEGER,
+            status TEXT,
+            created_at TEXT,
             updated_at TEXT
         );
         CREATE TABLE eval_results (
             eval_id TEXT,
             eval_run_id TEXT,
             trace_id TEXT,
+            apphub_application_id TEXT,
             rubric_id TEXT,
             judge_model TEXT,
             judge_input_tokens INTEGER,
@@ -1447,45 +1712,64 @@ def test_daily_quota_guard_no_config_fanout_and_engine_b_quota_trip() -> None:
         );
         """
     )
-    # Two config rows previously doubled tokens_used_today via Cartesian join.
+    # Two config rows must not fan out tokens_used_today via Cartesian join.
     conn.executemany(
-        "INSERT INTO eval_daily_quota_config VALUES (?, ?, ?)",
+        "INSERT INTO eval_daily_quota_config VALUES (?, ?, ?, ?, ?, ?, ?)",
         [
-            ("default_step2_daily_cap", 2_000_000, "2026-11-21T00:00:00+00:00"),
-            ("secondary_profile", 5_000_000, "2026-11-21T00:00:00+00:00"),
+            (
+                "default_step2_daily_cap",
+                "*",
+                2_000_000,
+                500_000,
+                2048,
+                1024,
+                "2026-11-21T00:00:00+00:00",
+            ),
+            (
+                "secondary_profile",
+                "app-a",
+                1_500_000,
+                500_000,
+                2048,
+                1024,
+                "2026-11-21T00:00:00+00:00",
+            ),
         ],
     )
     conn.executemany(
-        "INSERT INTO eval_results VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO eval_results VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [
             (
                 "e1",
                 "run-a",
                 "t1",
+                "app-a",
                 "groundedness_4pt_v1",
                 "gemini-3.8-flash",
-                900_000,
+                700_000,
                 100_000,
                 0,
                 "2026-11-21T08:00:00+00:00",
             ),
-            # Duplicate append of e1 must not double-count quota
+            # M9-3 non-deduped burn accounting: billed retries still count against daily quota.
             (
-                "e1-dup",
+                "e1-retry",
                 "run-a",
                 "t1",
+                "app-a",
                 "groundedness_4pt_v1",
                 "gemini-3.8-flash",
-                900_000,
-                100_000,
+                200_000,
                 0,
-                "2026-11-21T07:00:00+00:00",
+                0,
+                "2026-11-21T08:05:00+00:00",
             ),
             # Engine B managed row uses 500k tokens -> total 1.5M < 2.0M
             (
                 "e2",
                 "run-b",
                 "t2",
+                "app-b",
                 "hallucination_v1",
                 "ai_evaluate_agent_managed",
                 450_000,
@@ -1495,6 +1779,19 @@ def test_daily_quota_guard_no_config_fanout_and_engine_b_quota_trip() -> None:
             ),
         ],
     )
+    conn.execute(
+        "INSERT INTO eval_daily_quota_reservations VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            "res-1",
+            "2026-11-21",
+            "app-b",
+            "hallucination_v1",
+            100_000,
+            "RESERVED",
+            "2026-11-21T09:05:00+00:00",
+            "2026-11-21T09:05:00+00:00",
+        ),
+    )
     view_sql = _transpile_bq_view_to_sqlite(
         _extract_view_sql_text(quota_path, "agent_eval.v_step2_daily_quota_status")
     )
@@ -1502,36 +1799,39 @@ def test_daily_quota_guard_no_config_fanout_and_engine_b_quota_trip() -> None:
     row = conn.execute("SELECT * FROM v_step2_daily_quota_status").fetchone()
     assert int(row["daily_judge_token_cap"]) == 2_000_000
     assert int(row["tokens_used_today"]) == 1_500_000
-    assert int(row["tokens_remaining_today"]) == 500_000
+    assert int(row["tokens_reserved_today"]) == 100_000
+    assert int(row["tokens_remaining_today"]) == 400_000
     assert bool(row["quota_available"]) is True
 
-    # Add another 600k Engine B metric row -> total 2.1M trips the 2M daily quota cap
+    # Add another 500k Engine B metric row -> 2.0M used + 100k reserved trips the 2M cap
     conn.execute(
-        "INSERT INTO eval_results VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO eval_results VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             "e3",
             "run-b",
             "t2",
+            "app-b",
             "safety_v1",
             "ai_evaluate_agent_managed",
-            550_000,
+            450_000,
             50_000,
             0,
             "2026-11-21T10:00:00+00:00",
         ),
     )
     tripped = conn.execute("SELECT * FROM v_step2_daily_quota_status").fetchone()
-    assert int(tripped["tokens_used_today"]) == 2_100_000
+    assert int(tripped["tokens_used_today"]) == 2_000_000
     assert int(tripped["tokens_remaining_today"]) == 0
     assert bool(tripped["quota_available"]) is False
     conn.close()
 
 
 def test_f11_deterministic_traffic_type_unjudged_rubric_and_multi_rubric_filter() -> None:
-    """F11 (ADR-009 Option B): `MAX(w.finops_traffic_type)`, `'groundedness_4pt_v1'` unjudged label, and multi-rubric filtering."""
+    """F11 + M9-2: Explicit `finops_traffic_type` priority, `'groundedness_4pt_v1'` unjudged label, and multi-rubric parity."""
     views_text = (SQL_DIR / "views.sql").read_text(encoding="utf-8")
     assert "ANY_VALUE(w.finops_traffic_type)" not in views_text
-    assert "MAX(w.finops_traffic_type) AS primary_traffic_type" in views_text
+    assert "MAX(w.finops_traffic_type) AS primary_traffic_type" not in views_text
+    assert "WHEN 'production_inference' THEN 1" in views_text
 
     conn = _new_sqlite_bq_conn()
     _create_enterprise_sqlite_fixture(conn)
@@ -1739,29 +2039,16 @@ def test_f12_sql_pricing_constants_match_python_default_model_skus() -> None:
             abs=1e-12,
         )
 
-    when_rate_re = re.compile(r"WHEN\s+'([a-z0-9_.-]+)'\s+THEN\s+([0-9.]+)")
-    allowed_rates_by_model = {
-        model_id: {
-            sku.input_usd_per_1m,
-            sku.cached_input_usd_per_1m,
-            sku.output_usd_per_1m,
-            sku.long_context_input_usd_per_1m,
-            sku.long_context_cached_usd_per_1m,
-            sku.long_context_output_usd_per_1m,
-        }
-        for model_id, sku in DEFAULT_MODEL_SKUS.items()
-    }
-    for sql_name in ("views.sql", "demo_docubridge_extensions.sql"):
-        sql_text = (SQL_DIR / sql_name).read_text(encoding="utf-8")
-        matches = list(when_rate_re.finditer(sql_text))
-        assert matches, f"Expected model WHEN pricing clauses in {sql_name}"
-        for m in matches:
-            model_id, rate = m.group(1), float(m.group(2))
-            if model_id in allowed_rates_by_model:
-                assert any(
-                    abs(rate - exp_r) < 1e-12 for exp_r in allowed_rates_by_model[model_id]
-                ), f"{sql_name} rate {rate} for {model_id} drifted from DEFAULT_MODEL_SKUS"
+    views_text = (SQL_DIR / "views.sql").read_text(encoding="utf-8")
+    assert "CASE REGEXP_REPLACE(" not in views_text, (
+        "sql/views.sql must join v_default_model_pricing instead of duplicating CASE pricing ladders"
+    )
 
+    default_pricing_sql = _transpile_bq_view_to_sqlite(
+        _extract_view_sql_text(
+            SQL_DIR / "step1_trace_views.sql", "agent_eval.v_default_model_pricing"
+        )
+    )
     step1_wf = _transpile_bq_view_to_sqlite(
         _extract_view_sql_text(
             SQL_DIR / "step1_trace_views.sql", "agent_eval.v_step1_trace_waterfall"
@@ -1772,6 +2059,7 @@ def test_f12_sql_pricing_constants_match_python_default_model_skus() -> None:
     )
     conn = _new_sqlite_bq_conn()
     _create_enterprise_sqlite_fixture(conn)
+    conn.execute(f"CREATE VIEW v_default_model_pricing AS {default_pricing_sql}")
     conn.execute(f"CREATE VIEW v_step1_wf AS {step1_wf}")
     conn.execute(f"CREATE VIEW v_ent_wf AS {ent_wf}")
     base_dt = datetime(2026, 11, 21, 12, 0, 0, tzinfo=UTC)
@@ -1825,7 +2113,7 @@ def test_f12_sql_pricing_constants_match_python_default_model_skus() -> None:
                     "{}",
                 ),
             )
-            py_cost = compute_default_span_cost_usd(py_span)
+            py_cost = compute_span_cost_usd(py_span)
             s1_cost = conn.execute(
                 "SELECT span_cost_usd FROM v_step1_wf WHERE trace_id = ?", (tid,)
             ).fetchone()[0]
@@ -1846,7 +2134,7 @@ def test_f14_counterparty_classification_uses_explicit_flag_not_app_id_substring
     _create_enterprise_sqlite_fixture(conn)
     _install_enterprise_views(conn)
     conn.executemany(
-        "INSERT INTO app_registry VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO app_registry (apphub_application_id, business_unit, sla_latency_ms, cost_center, is_external_counterparty) VALUES (?, ?, ?, ?, ?)",
         [
             ("external-facing-chat", "retail_banking", 3000.0, "CC-CHAT", 0),
             ("partner-carrier-hub", "external_b2b", 5000.0, "CC-EXT", 1),

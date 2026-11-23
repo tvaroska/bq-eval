@@ -38,7 +38,7 @@ from bq_eval.showcase.pipeline import (
     run_showcase_pipeline,
     verify_receipt_sha256,
 )
-from bq_eval.showcase.renderer import render_html_scorecard
+from bq_eval.showcase.render.renderer import render_html_scorecard
 from tests.conftest import make_span
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -188,9 +188,12 @@ def test_m2_live_receipt_sha256_manifest_and_custom_scenario_replay(
     assert kyc_sum.judged_samples == 236
     assert kyc_sum.outcome_total_count == 280
     assert kyc_sum.outcome_verified_count == 216
-    assert kyc_sum.outcome_cost_per_verified_usd == pytest.approx(
+    assert kyc_sum.outcome_cost_per_verified_ai_usd == pytest.approx(
         kyc_sum.cost_per_verified_outcome_usd, abs=1e-12
     )
+    assert kyc_sum.outcome_cost_per_verified_usd is not None
+    assert kyc_sum.outcome_cost_per_verified_ai_usd is not None
+    assert kyc_sum.outcome_cost_per_verified_usd > kyc_sum.outcome_cost_per_verified_ai_usd
 
     from bq_eval.showcase.pipeline import render_markdown_report
 

@@ -1,5 +1,5 @@
 {
-  "checked": 56,
+  "checked": 55,
   "generated_statements": [
     "build_ai_generate_table_judge_sql",
     "build_ai_evaluate_agent_sql"
@@ -13,24 +13,19 @@
       "total": 3
     },
     "ddl.sql": {
-      "checked": 13,
+      "checked": 15,
       "skipped": 8,
-      "total": 21
-    },
-    "demo_docubridge_extensions.sql": {
-      "checked": 4,
-      "skipped": 0,
-      "total": 4
+      "total": 23
     },
     "demo_time_shift_loadgen.sql": {
-      "checked": 6,
+      "checked": 4,
       "skipped": 1,
-      "total": 7
+      "total": 5
     },
     "step1_trace_views.sql": {
-      "checked": 9,
+      "checked": 10,
       "skipped": 1,
-      "total": 10
+      "total": 11
     },
     "step2_stateless_eval.sql": {
       "checked": 7,
@@ -38,9 +33,9 @@
       "total": 9
     },
     "step3_daily_quota_guard.sql": {
-      "checked": 3,
-      "skipped": 0,
-      "total": 3
+      "checked": 5,
+      "skipped": 1,
+      "total": 6
     },
     "step3_saved_results.sql": {
       "checked": 3,
@@ -59,7 +54,9 @@
     "CREATE SCHEMA",
     "CREATE EXTERNAL TABLE",
     "CREATE MODEL",
+    "CREATE OR REPLACE PROCEDURE",
+    "CREATE PROCEDURE",
     "ALTER TABLE"
   ],
-  "skipped": 12
+  "skipped": 13
 }

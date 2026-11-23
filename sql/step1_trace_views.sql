@@ -11,10 +11,18 @@ OPTIONS (
   description = 'BQ Eval: Step 1-3 progressive trace evaluation, rubric catalog, and cost management.'
 );
 
--- -----------------------------------------------------------------------------
--- View 1A: Span-Level Waterfall with Portable App/BU ID & Built-In Default Pricing
---   * Works with zero extra tables (no app_registry or model_pricing_catalog required)
--- -----------------------------------------------------------------------------
+-- View 1.0: Canonical Built-In Default Model Pricing (`v_default_model_pricing`)
+--   Single fallback SKU table shared across Step 1 and Enterprise views (`0` extra tables).
+CREATE OR REPLACE VIEW `agent_eval.v_default_model_pricing` AS
+SELECT 'gemini-4-argon' AS model_name, 1.25 AS input_usd_per_1m, 0.125 AS cached_input_usd_per_1m, 5.00 AS output_usd_per_1m, 200000 AS long_context_threshold_tokens, 2.50 AS long_context_input_usd_per_1m, 0.250 AS long_context_cached_usd_per_1m, 18.75 AS long_context_output_usd_per_1m
+UNION ALL
+SELECT 'gemini-3.5-flash-lite', 0.075, 0.0075, 0.30, 200000, 0.15, 0.015, 1.125
+UNION ALL
+SELECT 'gemini-3.8-flash', 0.15, 0.015, 0.60, 200000, 0.30, 0.030, 2.25
+UNION ALL
+SELECT 'ai_evaluate_agent_managed', 0.15, 0.015, 0.60, 200000, 0.30, 0.030, 2.25;
+
+-- View 1A: Span-Level Waterfall with Portable App/BU ID & Default Pricing
 CREATE OR REPLACE VIEW `agent_eval.v_step1_trace_waterfall` AS
 SELECT
   s.trace_id,
@@ -63,10 +71,9 @@ SELECT
   GREATEST(0, s.input_tokens - s.cached_input_tokens) AS uncached_input_tokens,
   s.output_tokens,
   s.thinking_tokens,
-  s.input_tokens > 200000 AS is_long_context_cliff,
-  -- Span-level weighted burndown tokens (1.0x/0.1x/4.0x <=200K; 2.0x/0.2x/7.5x >200K)
+  s.input_tokens > COALESCE(p.long_context_threshold_tokens, 200000) AS is_long_context_cliff,
   CASE
-    WHEN s.input_tokens > 200000 THEN
+    WHEN s.input_tokens > COALESCE(p.long_context_threshold_tokens, 200000) THEN
       (2.0 * GREATEST(0, s.input_tokens - s.cached_input_tokens))
       + (0.2 * s.cached_input_tokens)
       + (7.5 * (s.output_tokens + s.thinking_tokens))
@@ -75,38 +82,22 @@ SELECT
       + (0.1 * s.cached_input_tokens)
       + (4.0 * (s.output_tokens + s.thinking_tokens))
   END AS weighted_burndown_tokens,
-  -- Built-in default Gemini pricing (USD) so Step 1 requires 0 extra pricing tables
   CASE
     WHEN s.model_name IS NULL OR s.model_name = 'none' OR (s.input_tokens = 0 AND s.output_tokens = 0 AND s.thinking_tokens = 0) THEN
       0.0
-    WHEN REGEXP_REPLACE(s.model_name, r'-(?:\d{3}|ga|rc|qcd|preview)$', '') = 'gemini-4-argon' AND s.input_tokens > 200000 THEN
-      (GREATEST(0, s.input_tokens - s.cached_input_tokens) / 1e6) * 2.50
-      + (s.cached_input_tokens / 1e6) * 0.250
-      + ((s.output_tokens + s.thinking_tokens) / 1e6) * 18.75
-    WHEN REGEXP_REPLACE(s.model_name, r'-(?:\d{3}|ga|rc|qcd|preview)$', '') = 'gemini-4-argon' THEN
-      (GREATEST(0, s.input_tokens - s.cached_input_tokens) / 1e6) * 1.25
-      + (s.cached_input_tokens / 1e6) * 0.125
-      + ((s.output_tokens + s.thinking_tokens) / 1e6) * 5.00
-    WHEN REGEXP_REPLACE(s.model_name, r'-(?:\d{3}|ga|rc|qcd|preview)$', '') = 'gemini-3.5-flash-lite' AND s.input_tokens > 200000 THEN
-      (GREATEST(0, s.input_tokens - s.cached_input_tokens) / 1e6) * 0.15
-      + (s.cached_input_tokens / 1e6) * 0.015
-      + ((s.output_tokens + s.thinking_tokens) / 1e6) * 1.125
-    WHEN REGEXP_REPLACE(s.model_name, r'-(?:\d{3}|ga|rc|qcd|preview)$', '') = 'gemini-3.5-flash-lite' THEN
-      (GREATEST(0, s.input_tokens - s.cached_input_tokens) / 1e6) * 0.075
-      + (s.cached_input_tokens / 1e6) * 0.0075
-      + ((s.output_tokens + s.thinking_tokens) / 1e6) * 0.30
-    WHEN REGEXP_REPLACE(s.model_name, r'-(?:\d{3}|ga|rc|qcd|preview)$', '') IN ('gemini-3.8-flash', 'ai_evaluate_agent_managed') AND s.input_tokens > 200000 THEN
-      (GREATEST(0, s.input_tokens - s.cached_input_tokens) / 1e6) * 0.30
-      + (s.cached_input_tokens / 1e6) * 0.030
-      + ((s.output_tokens + s.thinking_tokens) / 1e6) * 2.25
-    WHEN REGEXP_REPLACE(s.model_name, r'-(?:\d{3}|ga|rc|qcd|preview)$', '') IN ('gemini-3.8-flash', 'ai_evaluate_agent_managed') THEN
-      (GREATEST(0, s.input_tokens - s.cached_input_tokens) / 1e6) * 0.15
-      + (s.cached_input_tokens / 1e6) * 0.015
-      + ((s.output_tokens + s.thinking_tokens) / 1e6) * 0.60
-    ELSE NULL
+    WHEN s.input_tokens > COALESCE(p.long_context_threshold_tokens, 200000) THEN
+      (GREATEST(0, s.input_tokens - s.cached_input_tokens) / 1e6) * p.long_context_input_usd_per_1m
+      + (s.cached_input_tokens / 1e6) * p.long_context_cached_usd_per_1m
+      + ((s.output_tokens + s.thinking_tokens) / 1e6) * p.long_context_output_usd_per_1m
+    ELSE
+      (GREATEST(0, s.input_tokens - s.cached_input_tokens) / 1e6) * p.input_usd_per_1m
+      + (s.cached_input_tokens / 1e6) * p.cached_input_usd_per_1m
+      + ((s.output_tokens + s.thinking_tokens) / 1e6) * p.output_usd_per_1m
   END AS span_cost_usd,
   s.attributes
-FROM `agent_eval.otel_spans` AS s;
+FROM `agent_eval.otel_spans` AS s
+LEFT JOIN `agent_eval.v_default_model_pricing` AS p
+  ON REGEXP_REPLACE(s.model_name, r'-(?:\d{3}|ga|rc|qcd|preview)$', '') = p.model_name;
 
 -- -----------------------------------------------------------------------------
 -- View 1B: Trace-Level Deterministic SQL Evaluation ($0 LLM Judge Cost)
@@ -177,7 +168,7 @@ SELECT
   AVG(IF(step1_pass, 1.0, 0.0)) AS step1_pass_rate,
   AVG(IF(tool_error_count = 0, 1.0, 0.0)) AS tool_success_rate,
   APPROX_QUANTILES(trace_latency_ms, 100)[OFFSET(95)] AS p95_latency_ms,
-  AVG(cache_hit_ratio) AS avg_cache_hit_ratio,
+  COALESCE(AVG(cache_hit_ratio), 0.0) AS avg_cache_hit_ratio,
   SUM(trace_cost_usd) AS total_cost_usd,
   SAFE_DIVIDE(SUM(trace_cost_usd), COUNT(*)) AS cost_per_trace_usd,
   SAFE_DIVIDE(SUM(trace_cost_usd), NULLIF(COUNTIF(step1_pass), 0)) AS step1_cost_per_outcome_usd
@@ -256,6 +247,7 @@ WITH server_span_compute AS (
         + (COALESCE(SAFE_CAST(JSON_VALUE(w.attributes, '$."service.gib"') AS FLOAT64), 2.0) * 0.00000250)
       )
     ) AS estimated_compute_usd,
+    MAX(SAFE_CAST(JSON_VALUE(w.attributes, '$."outcome.storage_usd"') AS FLOAT64)) AS explicit_storage_usd,
     COALESCE(
       MAX(SAFE_CAST(JSON_VALUE(w.attributes, '$."outcome.storage_usd"') AS FLOAT64)),
       0.000020
@@ -271,6 +263,7 @@ SELECT
   c.apphub_application_id,
   c.total_server_seconds,
   c.estimated_compute_usd,
+  c.explicit_storage_usd,
   c.estimated_storage_usd,
   c.estimated_compute_usd + c.estimated_storage_usd AS estimated_infra_cost_usd
 FROM server_span_compute AS c;
@@ -497,22 +490,3 @@ WHERE s.model_name IS NOT NULL
   AND s.model_name != 'none'
   AND (s.input_tokens > 0 OR s.output_tokens > 0 OR s.thinking_tokens > 0)
 GROUP BY s.service_name;
-
--- =============================================================================
--- Ready-to-Run Static Step-1 Queries (Copy & Run in BigQuery Console)
--- =============================================================================
-
--- Query 1A: Cost per Verified Outcome by App, Source Mode & Agent
--- SELECT * FROM `agent_eval.v_cost_per_verified_outcome` ORDER BY total_cost_with_infra_usd DESC;
-
--- Query 1B: Attribution Coverage Gate (>= 99% of spend attributed to outcome_id)
--- SELECT * FROM `agent_eval.v_attribution_coverage` ORDER BY total_spend_usd DESC;
-
--- Query 1C: Failing Trace Triage (Tool Errors, Loops, or Rule 0 Violations)
--- SELECT
---   trace_id, outcome_id, apphub_application_id, business_unit, trace_start_time,
---   trace_latency_ms, ingestion_lag_ms, tool_call_count, tool_error_count, trace_cost_usd
--- FROM `agent_eval.v_step1_trace_eval`
--- WHERE NOT step1_pass
--- ORDER BY trace_start_time DESC
--- LIMIT 100;

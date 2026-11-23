@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import re
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+import sqlglot
+from sqlglot import exp
 
 from bq_eval.cli import main as cli_main
 from bq_eval.contract.otel import BQAAAgentEvent
@@ -25,9 +28,42 @@ from tests.conftest import REQUIRED_OTEL_SPANS_VIEW_COLUMNS
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
+def _projected_columns_of_view(sql_text: str, view_name: str) -> list[str]:
+    stmts = [s for s in sqlglot.parse(sql_text, read="bigquery") if s is not None]
+    for stmt in stmts:
+        if isinstance(stmt, exp.Create) and view_name in stmt.this.sql("bigquery"):
+            select_node = stmt.expression
+            assert isinstance(select_node, exp.Select)
+            return [expr.alias_or_name for expr in select_node.expressions]
+    raise AssertionError(f"View {view_name!r} not found")
+
+
+def _uncomment_mode_c_sql(adapter_sql: str) -> str:
+    start_marker = "-- Mode C:"
+    idx = adapter_sql.index(start_marker)
+    lines: list[str] = []
+    started = False
+    for raw in adapter_sql[idx:].splitlines():
+        candidate = raw[3:] if raw.startswith("-- ") else ("" if raw == "--" else raw)
+        if not started and not candidate.strip().upper().startswith("CREATE "):
+            continue
+        started = True
+        lines.append(candidate)
+    return "\n".join(lines)
+
+
 def test_bqaa_adapter_sql_contract_and_strict_adr003_fallback() -> None:
-    """Verify `sql/bqaa_adapter_views.sql` column parity, dedup, and strict ADR-003 fallback."""
+    """Verify `sql/bqaa_adapter_views.sql` 32/32 ordered column parity, dedup, and strict ADR-003 fallback (`M9-2`, `M9-4`)."""
     adapter_sql = (REPO_ROOT / "sql" / "bqaa_adapter_views.sql").read_text(encoding="utf-8")
+    ddl_sql = (REPO_ROOT / "sql" / "ddl.sql").read_text(encoding="utf-8")
+    schema_cols = tuple(
+        col["name"]
+        for col in json.loads(
+            (REPO_ROOT / "sql" / "otel_spans_schema.json").read_text(encoding="utf-8")
+        )
+    )
+    assert len(REQUIRED_OTEL_SPANS_VIEW_COLUMNS) == 32
+    assert REQUIRED_OTEL_SPANS_VIEW_COLUMNS == schema_cols
 
     for view_name in (
         "agent_eval.v_bqaa_otel_spans",
@@ -38,6 +74,16 @@ def test_bqaa_adapter_sql_contract_and_strict_adr003_fallback() -> None:
 
     assert "PARTITION BY event_id ORDER BY timestamp DESC" in adapter_sql
 
+    ddl_allspans_cols = _projected_columns_of_view(ddl_sql, "agent_eval.v_otel_allspans_only")
+    bqaa_cols = _projected_columns_of_view(adapter_sql, "agent_eval.v_bqaa_otel_spans")
+    mode_c_sql = _uncomment_mode_c_sql(adapter_sql)
+    expected_cols = list(REQUIRED_OTEL_SPANS_VIEW_COLUMNS)
+    assert ddl_allspans_cols == expected_cols
+    assert bqaa_cols == expected_cols
+    assert "SELECT * FROM `agent_eval.v_otel_allspans_only`" in ddl_sql
+    assert "SELECT * FROM `agent_eval.v_otel_allspans_only`" in mode_c_sql
+    assert "FROM `agent_eval.v_bqaa_otel_spans`" in mode_c_sql
+
     spans_match = re.search(
         r"CREATE\s+OR\s+REPLACE\s+VIEW\s+`agent_eval\.v_bqaa_otel_spans`\s+AS(.*?);",
         adapter_sql,
@@ -45,11 +91,6 @@ def test_bqaa_adapter_sql_contract_and_strict_adr003_fallback() -> None:
     )
     assert spans_match is not None
     spans_body = spans_match.group(1)
-
-    for col in REQUIRED_OTEL_SPANS_VIEW_COLUMNS:
-        assert re.search(rf"\b{re.escape(col)}\b", spans_body), (
-            f"v_bqaa_otel_spans missing required column {col!r}"
-        )
 
     apphub_expr_match = re.search(
         r"COALESCE\(((?:(?!COALESCE\().)*?)\)\s+AS\s+gcp_apphub_application_id",
@@ -71,6 +112,167 @@ def test_bqaa_adapter_sql_contract_and_strict_adr003_fallback() -> None:
     owner_expr = owner_expr_match.group(1)
     assert "adk.app_name" not in owner_expr
     assert not re.search(r"\bagent\b", owner_expr)
+
+
+def test_bqaa_mode_a_and_mode_c_transpile_to_sqlite_with_null_shadow_outcome_and_tool_error() -> (
+    None
+):
+    """M9-2: Transpile `v_bqaa_otel_spans` (Mode A) and `v_otel_allspans_only` + Hybrid `UNION ALL` (Mode C) in SQLite."""
+    from tests.test_sql_contracts import (
+        _extract_view_sql_text,
+        _new_sqlite_bq_conn,
+        _transpile_bq_view_to_sqlite,
+    )
+
+    adapter_path = REPO_ROOT / "sql" / "bqaa_adapter_views.sql"
+    ddl_path = REPO_ROOT / "sql" / "ddl.sql"
+    bqaa_view_sql = _transpile_bq_view_to_sqlite(
+        _extract_view_sql_text(adapter_path, "agent_eval.v_bqaa_otel_spans")
+    )
+    allspans_view_sql = _transpile_bq_view_to_sqlite(
+        _extract_view_sql_text(ddl_path, "agent_eval.v_otel_allspans_only")
+        .replace("`obs_traces._AllSpans`", "`_AllSpans`")
+        .replace("status.code", "status_code_raw")
+        .replace("resource.attributes", "resource_attributes")
+    )
+
+    conn = _new_sqlite_bq_conn()
+    conn.execute(
+        """
+        CREATE TABLE agent_events (
+            event_id TEXT,
+            timestamp TEXT,
+            event_type TEXT,
+            agent TEXT,
+            session_id TEXT,
+            invocation_id TEXT,
+            trace_id TEXT,
+            span_id TEXT,
+            parent_span_id TEXT,
+            content TEXT,
+            attributes TEXT,
+            latency_ms TEXT,
+            status TEXT,
+            error_message TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE _AllSpans (
+            trace_id TEXT,
+            span_id TEXT,
+            parent_span_id TEXT,
+            name TEXT,
+            start_time TEXT,
+            end_time TEXT,
+            receive_time TEXT,
+            duration_nano INTEGER,
+            status_code_raw TEXT,
+            kind TEXT,
+            resource_attributes TEXT,
+            attributes TEXT
+        )
+        """
+    )
+    conn.executemany(
+        "INSERT INTO agent_events VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        [
+            (
+                "ev-shared",
+                "2026-11-21T12:00:01+00:00",
+                "LLM_RESPONSE",
+                "shared_agent",
+                "s1",
+                "inv-1",
+                "tr-shared",
+                "sp-bqaa-shared",
+                None,
+                "{}",
+                json.dumps(
+                    {
+                        "model": "gemini-3.8-flash",
+                        "custom_metadata": {
+                            "apphub.application.id": "bqaa-app",
+                            "outcome.id": "out-shared",
+                        },
+                    }
+                ),
+                '{"total_ms": 100}',
+                "OK",
+                None,
+            ),
+            (
+                "ev-shadow-err",
+                "2026-11-21T12:00:02+00:00",
+                "TOOL_ERROR",
+                "shadow_agent",
+                "s2",
+                "inv-shadow",
+                "tr-bqaa-only",
+                "sp-bqaa-err",
+                None,
+                json.dumps({"name": "lookup_policy", "code": 503}),
+                json.dumps({"tool.call.status": "SUCCESS"}),
+                '{"total_ms": 250}',
+                "ERROR",
+                "upstream 503 timeout",
+            ),
+        ],
+    )
+    conn.execute(
+        "INSERT INTO _AllSpans VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            "tr-shared",
+            "sp-otel-shared",
+            None,
+            "invoke_agent",
+            "2026-11-21T12:00:00+00:00",
+            "2026-11-21T12:00:01+00:00",
+            "2026-11-21T12:00:01+00:00",
+            1_000_000_000,
+            "OK",
+            "SPAN_KIND_SERVER",
+            json.dumps({"service.name": "srv-otel", "apphub.application.id": "otel-stamped-app"}),
+            json.dumps(
+                {
+                    "gen_ai.operation.name": "invoke_agent",
+                    "gen_ai.response.model": "gemini-3.8-flash",
+                    "outcome.id": "out-shared",
+                }
+            ),
+        ),
+    )
+
+    conn.execute(f"CREATE VIEW v_bqaa_otel_spans AS {bqaa_view_sql}")
+    conn.execute(f"CREATE VIEW v_otel_allspans_only AS {allspans_view_sql}")
+    conn.execute(
+        """
+        CREATE VIEW otel_spans_hybrid AS
+        SELECT * FROM v_otel_allspans_only
+        UNION ALL
+        SELECT b.* FROM v_bqaa_otel_spans AS b
+        WHERE NOT EXISTS (SELECT 1 FROM v_otel_allspans_only AS f WHERE f.trace_id = b.trace_id)
+        """
+    )
+
+    bqaa_err = conn.execute(
+        "SELECT outcome_id, tool_call_status, gcp_apphub_application_id "
+        "FROM v_bqaa_otel_spans WHERE trace_id = 'tr-bqaa-only'"
+    ).fetchone()
+    assert bqaa_err["outcome_id"] is None
+    assert bqaa_err["tool_call_status"] == "TIMEOUT"
+    assert bqaa_err["gcp_apphub_application_id"] is None
+
+    hybrid_rows = {
+        str(r["trace_id"]): r for r in conn.execute("SELECT * FROM otel_spans_hybrid").fetchall()
+    }
+    conn.close()
+    assert set(hybrid_rows) == {"tr-shared", "tr-bqaa-only"}
+    assert hybrid_rows["tr-shared"]["span_id"] == "sp-otel-shared"
+    assert hybrid_rows["tr-shared"]["gcp_apphub_application_id"] == "otel-stamped-app"
+    assert hybrid_rows["tr-bqaa-only"]["outcome_id"] is None
+    assert hybrid_rows["tr-bqaa-only"]["tool_call_status"] == "TIMEOUT"
 
 
 def test_bqaa_python_twin_dedup_strict_fallback_and_sqlite_eval() -> None:
@@ -239,6 +441,7 @@ def test_bqaa_python_twin_dedup_strict_fallback_and_sqlite_eval() -> None:
     shadow_span = next(s for s in spans if s.agent_name == "rogue_shadow_agent")
     assert shadow_span.service_name == "self_reported_shadow_app"
     assert shadow_span.gcp_apphub_application_id is None
+    assert shadow_span.outcome_id is None
     assert shadow_span.outcome_owner is None
     assert shadow_span.resolved_application_id == "unregistered_app"
 

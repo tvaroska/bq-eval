@@ -215,9 +215,9 @@ def test_readme_kpi_rows_match_demo_json_and_offline_twin() -> None:
     )
     manifest = bq_dry_run.collect_dry_run_manifest(project_id="showcase-project")
     assert dry_run_receipt == manifest
-    assert manifest["checked"] == 56
-    assert manifest["skipped"] == 12
-    assert "`56`" in readme
+    assert manifest["checked"] == 55
+    assert manifest["skipped"] == 13
+    assert "`55`" in readme
 
     for token in (
         "uv sync --extra dev",

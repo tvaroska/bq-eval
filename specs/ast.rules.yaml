@@ -143,38 +143,46 @@ rule:
 id: renderer-imports-no-calculation
 language: Python
 severity: error
-message: "Layer violation (showcase renderer): view/renderer modules may import only stdlib, pydantic, bq_eval.contract, and sibling renderer modules."
+message: "Layer violation (showcase/render/): render modules may import only stdlib, pydantic, bq_eval.contract, and bq_eval.showcase.render."
 files:
-  - "bq_eval/showcase/**/*.py"
-ignores:
-  - "bq_eval/showcase/__init__.py"
-  - "bq_eval/showcase/loadgen.py"
-  - "bq_eval/showcase/pipeline.py"
-  - "bq_eval/showcase/seeds_banking.py"
-  - "bq_eval/showcase/seeds_claims.py"
+  - "bq_eval/showcase/render/**/*.py"
 metadata:
-  test_path: "bq_eval/showcase/renderer_probe.py"
+  test_path: "bq_eval/showcase/render/renderer_probe.py"
   invalid_examples:
     - "from bq_eval.engine.finops import compute_pareto_frontier"
     - "from bq_eval.engine.calibration import compute_gwet_ac2"
     - "from bq_eval.showcase.pipeline import run_showcase_pipeline"
-    - "from .pipeline import run_showcase_pipeline"
-    - "from . import loadgen"
-    - "from ..engine import sql_eval"
+    - "from ..pipeline import run_showcase_pipeline"
+    - "from .. import loadgen"
+    - "from ...engine import sql_eval"
   valid_examples:
     - "from bq_eval.contract.results import ShowcaseRunArtifacts"
-    - "from bq_eval.showcase.view import PageView"
+    - "from bq_eval.showcase.render.view import PageView"
+    - "from .view import PageView"
     - "import html"
 rule:
   any:
     - kind: import_statement
-      regex: "(?s)^import\\s+(.+,\\s*)*bq_eval\\.(engine|cli|showcase\\.(loadgen|pipeline|seeds_banking|seeds_claims))(\\b|\\.)"
+      regex: "(?s)^import\\s+(.+,\\s*)*bq_eval\\.(engine|cli)(\\b|\\.)"
+    - all:
+        - kind: import_statement
+          regex: "(?s)^import\\s+(.+,\\s*)*bq_eval\\.showcase\\."
+        - not:
+            regex: "(?s)^import\\s+bq_eval\\.showcase\\.render(\\b|\\.)"
     - kind: import_from_statement
-      regex: "(?s)^from\\s+((bq_eval\\.|\\.\\.\\s*)(engine|cli)|(bq_eval\\.showcase\\.|\\.\\s*)(loadgen|pipeline|seeds_banking|seeds_claims))(\\b|\\.)"
+      regex: "(?s)^from\\s+(bq_eval\\.|\\.\\.\\.\\s*)(engine|cli)(\\b|\\.)"
     - kind: import_from_statement
-      regex: "(?s)^from\\s+(bq_eval\\.showcase|\\.)\\s+import\\s+(.*[\\s,(])?(loadgen|pipeline|seeds_banking|seeds_claims)\\b"
-    - kind: import_from_statement
-      regex: "(?s)^from\\s+(bq_eval|\\.\\.)\\s+import\\s+(.*[\\s,(])?(engine|cli)\\b"
+      regex: "(?s)^from\\s+(bq_eval|\\.\\.\\.)\\s+import\\s+(.*[\\s,(])?(engine|cli)\\b"
+    - all:
+        - kind: import_from_statement
+          regex: "(?s)^from\\s+(bq_eval\\.showcase\\.|\\.\\.\\s*)[a-zA-Z_]"
+        - not:
+            regex: "(?s)^from\\s+(bq_eval\\.showcase\\.|\\.\\.\\s*)render(\\b|\\.)"
+    - all:
+        - kind: import_from_statement
+          regex: "(?s)^from\\s+(bq_eval\\.showcase|\\.\\.)\\s+import\\b"
+        - not:
+            regex: "(?s)^from\\s+(bq_eval\\.showcase|\\.\\.)\\s+import\\s+render\\b"
 ---
 id: no-sqlalchemy-orm
 language: Python
@@ -223,7 +231,7 @@ rule:
 id: no-dynamic-sql-execute
 language: Python
 severity: error
-message: "Security violation: dynamic f-string or concatenated SQL passed to .execute(); use parameterized queries."
+message: "Security violation: dynamic f-string or concatenated SQL passed to .execute/.executemany/.executescript; use parameterized queries."
 ignores:
   - "tests/**"
 metadata:
@@ -231,8 +239,14 @@ metadata:
   invalid_examples:
     - 'conn.execute(f"SELECT * FROM spans WHERE trace_id = {tid}")'
     - 'conn.execute("SELECT * FROM spans WHERE trace_id = " + tid, params)'
+    - 'conn.executemany(f"INSERT INTO {table} VALUES (?)", rows)'
+    - 'conn.executemany("INSERT INTO " + table + " VALUES (?)", rows)'
+    - 'conn.executescript(f"DELETE FROM {table};")'
+    - 'conn.executescript("DELETE FROM " + table)'
   valid_examples:
     - 'conn.execute("SELECT * FROM spans WHERE trace_id = ?", (tid,))'
+    - 'conn.executemany("INSERT INTO spans VALUES (?)", rows)'
+    - 'conn.executescript(SQLITE_VIEWS_DDL)'
 constraints:
   QUERY:
     any:
@@ -245,3 +259,6 @@ rule:
   any:
     - pattern: $DB.execute($QUERY)
     - pattern: $DB.execute($QUERY, $$$)
+    - pattern: $DB.executemany($QUERY)
+    - pattern: $DB.executemany($QUERY, $$$)
+    - pattern: $DB.executescript($QUERY)

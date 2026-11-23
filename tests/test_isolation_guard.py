@@ -1,14 +1,14 @@
-"""Folder-level AST Import & Layer Isolation Guard (`Rule 0`, `M7-1`, `F13`).
+"""Folder-level AST Import & Layer Isolation Guard (`Rule 0`, `M7-1`, `F13`, `M9-1`).
 
-Enforces strict Ports, Adapters and Contracts across every `bq_eval/**/*.py` file:
+Enforces strict folder-level Ports, Adapters and Contracts across every `bq_eval/**/*.py` file:
 - `__init__.py` (`root`): imports nothing from `bq_eval.*` or third-party libraries.
 - `contract/`: imports only stdlib, `pydantic`, and `bq_eval.contract`.
 - `engine/`: imports only stdlib, `bq_eval.contract`, and `bq_eval.engine` (zero `pydantic`,
   zero `showcase`, zero `cli`, zero LLM SDKs).
-- `showcase/{__init__,loadgen,pipeline,seeds_banking,seeds_claims}.py`: imports only stdlib,
-  `bq_eval.contract`, `bq_eval.engine`, and `bq_eval.showcase` (zero `cli`, zero LLM SDKs).
-- `showcase/{view,renderer}.py`: imports zero calculations — only stdlib, `pydantic`,
-  `bq_eval.contract`, and sibling renderer modules.
+- `showcase/render/`: imports zero calculations — only stdlib, `pydantic`,
+  `bq_eval.contract`, and `bq_eval.showcase.render`.
+- `showcase/`: imports only stdlib, `bq_eval.contract`, `bq_eval.engine`, and `bq_eval.showcase`
+  (zero `cli`, zero LLM SDKs).
 - `cli/`: driving ports — may import `bq_eval.*` and stdlib, with zero LLM SDK imports.
 """
 
@@ -41,16 +41,6 @@ FORBIDDEN_LLM_SDK_PREFIXES: tuple[str, ...] = (
     "llama_index",
 )
 
-SHOWCASE_EVAL_FILES: frozenset[str] = frozenset(
-    {
-        "showcase/__init__.py",
-        "showcase/loadgen.py",
-        "showcase/pipeline.py",
-        "showcase/seeds_banking.py",
-        "showcase/seeds_claims.py",
-    }
-)
-
 
 @dataclass(frozen=True)
 class FolderRule:
@@ -80,17 +70,12 @@ FOLDER_RULES: dict[str, FolderRule] = {
         name="showcase_renderer",
         allowed_bq_eval_prefixes=(
             "bq_eval.contract",
-            "bq_eval.showcase.view",
-            "bq_eval.showcase.renderer",
+            "bq_eval.showcase.render",
         ),
         allowed_third_party_roots=frozenset({"pydantic"}),
         forbidden_bq_eval_prefixes=(
             "bq_eval.engine",
             "bq_eval.cli",
-            "bq_eval.showcase.loadgen",
-            "bq_eval.showcase.pipeline",
-            "bq_eval.showcase.seeds_banking",
-            "bq_eval.showcase.seeds_claims",
         ),
     ),
     "cli": FolderRule(
@@ -101,12 +86,12 @@ FOLDER_RULES: dict[str, FolderRule] = {
 
 _EXACT_ROLE_MAP: dict[str, str] = {
     "__init__.py": "root",
-    **dict.fromkeys(SHOWCASE_EVAL_FILES, "showcase_eval"),
 }
 _PREFIX_ROLE_MAP: tuple[tuple[str, str], ...] = (
     ("contract/", "contract"),
     ("engine/", "engine"),
-    ("showcase/", "showcase_renderer"),
+    ("showcase/render/", "showcase_renderer"),
+    ("showcase/", "showcase_eval"),
     ("cli/", "cli"),
 )
 
@@ -262,15 +247,18 @@ def test_unlisted_module_and_leaked_import_positive_controls(tmp_path: Path) -> 
         ("bq_eval/engine/probe.py", "from ..showcase import loadgen"),
         ("bq_eval/showcase/pipeline.py", "from bq_eval.cli.app import main"),
         (
-            "bq_eval/showcase/renderer.py",
+            "bq_eval/showcase/render/renderer.py",
             "from bq_eval.engine.finops import compute_pareto_frontier",
         ),
         (
-            "bq_eval/showcase/renderer.py",
+            "bq_eval/showcase/render/renderer.py",
             "from bq_eval.showcase.pipeline import run_showcase_pipeline",
         ),
-        ("bq_eval/showcase/renderer.py", "from . import loadgen"),
-        ("bq_eval/showcase/view.py", "from bq_eval.engine.calibration import compute_gwet_ac2"),
+        ("bq_eval/showcase/render/renderer.py", "from .. import loadgen"),
+        (
+            "bq_eval/showcase/render/view.py",
+            "from bq_eval.engine.calibration import compute_gwet_ac2",
+        ),
         ("bq_eval/cli/app.py", "from google.genai import Client"),
         ("bq_eval/cli/app.py", "import vertexai.preview"),
         ("bq_eval/showcase/pipeline.py", "import openai"),
@@ -298,10 +286,10 @@ def test_folder_guard_catches_every_forbidden_import(
         ("bq_eval/engine/probe.py", "from bq_eval.contract.otel import OTelGenAISpanRecord"),
         ("bq_eval/engine/probe.py", "from .finops import compute_span_cost_usd"),
         (
-            "bq_eval/showcase/renderer.py",
+            "bq_eval/showcase/render/renderer.py",
             "from bq_eval.contract.results import ShowcaseRunArtifacts",
         ),
-        ("bq_eval/showcase/renderer.py", "from .view import PageView"),
+        ("bq_eval/showcase/render/renderer.py", "from .view import PageView"),
         (
             "bq_eval/showcase/pipeline.py",
             "from bq_eval.engine.sql_eval import evaluate_traces_in_sqlite",
@@ -332,10 +320,10 @@ def test_subfolder_probes_fail_both_python_and_ast_grep_guards(tmp_path: Path) -
         ("bq_eval/engine/probe.py", "from pydantic import BaseModel\n"),
         ("bq_eval/engine/probe.py", "from ..showcase import loadgen\n"),
         (
-            "bq_eval/showcase/renderer_probe.py",
-            "from ..engine.finops import compute_span_cost_usd\n",
+            "bq_eval/showcase/render/renderer_probe.py",
+            "from ...engine.finops import compute_span_cost_usd\n",
         ),
-        ("bq_eval/showcase/renderer_probe.py", "from . import pipeline\n"),
+        ("bq_eval/showcase/render/renderer_probe.py", "from .. import pipeline\n"),
         ("bq_eval/cli/probe.py", "from google.genai import Client\n"),
     )
     for rel_path, bad_import in cases:
