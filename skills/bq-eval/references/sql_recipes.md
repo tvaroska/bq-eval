@@ -147,7 +147,7 @@ NOT EXISTS (
 
 ## 6. Engine B (`AI.EVALUATE_AGENT`) Over Light Capture (`BQAA` `agent_events`)
 
-When evaluating `BQAA` `AgentData` turns (`agent_events_eval_turn`) in a single-region dataset (`us-central1`, `us-east4`, `europe-west1`, etc.), always pre-filter through `agent_eval.v_bqaa_eval_turn_filtered` ([`../../../sql/bqaa_adapter_views.sql`](../../../sql/bqaa_adapter_views.sql)) so deterministic Step-1 failures and tool loops are caught at `$0` before invoking `AI.EVALUATE_AGENT`:
+When evaluating `BQAA` `AgentData` turns (`agent_events_eval_turn`) in a single-region dataset (`us-central1`, `us-east4`, `europe-west1`, etc.), always pre-filter through `agent_eval.v_bqaa_eval_turn_filtered` ([`../../../sql/core/bqaa_adapter_views.sql`](../../../sql/core/bqaa_adapter_views.sql)) so deterministic Step-1 failures and tool loops are caught at `$0` before invoking `AI.EVALUATE_AGENT`:
 
 ```sql
 SELECT *
@@ -247,7 +247,7 @@ FROM evaluated;
 
 ## 7. Stateless Complex Reasoning Eval Using `gemini-4-argon` (`MODEL agent_eval.gemini_4_argon_judge`)
 
-For rubrics declaring `judge_model = 'gemini-4-argon'` (multi-step financial, legal, or cross-document reasoning registered in [`../../../sql/ddl.sql`](../../../sql/ddl.sql)), invoke `MODEL \`agent_eval.gemini_4_argon_judge\`` with `thinking_level` set to `"MEDIUM"` (or `"HIGH"`):
+For rubrics declaring `judge_model = 'gemini-4-argon'` (multi-step financial, legal, or cross-document reasoning registered in [`../../../sql/core/ddl.sql`](../../../sql/core/ddl.sql)), invoke `MODEL \`agent_eval.gemini_4_argon_judge\`` with `thinking_level` set to `"MEDIUM"` (or `"HIGH"`):
 
 ```sql
 SELECT
@@ -281,7 +281,7 @@ FROM AI.GENERATE_TABLE(
 
 ## 8. Persisting Engine A (`AI.GENERATE_TABLE`) Verdicts into Step 3 (`agent_eval.eval_results`)
 
-Aligned 1:1 with the 16-column `agent_eval.eval_results` table in [`../../../sql/step3_saved_results.sql`](../../../sql/step3_saved_results.sql), skipping already-scored `(eval_run_id, trace_id, rubric_id)` triples while preserving `outcome_id` for `EVAL-P11` outcome-level `CPVO` joins:
+Aligned 1:1 with the 16-column `agent_eval.eval_results` table in [`../../../sql/core/step3_saved_results.sql`](../../../sql/core/step3_saved_results.sql), skipping already-scored `(eval_run_id, trace_id, rubric_id)` triples while preserving `outcome_id` for `EVAL-P11` outcome-level `CPVO` joins:
 
 ```sql
 INSERT INTO `agent_eval.eval_results` (

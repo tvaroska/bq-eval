@@ -8,44 +8,42 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from bq_eval.cli import main as cli_main
-from bq_eval.contract.otel import (
+from bq_eval.cli.app import main as cli_main
+from bq_eval.core.contract.otel import (
     BQAAAgentEvent,
     FinOpsTrafficType,
     GenAISpanKind,
     OTelGenAISpanRecord,
     compute_weighted_burndown_tokens,
 )
-from bq_eval.contract.pricing import ModelPricingSKU
-from bq_eval.contract.results import ConfusionMatrix, ModelOption
-from bq_eval.contract.rubrics import OrdinalScoreOutput
-from bq_eval.engine.bqaa import (
+from bq_eval.core.contract.pricing import ModelPricingSKU
+from bq_eval.core.contract.results import ConfusionMatrix
+from bq_eval.core.contract.rubrics import OrdinalScoreOutput
+from bq_eval.core.engine.bqaa import (
     bqaa_events_to_otel_spans,
     bqaa_events_to_trace_payloads,
     deduplicate_bqaa_events,
 )
-from bq_eval.engine.calibration import (
+from bq_eval.core.engine.calibration import (
     build_calibration_result,
     compute_gwet_ac2,
     rogan_gladen_calibrate,
     rogan_gladen_wilson_ci,
     stratified_rogan_gladen_calibrate,
 )
-from bq_eval.engine.finops import (
-    allocate_focus_two_pool_chargeback,
-    compute_pareto_frontier,
-    compute_span_cost_usd,
-    diagnose_prefix_cache_dilution,
-)
-from bq_eval.engine.sql_eval import (
+from bq_eval.core.engine.cost import compute_span_cost_usd
+from bq_eval.core.engine.sql_eval import (
     build_ai_evaluate_agent_sql,
     build_ai_generate_table_judge_sql,
     evaluate_traces_in_sqlite,
 )
-from bq_eval.showcase.loadgen import (
-    build_golden_seed_templates,
-    evaluate_time_shifted_corpus,
-    generate_time_shifted_corpus,
+from bq_eval.demo.golden_seeds import build_golden_seed_templates
+from bq_eval.demo.loadgen import evaluate_time_shifted_corpus, generate_time_shifted_corpus
+from bq_eval.finops.contract.results import ModelOption
+from bq_eval.finops.engine.spend import (
+    allocate_focus_two_pool_chargeback,
+    compute_pareto_frontier,
+    diagnose_prefix_cache_dilution,
 )
 from tests.conftest import make_span
 
@@ -470,7 +468,7 @@ def test_step3_paired_run_comparison_temporal_order_and_dedup() -> None:
         _transpile_bq_view_to_sqlite,
     )
 
-    step3_path = REPO_ROOT / "sql" / "step3_saved_results.sql"
+    step3_path = REPO_ROOT / "sql" / "core" / "step3_saved_results.sql"
     view_sql = _transpile_bq_view_to_sqlite(
         _extract_view_sql_text(step3_path, "agent_eval.v_step3_paired_run_comparison")
     )
@@ -853,8 +851,8 @@ def test_policy_sha256_and_amended_clause_ids_in_judge_sql_and_ddl() -> None:
     with pytest.raises(ValueError, match="policy_sha256"):
         build_ai_generate_table_judge_sql(project_id="demo-proj", policy_sha256="not-a-sha")
 
-    ddl = (REPO_ROOT / "sql" / "ddl.sql").read_text(encoding="utf-8")
-    step3 = (REPO_ROOT / "sql" / "step3_saved_results.sql").read_text(encoding="utf-8")
+    ddl = (REPO_ROOT / "sql" / "core" / "ddl.sql").read_text(encoding="utf-8")
+    step3 = (REPO_ROOT / "sql" / "core" / "step3_saved_results.sql").read_text(encoding="utf-8")
     assert "policy_sha256 STRING" in ddl and "amended_clause_ids STRING" in ddl
     assert "policy_sha256 STRING" in step3 and "policy_changed" in step3
 
@@ -865,8 +863,8 @@ def test_public_doc_hygiene_marks_evaluate_agent_preview() -> None:
         REPO_ROOT / "README.md",
         REPO_ROOT / "docs" / "architecture-and-sql.md",
         REPO_ROOT / "docs" / "bqaa-and-dual-path-architecture.md",
-        REPO_ROOT / "sql" / "step2_stateless_eval.sql",
-        REPO_ROOT / "sql" / "step3_saved_results.sql",
+        REPO_ROOT / "sql" / "core" / "step2_stateless_eval.sql",
+        REPO_ROOT / "sql" / "core" / "step3_saved_results.sql",
     )
     for path in files:
         lower = path.read_text(encoding="utf-8").lower()

@@ -18,23 +18,23 @@ import pytest
 import sqlglot
 from sqlglot import exp
 
-from bq_eval.contract.otel import (
+from bq_eval.core.contract.otel import (
     BQAAAgentEvent,
     FinOpsTrafficType,
     GenAISpanKind,
     OTelGenAISpanRecord,
 )
-from bq_eval.contract.pricing import DEFAULT_MODEL_SKUS
-from bq_eval.contract.results import ConfusionMatrix
-from bq_eval.engine.bqaa import bqaa_events_to_trace_payloads
-from bq_eval.engine.calibration import rogan_gladen_calibrate
-from bq_eval.engine.finops import compute_span_cost_usd
-from bq_eval.engine.sql_eval import (
+from bq_eval.core.contract.pricing import DEFAULT_MODEL_SKUS
+from bq_eval.core.contract.results import ConfusionMatrix
+from bq_eval.core.engine.bqaa import bqaa_events_to_trace_payloads
+from bq_eval.core.engine.calibration import rogan_gladen_calibrate
+from bq_eval.core.engine.cost import compute_span_cost_usd
+from bq_eval.core.engine.sql_eval import (
     build_ai_evaluate_agent_sql,
     build_ai_generate_table_judge_sql,
     evaluate_traces_in_sqlite,
 )
-from bq_eval.showcase.loadgen import export_time_shifted_jsonl, generate_time_shifted_corpus
+from bq_eval.demo.loadgen import export_time_shifted_jsonl, generate_time_shifted_corpus
 from scripts.bq_dry_run import split_sql_statements
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -174,7 +174,7 @@ def _parse_bigquery_statements(sql: str, label: str) -> list[exp.Expr]:
 def _extract_view_definitions() -> dict[str, list[tuple[str, exp.Create]]]:
     """Map `dataset.view_name` -> list of `(filename, Create AST)` across `sql/*.sql`."""
     views: dict[str, list[tuple[str, exp.Create]]] = {}
-    for sql_file in sorted(SQL_DIR.glob("*.sql")):
+    for sql_file in sorted(SQL_DIR.rglob("*.sql")):
         stmts = _parse_bigquery_statements(sql_file.read_text(encoding="utf-8"), sql_file.name)
         for stmt in stmts:
             if isinstance(stmt, exp.Create) and (stmt.args.get("kind") or "").upper() == "VIEW":
@@ -229,7 +229,7 @@ def _referenced_tables(stmt: exp.Expr) -> set[str]:
 
 def test_all_sql_files_parse_as_bigquery_ast_and_valid_googlesql_strings() -> None:
     """Every `sql/*.sql` file parses cleanly as BigQuery AST with valid GoogleSQL strings."""
-    sql_files = sorted(SQL_DIR.glob("*.sql"))
+    sql_files = sorted(SQL_DIR.rglob("*.sql"))
     assert sql_files, "No SQL files found under sql/"
     for sql_file in sql_files:
         text = sql_file.read_text(encoding="utf-8")
@@ -312,7 +312,7 @@ def test_zero_duplicate_view_definitions_across_sql_pack() -> None:
     assert not missing, f"Missing required canonical views: {sorted(missing)}"
 
     step1_cpo_sql = _extract_view_sql_text(
-        SQL_DIR / "step1_trace_views.sql", "agent_eval.v_step1_cost_per_outcome"
+        SQL_DIR / "core" / "step1_trace_views.sql", "agent_eval.v_step1_cost_per_outcome"
     )
     assert "avg_cache_hit_ratio" in step1_cpo_sql
 
@@ -355,7 +355,7 @@ def test_view_dependency_dag_is_acyclic_and_light_capture_deployable() -> None:
     cyclic = _find_graph_cycles(deps)
     assert not cyclic, f"View dependency cycle detected among: {cyclic}"
 
-    bqaa_sql = (SQL_DIR / "bqaa_adapter_views.sql").read_text(encoding="utf-8")
+    bqaa_sql = (SQL_DIR / "core" / "bqaa_adapter_views.sql").read_text(encoding="utf-8")
     step1_views = {
         name for name, defs in views.items() if any(f == "step1_trace_views.sql" for f, _ in defs)
     }
@@ -383,7 +383,7 @@ def test_view_dependency_dag_is_acyclic_and_light_capture_deployable() -> None:
 def test_bqaa_sql_adapter_matches_python_custom_metadata_and_outcome_closed() -> None:
     """`v_bqaa_otel_spans` promotes `custom_metadata` keys and maps `OUTCOME_CLOSED` to `invoke_agent`."""
     view_sql = _extract_view_sql_text(
-        SQL_DIR / "bqaa_adapter_views.sql", "agent_eval.v_bqaa_otel_spans"
+        SQL_DIR / "core" / "bqaa_adapter_views.sql", "agent_eval.v_bqaa_otel_spans"
     )
     assert re.search(
         r"WHEN\s+event_type\s+IN\s*\([^)]*'OUTCOME_CLOSED'[^)]*\)\s*(?:OR[^\n]*)?THEN\s+'invoke_agent'",
@@ -407,7 +407,7 @@ def test_bqaa_sql_adapter_matches_python_custom_metadata_and_outcome_closed() ->
 def test_demo_loadgen_sql_and_jsonl_emit_all_step1_columns(tmp_path: Path) -> None:
     """`demo_time_shift_loadgen.sql` & `export_time_shifted_jsonl` emit every column Step 1 selects."""
     wf_sql = _extract_view_sql_text(
-        SQL_DIR / "step1_trace_views.sql", "agent_eval.v_step1_trace_waterfall"
+        SQL_DIR / "core" / "step1_trace_views.sql", "agent_eval.v_step1_trace_waterfall"
     )
     wf_ast = _parse_bigquery_statements(wf_sql, "v_step1_trace_waterfall")[0]
     required_span_cols = {
@@ -417,7 +417,7 @@ def test_demo_loadgen_sql_and_jsonl_emit_all_step1_columns(tmp_path: Path) -> No
     }
     assert required_span_cols, "Failed to extract s.<col> references from v_step1_trace_waterfall"
 
-    loadgen_sql = (SQL_DIR / "demo_time_shift_loadgen.sql").read_text(encoding="utf-8")
+    loadgen_sql = (SQL_DIR / "demo" / "demo_time_shift_loadgen.sql").read_text(encoding="utf-8")
     loadgen_stmts = _parse_bigquery_statements(loadgen_sql, "demo_time_shift_loadgen.sql")
     ctas_cols: set[str] = set()
     for stmt in loadgen_stmts:
@@ -454,25 +454,25 @@ def test_demo_loadgen_sql_and_jsonl_emit_all_step1_columns(tmp_path: Path) -> No
 
 def test_step2_stateless_sql_safe_deploy_and_reachable_error_tail() -> None:
     """`step2_stateless_eval.sql` has zero uncommented live-billing SELECTs and live error-tail views."""
-    step2_text = (SQL_DIR / "step2_stateless_eval.sql").read_text(encoding="utf-8")
+    step2_text = (SQL_DIR / "core" / "step2_stateless_eval.sql").read_text(encoding="utf-8")
     stmts = _parse_bigquery_statements(step2_text, "step2_stateless_eval.sql")
     for stmt in stmts:
         if isinstance(stmt, exp.Select):
             raw = stmt.sql(dialect="bigquery", comments=False).upper()
             assert "AI.GENERATE_TABLE" not in raw, (
-                "Uncommented AI.GENERATE_TABLE SELECT in sql/step2_stateless_eval.sql triggers "
+                "Uncommented AI.GENERATE_TABLE SELECT in sql/core/step2_stateless_eval.sql triggers "
                 "accidental live billing when deploying the SQL file"
             )
 
     canary_err_sql = _extract_view_sql_text(
-        SQL_DIR / "step2_stateless_eval.sql",
+        SQL_DIR / "core" / "step2_stateless_eval.sql",
         "agent_eval.v_step2_5_example_last_1h_canary_and_errors",
     )
     assert "NOT step1_pass" in canary_err_sql
     canary_ast = _parse_bigquery_statements(canary_err_sql, "canary_and_errors")[0]
     source_views = _referenced_tables(canary_ast)
     for src in source_views:
-        src_sql = _extract_view_sql_text(SQL_DIR / "step2_stateless_eval.sql", src)
+        src_sql = _extract_view_sql_text(SQL_DIR / "core" / "step2_stateless_eval.sql", src)
         assert not re.search(r"WHERE\s+t\.step1_pass\s*=\s*TRUE", src_sql, re.IGNORECASE), (
             f"v_step2_5_example_last_1h_canary_and_errors filters NOT step1_pass on {src}, "
             "which already filters WHERE t.step1_pass = TRUE (dead error-tail branch)"
@@ -480,14 +480,16 @@ def test_step2_stateless_sql_safe_deploy_and_reachable_error_tail() -> None:
 
 
 def test_views_sql_rule0_and_pricing_catalog_parity() -> None:
-    """`sql/views.sql` enforces Rule 0 tool limits, reads pricing burndown weights, and unifies judge fallbacks."""
-    eval_view = _extract_view_sql_text(SQL_DIR / "views.sql", "agent_eval.v_trace_sql_evaluation")
+    """`sql/core/views.sql` enforces Rule 0 tool limits, reads pricing burndown weights, and unifies judge fallbacks."""
+    eval_view = _extract_view_sql_text(
+        SQL_DIR / "core" / "views.sql", "agent_eval.v_trace_sql_evaluation"
+    )
     assert "COUNTIF(w.span_kind = 'execute_tool') <= 8" in eval_view, (
         "v_trace_sql_evaluation must enforce <= 8 execute_tool spans in rule0_pass"
     )
     assert "COALESCE(w.tool_call_status, 'SUCCESS') != 'SUCCESS'" in eval_view
 
-    wf_view = _extract_view_sql_text(SQL_DIR / "views.sql", "agent_eval.v_trace_waterfall")
+    wf_view = _extract_view_sql_text(SQL_DIR / "core" / "views.sql", "agent_eval.v_trace_waterfall")
     for catalog_col in (
         "m.long_context_threshold_tokens",
         "m.burndown_uncached_weight",
@@ -501,7 +503,7 @@ def test_views_sql_rule0_and_pricing_catalog_parity() -> None:
             f"v_trace_waterfall must read {catalog_col} from model_pricing_catalog"
         )
 
-    views_text = (SQL_DIR / "views.sql").read_text(encoding="utf-8")
+    views_text = (SQL_DIR / "core" / "views.sql").read_text(encoding="utf-8")
     assert "COALESCE(m.input_usd_per_1m, 1.25)" not in views_text, (
         "Hardcoded Argon fallback $1.25 conflicts with Flash fallback $0.15; dispatch by judge_model"
     )
@@ -950,7 +952,7 @@ def _transpile_bq_view_to_sqlite(view_sql: str) -> str:
 
 def test_multi_key_outcome_fanout_exact_1x_infra_and_judge_cost() -> None:
     """Multi-agent, multi-source_mode, multi-app & multi-skill slices sum to exact 1.0x outcome cost."""
-    step1_path = SQL_DIR / "step1_trace_views.sql"
+    step1_path = SQL_DIR / "core" / "step1_trace_views.sql"
     infra_sql = _extract_view_sql_text(step1_path, "agent_eval.v_infra_cost_estimate")
     cpvo_sql = _extract_view_sql_text(step1_path, "agent_eval.v_cost_per_verified_outcome")
     skill_sql = _extract_view_sql_text(step1_path, "agent_eval.v_skill_lineage_roi")
@@ -1230,7 +1232,7 @@ def insert_enterprise_sqlite_span(conn: sqlite3.Connection, span: OTelGenAISpanR
 
 
 def _create_enterprise_sqlite_fixture(conn: sqlite3.Connection) -> None:
-    """Create base tables required to execute transpiled `sql/views.sql` and `sql/step1_trace_views.sql`."""
+    """Create base tables required to execute transpiled `sql/core/views.sql` and `sql/core/step1_trace_views.sql`."""
     conn.executescript(
         """
         CREATE TABLE otel_spans (
@@ -1375,8 +1377,9 @@ def _create_enterprise_sqlite_fixture(conn: sqlite3.Connection) -> None:
 
 
 def _install_enterprise_views(conn: sqlite3.Connection) -> None:
-    views_path = SQL_DIR / "views.sql"
-    step1_path = SQL_DIR / "step1_trace_views.sql"
+    views_path = SQL_DIR / "core" / "views.sql"
+    step1_path = SQL_DIR / "core" / "step1_trace_views.sql"
+    capacity_path = SQL_DIR / "finops" / "capacity_views.sql"
     for path, name in (
         (step1_path, "agent_eval.v_default_model_pricing"),
         (step1_path, "agent_eval.v_step1_trace_waterfall"),
@@ -1389,7 +1392,7 @@ def _install_enterprise_views(conn: sqlite3.Connection) -> None:
         (views_path, "agent_eval.v_enterprise_cost_per_verified_outcome"),
         (views_path, "agent_eval.v_counterparty_spend"),
         (views_path, "agent_eval.v_agent_eval_and_finops_summary"),
-        (views_path, "agent_eval.v_capacity_hourly_burndown_export"),
+        (capacity_path, "agent_eval.v_capacity_hourly_burndown_export"),
     ):
         short_name = name.split(".", 1)[1]
         sql = _transpile_bq_view_to_sqlite(_extract_view_sql_text(path, name))
@@ -1398,7 +1401,7 @@ def _install_enterprise_views(conn: sqlite3.Connection) -> None:
 
 def test_pricing_empty_catalog_fallback_suffix_stripping_and_ddl_seed() -> None:
     """`v_trace_waterfall` with an empty catalog prices Argon/suffixed Argon at $0.175 and marks unknown NULL."""
-    ddl_text = (SQL_DIR / "ddl.sql").read_text(encoding="utf-8")
+    ddl_text = (SQL_DIR / "core" / "ddl.sql").read_text(encoding="utf-8")
     assert "MERGE INTO `agent_eval.model_pricing_catalog`" in ddl_text
     for sku in (
         "gemini-3.5-flash-lite",
@@ -1546,7 +1549,7 @@ def test_pricing_empty_catalog_fallback_suffix_stripping_and_ddl_seed() -> None:
 
 
 def test_shipped_enterprise_views_value_parity_dedup_and_latest_verdict() -> None:
-    """Transpiled `sql/views.sql` matches Python Rogan-Gladen & SQLite twin, dedups, and uses latest verdict."""
+    """Transpiled `sql/core/views.sql` matches Python Rogan-Gladen & SQLite twin, dedups, and uses latest verdict."""
     conn = _new_sqlite_bq_conn()
     _create_enterprise_sqlite_fixture(conn)
     _install_enterprise_views(conn)
@@ -1828,7 +1831,7 @@ def test_unclassified_traffic_type_included_in_total_spend_and_coverage() -> Non
 
 def test_daily_quota_guard_no_config_fanout_and_engine_b_quota_trip() -> None:
     """`v_step2_daily_quota_status` ignores extra config rows, retains billed retries, and trips on Engine B."""
-    quota_path = SQL_DIR / "step3_daily_quota_guard.sql"
+    quota_path = SQL_DIR / "core" / "step3_daily_quota_guard.sql"
     quota_sql = quota_path.read_text(encoding="utf-8")
     assert "CREATE OR REPLACE PROCEDURE `agent_eval.run_daily_quota_guarded_judge`" in quota_sql
     assert "app_cumulative_tokens <= app_remaining_today" in quota_sql
@@ -2000,7 +2003,7 @@ def test_daily_quota_guard_no_config_fanout_and_engine_b_quota_trip() -> None:
 
 def test_deterministic_traffic_type_unjudged_rubric_and_multi_rubric_filter() -> None:
     """Explicit `finops_traffic_type` priority, `'groundedness_4pt_v1'` unjudged label, and multi-rubric parity."""
-    views_text = (SQL_DIR / "views.sql").read_text(encoding="utf-8")
+    views_text = (SQL_DIR / "core" / "views.sql").read_text(encoding="utf-8")
     assert "ANY_VALUE(w.finops_traffic_type)" not in views_text
     assert "MAX(w.finops_traffic_type) AS primary_traffic_type" not in views_text
     assert "WHEN 'production_inference' THEN 1" in views_text
@@ -2177,9 +2180,9 @@ def test_sql_pricing_constants_match_python_default_model_skus() -> None:
         for p in sorted((REPO_ROOT / "bq_eval").rglob("*.py"))
         if "def compute_span_cost_usd(" in p.read_text(encoding="utf-8")
     ]
-    assert cost_defs == ["bq_eval/engine/finops.py"]
+    assert cost_defs == ["bq_eval/core/engine/cost.py"]
 
-    ddl_text = (SQL_DIR / "ddl.sql").read_text(encoding="utf-8")
+    ddl_text = (SQL_DIR / "core" / "ddl.sql").read_text(encoding="utf-8")
     select_sku_re = re.compile(
         r"SELECT\s+'([^']+)'(?:\s+AS\s+model_name)?,\s*"
         r"'([^']+)'(?:\s+AS\s+provider)?,\s*"
@@ -2240,23 +2243,23 @@ def test_sql_pricing_constants_match_python_default_model_skus() -> None:
             abs=1e-12,
         )
 
-    views_text = (SQL_DIR / "views.sql").read_text(encoding="utf-8")
+    views_text = (SQL_DIR / "core" / "views.sql").read_text(encoding="utf-8")
     assert "CASE REGEXP_REPLACE(" not in views_text, (
-        "sql/views.sql must join v_default_model_pricing instead of duplicating CASE pricing ladders"
+        "sql/core/views.sql must join v_default_model_pricing instead of duplicating CASE pricing ladders"
     )
 
     default_pricing_sql = _transpile_bq_view_to_sqlite(
         _extract_view_sql_text(
-            SQL_DIR / "step1_trace_views.sql", "agent_eval.v_default_model_pricing"
+            SQL_DIR / "core" / "step1_trace_views.sql", "agent_eval.v_default_model_pricing"
         )
     )
     step1_wf = _transpile_bq_view_to_sqlite(
         _extract_view_sql_text(
-            SQL_DIR / "step1_trace_views.sql", "agent_eval.v_step1_trace_waterfall"
+            SQL_DIR / "core" / "step1_trace_views.sql", "agent_eval.v_step1_trace_waterfall"
         )
     )
     ent_wf = _transpile_bq_view_to_sqlite(
-        _extract_view_sql_text(SQL_DIR / "views.sql", "agent_eval.v_trace_waterfall")
+        _extract_view_sql_text(SQL_DIR / "core" / "views.sql", "agent_eval.v_trace_waterfall")
     )
     conn = _new_sqlite_bq_conn()
     _create_enterprise_sqlite_fixture(conn)
@@ -2328,7 +2331,7 @@ def test_sql_pricing_constants_match_python_default_model_skus() -> None:
 
 def test_counterparty_classification_uses_explicit_flag_not_app_id_substring() -> None:
     """An internal app named `external-facing-chat` stays in CPVO; explicit flags route to `v_counterparty_spend`."""
-    views_text = (SQL_DIR / "views.sql").read_text(encoding="utf-8")
+    views_text = (SQL_DIR / "core" / "views.sql").read_text(encoding="utf-8")
     assert "LIKE '%external%'" not in views_text
 
     conn = _new_sqlite_bq_conn()
@@ -2448,7 +2451,7 @@ def test_bq_dry_run_sqlglot_splitter_and_bqaa_chronological_app_id() -> None:
     assert '"col;semi"' in parts[0]
     assert "CREATE OR REPLACE VIEW" in parts[1]
 
-    bqaa_sql = (SQL_DIR / "bqaa_adapter_views.sql").read_text(encoding="utf-8")
+    bqaa_sql = (SQL_DIR / "core" / "bqaa_adapter_views.sql").read_text(encoding="utf-8")
     assert "IGNORE NULLS ORDER BY timestamp ASC, event_id ASC LIMIT 1" in bqaa_sql
     assert (
         "REGEXP_CONTAINS(LOWER(COALESCE(error_message, '')), r'timeout|timed\\s*out|503|504')"
@@ -2494,7 +2497,7 @@ def test_bq_dry_run_sqlglot_splitter_and_bqaa_chronological_app_id() -> None:
 
     payload_view_sql = _transpile_bq_view_to_sqlite(
         _extract_view_sql_text(
-            SQL_DIR / "bqaa_adapter_views.sql", "agent_eval.v_bqaa_trace_payloads"
+            SQL_DIR / "core" / "bqaa_adapter_views.sql", "agent_eval.v_bqaa_trace_payloads"
         )
     )
     conn = _new_sqlite_bq_conn()

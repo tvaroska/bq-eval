@@ -8,11 +8,12 @@ from pathlib import Path
 
 import pytest
 
-from bq_eval.cli import main as cli_main
-from bq_eval.contract.otel import FinOpsTrafficType, GenAISpanKind, OTelGenAISpanRecord
-from bq_eval.contract.results import ScenarioCorpusBundle
-from bq_eval.engine import finops
-from bq_eval.showcase.golden_seeds import build_golden_seed_templates
+from bq_eval.cli.app import main as cli_main
+from bq_eval.core.contract.otel import FinOpsTrafficType, GenAISpanKind, OTelGenAISpanRecord
+from bq_eval.core.engine import cost as finops_cost
+from bq_eval.demo.contract.results import ScenarioCorpusBundle
+from bq_eval.demo.golden_seeds import build_golden_seed_templates
+from bq_eval.finops.engine import spend as finops_spend
 from tests.test_sql_contracts import (
     ENTERPRISE_OTEL_SPANS_BASE_INSERT,
     REPO_ROOT,
@@ -164,13 +165,14 @@ def test_dynamic_scenario_file_computes_roi_pareto_pt_valley_and_hourly_chargeba
 
 def test_app_registry_worm_storage_parameterization_and_dark_loc_removals() -> None:
     """`app_registry.storage_usd_per_outcome` parameterizes WORM storage; deleted dark artifacts stay gone."""
-    assert not hasattr(finops, "compute_default_span_cost_usd")
+    assert not hasattr(finops_cost, "compute_default_span_cost_usd")
+    assert not hasattr(finops_spend, "compute_default_span_cost_usd")
     assert not (SQL_DIR / "demo_docubridge_extensions.sql").exists()
     assert not (REPO_ROOT / "bq_eval" / "showcase" / "seeds_banking.py").exists()
     assert not (REPO_ROOT / "bq_eval" / "showcase" / "seeds_claims.py").exists()
 
     # Single-source seed parity: every template in golden_seeds.py appears in demo_time_shift_loadgen.sql.
-    loadgen_sql = (SQL_DIR / "demo_time_shift_loadgen.sql").read_text(encoding="utf-8")
+    loadgen_sql = (SQL_DIR / "demo" / "demo_time_shift_loadgen.sql").read_text(encoding="utf-8")
     templates = build_golden_seed_templates()
     assert len(templates) == 16
     for tmpl in templates:

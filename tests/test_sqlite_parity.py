@@ -10,13 +10,10 @@ from pathlib import Path
 
 import pytest
 
-from bq_eval.contract.otel import FinOpsTrafficType, GenAISpanKind, OTelGenAISpanRecord
-from bq_eval.contract.results import ConfusionMatrix
-from bq_eval.engine.finops import diagnose_prefix_cache_dilution
-from bq_eval.engine.sql_eval import (
-    evaluate_all_rubrics_in_sqlite,
-    evaluate_traces_in_sqlite,
-)
+from bq_eval.core.contract.otel import FinOpsTrafficType, GenAISpanKind, OTelGenAISpanRecord
+from bq_eval.core.contract.results import ConfusionMatrix
+from bq_eval.core.engine.sql_eval import evaluate_all_rubrics_in_sqlite, evaluate_traces_in_sqlite
+from bq_eval.finops.engine.spend import diagnose_prefix_cache_dilution
 from tests.conftest import make_span
 from tests.test_sql_contracts import (
     ENTERPRISE_EVAL_RESULTS_BASE_INSERT,
@@ -302,7 +299,7 @@ def test_sqlite_v_outcomes_ordering_step2_all_pass_counterparty_and_multi_rubric
 
 def test_real_p95_and_latest_array_agg_plus_strict_judge_pricing() -> None:
     """Transpiled `APPROX_QUANTILES` computes real P95 (not MAX), `ARRAY_AGG DESC` picks latest, and unknown judge returns NULL."""
-    views_sql = (SQL_DIR / "views.sql").read_text(encoding="utf-8")
+    views_sql = (SQL_DIR / "core" / "views.sql").read_text(encoding="utf-8")
     assert "ELSE 0.15" not in views_sql
     assert "ELSE 0.60" not in views_sql
 
@@ -431,11 +428,11 @@ def test_prefix_cache_dilution_direction_and_wif_collector_attribute() -> None:
 
 
 def test_value_parity_step1_step2_xml_escaping_step3_runs_and_ddl_views() -> None:
-    """Execute transpiled `v_step1_trace_eval`, `v_step2_all_trace_rubric_prompts`, `v_step3_eval_runs`, and `sql/ddl.sql` views."""
-    ddl_path = SQL_DIR / "ddl.sql"
-    step1_path = SQL_DIR / "step1_trace_views.sql"
-    step2_path = SQL_DIR / "step2_stateless_eval.sql"
-    step3_path = SQL_DIR / "step3_saved_results.sql"
+    """Execute transpiled `v_step1_trace_eval`, `v_step2_all_trace_rubric_prompts`, `v_step3_eval_runs`, and `sql/core/ddl.sql` views."""
+    ddl_path = SQL_DIR / "core" / "ddl.sql"
+    step1_path = SQL_DIR / "core" / "step1_trace_views.sql"
+    step2_path = SQL_DIR / "core" / "step2_stateless_eval.sql"
+    step3_path = SQL_DIR / "core" / "step3_saved_results.sql"
 
     conn = _new_sqlite_bq_conn()
     conn.execute(

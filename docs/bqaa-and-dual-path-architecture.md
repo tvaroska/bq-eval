@@ -1,7 +1,7 @@
 # Dual-Path Architecture: Light Capture (`BQAA`) + Full Capture (`OTel` `_AllSpans`)
 
 > **Architecture Reference (`docs/bqaa-and-dual-path-architecture.md`)**
-> Documents the **Dual-Path Capture -> Single Evaluation & FinOps Engine** architecture in **BQ Eval & FinOps (`bq-eval`)**: runtime trade-offs (`Agent Runtime` vs. `Cloud Run` vs. `Non-GCP`), App Hub linkage mechanics, `AI.EVALUATE_AGENT` integration alongside `AI.GENERATE_TABLE`, zero-copy SQL adapters ([`sql/bqaa_adapter_views.sql`](../sql/bqaa_adapter_views.sql)), and resolved `M5` design decisions.
+> Documents the **Dual-Path Capture -> Single Evaluation & FinOps Engine** architecture in **BQ Eval & FinOps (`bq-eval`)**: runtime trade-offs (`Agent Runtime` vs. `Cloud Run` vs. `Non-GCP`), App Hub linkage mechanics, `AI.EVALUATE_AGENT` integration alongside `AI.GENERATE_TABLE`, zero-copy SQL adapters ([`sql/core/bqaa_adapter_views.sql`](../sql/core/bqaa_adapter_views.sql)), and resolved `M5` design decisions.
 
 ---
 
@@ -27,7 +27,7 @@ Standard OpenTelemetry (`telemetry.googleapis.com` -> `_Trace._AllSpans`) is ide
 
 ### 1.2 The Dual-Path Architecture ("Light Capture from `BQAA`, Full Capture from `OTel`")
 
-Instead of forcing every team onto one ingestion mechanism, **BQ Eval & FinOps (`bq-eval`)** sits on top of **both** capture lanes through its unified compatibility views (`agent_eval.otel_spans` and `agent_eval.trace_payloads` in [`sql/ddl.sql`](../sql/ddl.sql) and [`sql/bqaa_adapter_views.sql`](../sql/bqaa_adapter_views.sql)):
+Instead of forcing every team onto one ingestion mechanism, **BQ Eval & FinOps (`bq-eval`)** sits on top of **both** capture lanes through its unified compatibility views (`agent_eval.otel_spans` and `agent_eval.trace_payloads` in [`sql/core/ddl.sql`](../sql/core/ddl.sql) and [`sql/core/bqaa_adapter_views.sql`](../sql/core/bqaa_adapter_views.sql)):
 
 ```mermaid
 flowchart TB
@@ -39,7 +39,7 @@ flowchart TB
     A2["Multi-Agent Fleet & Gateways\n(Agent Runtime, Cloud Run, GKE, WIF Collector)"] -->|"OTLP + App Hub Server Stamp\n+ W3C Baggage (outcome.id)"| T2[("obs_traces._AllSpans\n+ obs_logs._AllLogs + GCS completions")]
   end
 
-  subgraph ADAPTER["Unified Compatibility View Layer (sql/ddl.sql + sql/bqaa_adapter_views.sql)"]
+  subgraph ADAPTER["Unified Compatibility View Layer (sql/core/ddl.sql + sql/core/bqaa_adapter_views.sql)"]
     V["agent_eval.otel_spans & agent_eval.trace_payloads\n(Light Capture, Full Capture, or Hybrid UNION ALL)"]
   end
 
@@ -143,7 +143,7 @@ flowchart TB
 | **Candidate Tool Declarations** | Full OpenAPI tool schemas in `attributes.tools` on `LLM_REQUEST` (enables `AgentData` reconstruction) | Not captured in standard OTel spans (only invoked `gen_ai.tool.name` is recorded) |
 | **Multi-Agent Outcome Attribution (`EVAL-P11`)** | `attributes.custom_metadata."outcome.id"` (`NULL` when absent so shadow workloads surface in `v_attribution_coverage`) + `OUTCOME_CLOSED` event | Cross-service W3C `baggage` (`outcome.id`, `outcome.owner`) + zero-duration `outcome.closed` span |
 
-See [`sql/bqaa_adapter_views.sql`](../sql/bqaa_adapter_views.sql) for the production SQL definitions (`v_bqaa_otel_spans`, `v_bqaa_trace_payloads`, `v_bqaa_eval_turn_filtered`, and the Light / Full / Hybrid mode switchboard) and [`bq_eval/engine/bqaa.py`](../bq_eval/engine/bqaa.py) for the deterministic Python twin.
+See [`sql/core/bqaa_adapter_views.sql`](../sql/core/bqaa_adapter_views.sql) for the production SQL definitions (`v_bqaa_otel_spans`, `v_bqaa_trace_payloads`, `v_bqaa_eval_turn_filtered`, and the Light / Full / Hybrid mode switchboard) and [`bq_eval/core/engine/bqaa.py`](../bq_eval/core/engine/bqaa.py) for the deterministic Python twin.
 
 ---
 
@@ -152,4 +152,4 @@ See [`sql/bqaa_adapter_views.sql`](../sql/bqaa_adapter_views.sql) for the produc
 1. **Repository Slug & Title**: Keep repository slug **`bq-eval`** (`tvaroska/bq-eval`) for zero downstream consumer churn while retitling to **BQ Eval & FinOps** across docs, CLI, and scorecards.
 2. **Capture Lane Terminology**: Standardize on **Light Capture (`BQAA`)** vs. **Full Capture (`OTel`)** everywhere (avoiding lettered capture-lane labels that collide with application-level `Path-A` A2A vs. `Path-B` PDF workflow lanes).
 3. **Strict `ADR-003` `'unregistered_app'` Fallback in `BQAA`**: Neither `v_bqaa_otel_spans.gcp_apphub_application_id` nor `outcome_owner` falls back to self-reported `adk.app_name`, `root_agent_name`, or `agent`; unregistered workloads without explicit `custom_metadata` App Hub tags (or `_AllSpans` server-stamped join) surface strictly under `'unregistered_app'`.
-4. **Dual Judge Engine Packaging**: Ship [`sql/bqaa_adapter_views.sql`](../sql/bqaa_adapter_views.sql) (`v_bqaa_eval_turn_filtered`) alongside `build_ai_evaluate_agent_sql()` (`bq-eval judge-sql --engine evaluate-agent`) so Step-1 `$0` SQL pre-filtering and `FARM_FINGERPRINT` sampling apply equally to `AI.GENERATE_TABLE` and `AI.EVALUATE_AGENT`.
+4. **Dual Judge Engine Packaging**: Ship [`sql/core/bqaa_adapter_views.sql`](../sql/core/bqaa_adapter_views.sql) (`v_bqaa_eval_turn_filtered`) alongside `build_ai_evaluate_agent_sql()` (`bq-eval judge-sql --engine evaluate-agent`) so Step-1 `$0` SQL pre-filtering and `FARM_FINGERPRINT` sampling apply equally to `AI.GENERATE_TABLE` and `AI.EVALUATE_AGENT`.

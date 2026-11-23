@@ -10,7 +10,7 @@ from pathlib import Path
 import sqlglot
 from sqlglot import exp
 
-from bq_eval.engine.sql_eval import build_ai_generate_table_judge_sql
+from bq_eval.core.engine.sql_eval import build_ai_generate_table_judge_sql
 from scripts import bq_dry_run
 
 REPO_ROOT = Path(__file__).resolve().parent.parent

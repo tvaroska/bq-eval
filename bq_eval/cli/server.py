@@ -11,9 +11,9 @@ from pathlib import Path
 from typing import cast
 from urllib.parse import parse_qs, urlparse
 
-from bq_eval.contract.results import ShowcaseRunArtifacts
-from bq_eval.showcase.pipeline import CorpusChoice, format_demo_json, run_showcase_pipeline
-from bq_eval.showcase.render.renderer import render_html_scorecard, workbench_csp_header
+from bq_eval.demo.contract.results import ShowcaseRunArtifacts
+from bq_eval.demo.pipeline import CorpusChoice, format_demo_json, run_showcase_pipeline
+from bq_eval.demo.render.renderer import render_html_scorecard, workbench_csp_header
 
 _VALID_CORPORA: frozenset[str] = frozenset({"m2-live", "golden-4app", "retail-2app"})
 

@@ -16,9 +16,10 @@ from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from bq_eval.contract.otel import FinOpsTrafficType, GenAISpanKind, OTelGenAISpanRecord
-from bq_eval.contract.results import (
-    ConfusionMatrix,
+from bq_eval.core.contract.otel import FinOpsTrafficType, GenAISpanKind, OTelGenAISpanRecord
+from bq_eval.core.contract.results import ConfusionMatrix
+from bq_eval.core.engine.cost import compute_span_cost_usd
+from bq_eval.demo.contract.results import (
     LiveAttributionCohortReceipt,
     LiveFleetReceipt,
     LiveKycCohortReceipt,
@@ -26,7 +27,6 @@ from bq_eval.contract.results import (
     LiveSkillLineageReceipt,
     ScenarioCorpusBundle,
 )
-from bq_eval.engine.finops import compute_span_cost_usd
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 RESULTS_DIR = REPO_ROOT / "benchmarks" / "results"

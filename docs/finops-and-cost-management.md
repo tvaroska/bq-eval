@@ -7,7 +7,7 @@ Raw token counts (`input_tokens + output_tokens`) fail to reflect accelerator co
 - **Autoregressive Decoding & Reasoning (`4.0x` / `7.5x`):** Output tokens and internal `<thought>` (`thinking_tokens`) are memory-bandwidth bound during decoding and billed at the output multiplier.
 - **`>200K` Context Cliff:** Spans whose total prompt context (`input_tokens`, inclusive of `cached_input_tokens`) exceeds `200,000` tokens trigger higher attention memory footprint and long-context pricing tiers.
 
-Both [`sql/views.sql`](../sql/views.sql), [`bq_eval/contract/otel.py`](../bq_eval/contract/otel.py) (`compute_weighted_burndown_tokens()`), and [`bq_eval/engine/finops.py`](../bq_eval/engine/finops.py) (`compute_span_cost_usd()`) compute weighted burndown and cliff-aware USD cost at the **individual span level** before aggregating to the trace:
+Both [`sql/core/views.sql`](../sql/core/views.sql), [`bq_eval/core/contract/otel.py`](../bq_eval/core/contract/otel.py) (`compute_weighted_burndown_tokens()`), and [`bq_eval/finops/engine/spend.py`](../bq_eval/finops/engine/spend.py) (`compute_span_cost_usd()`) compute weighted burndown and cliff-aware USD cost at the **individual span level** before aggregating to the trace:
 
 $$
 W_{\text{span}} = \begin{cases}
@@ -67,6 +67,6 @@ Model routing should never trade away factual integrity for lower token cost. `c
 
 ## 6. FOCUS 1.2 Two-Pool Chargeback & Off-Peak PT Batch-Eval Water-Filling
 
-**`bq-eval` is the missing Silver/Gold attribution layer between raw AI telemetry and Cloud Billing FOCUS 1.2.** Cloud Billing exports stop at SKU and reservation rows with blank application labels and no `Prod` vs. `Eval` split. For organizations running reserved Provisioned Throughput (`PT` / `GSU` commitments) alongside Pay-As-You-Go (`PAYG`) overflow, [`bq_eval/engine/finops.py`](../bq_eval/engine/finops.py) and `v_capacity_hourly_burndown_export` in [`sql/views.sql`](../sql/views.sql) export hourly weighted burndown directly to the `capacity` planner:
+**`bq-eval` is the missing Silver/Gold attribution layer between raw AI telemetry and Cloud Billing FOCUS 1.2.** Cloud Billing exports stop at SKU and reservation rows with blank application labels and no `Prod` vs. `Eval` split. For organizations running reserved Provisioned Throughput (`PT` / `GSU` commitments) alongside Pay-As-You-Go (`PAYG`) overflow, [`bq_eval/finops/engine/spend.py`](../bq_eval/finops/engine/spend.py) and `v_capacity_hourly_burndown_export` in [`sql/core/views.sql`](../sql/core/views.sql) export hourly weighted burndown directly to the `capacity` planner:
 1. **FOCUS 1.2 Two-Pool Attribution (`allocate_focus_two_pool_chargeback`):** Splits `reserved_pt_fixed_cost_usd` into **Utilized PT Cost** (allocated proportional to each app's active weighted burndown) and **Unutilized Idle Capacity Tax** (attributed to the central platform/reservation owner so tenant apps are never penalized for off-peak idle hours), rendered directly in Markdown and HTML executive scorecards.
 2. **Off-Peak PT Water-Filling (`plan_off_peak_eval_schedule`):** Identifies hourly valleys between reserved PT capacity and live production demand, scheduling `agent_gym_eval` and batch `autorater_judge` workloads into zero-marginal-cost idle PT slots.

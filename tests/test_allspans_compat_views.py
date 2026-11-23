@@ -5,7 +5,7 @@ Observability Analytics linked datasets (`obs_traces._AllSpans` and
 `obs_logs._AllLogs` joined with the `completions` BigLake external table):
 
 1. `agent_eval.otel_spans` and `agent_eval.trace_payloads` are defined in
-   `sql/ddl.sql` as `CREATE OR REPLACE VIEW` over the linked datasets rather than
+   `sql/core/ddl.sql` as `CREATE OR REPLACE VIEW` over the linked datasets rather than
    custom-ingested physical tables.
 2. `agent_eval.otel_spans` projects all 25 mapped columns required by Step-1/Step-2
    views plus outcome attribution (`span_name` <- `name`, `outcome_id` <-
@@ -14,7 +14,7 @@ Observability Analytics linked datasets (`obs_traces._AllSpans` and
    `v_cost_per_verified_outcome`, `v_attribution_coverage`, and
    `v_otel_spans_coverage`) are defined in `sql/`.
 4. Synthetic seed tables (`seed_otel_spans`, `seed_trace_payloads`) and
-   `sql/demo_time_shift_loadgen.sql` are isolated to dataset `agent_eval_seed`,
+   `sql/demo/demo_time_shift_loadgen.sql` are isolated to dataset `agent_eval_seed`,
    never writing synthetic rows into `agent_eval`.
 """
 
@@ -30,30 +30,30 @@ SQL_DIR = REPO_ROOT / "sql"
 
 
 def _all_sql_text() -> str:
-    return "\n".join(p.read_text(encoding="utf-8") for p in sorted(SQL_DIR.glob("*.sql")))
+    return "\n".join(p.read_text(encoding="utf-8") for p in sorted(SQL_DIR.rglob("*.sql")))
 
 
 def test_otel_spans_and_trace_payloads_are_views_over_linked_datasets() -> None:
     """`ddl.sql` defines `otel_spans` and `trace_payloads` as views over `_AllSpans` and `_AllLogs`."""
-    ddl = (SQL_DIR / "ddl.sql").read_text(encoding="utf-8")
+    ddl = (SQL_DIR / "core" / "ddl.sql").read_text(encoding="utf-8")
 
     assert re.search(
         r"CREATE\s+OR\s+REPLACE\s+VIEW\s+`?(?:[a-zA-Z0-9_.-]+\.)?agent_eval\.otel_spans`?",
         ddl,
         re.IGNORECASE,
-    ), "agent_eval.otel_spans must be a CREATE OR REPLACE VIEW in sql/ddl.sql"
+    ), "agent_eval.otel_spans must be a CREATE OR REPLACE VIEW in sql/core/ddl.sql"
     assert not re.search(
         r"CREATE\s+TABLE(?:\s+IF\s+NOT\s+EXISTS)?\s+`?(?:[a-zA-Z0-9_.-]+\.)?agent_eval\.otel_spans`?",
         ddl,
         re.IGNORECASE,
-    ), "agent_eval.otel_spans must not be a physical CREATE TABLE in sql/ddl.sql"
+    ), "agent_eval.otel_spans must not be a physical CREATE TABLE in sql/core/ddl.sql"
     assert "_AllSpans" in ddl, "otel_spans view must read from obs_traces._AllSpans"
 
     assert re.search(
         r"CREATE\s+OR\s+REPLACE\s+VIEW\s+`?(?:[a-zA-Z0-9_.-]+\.)?agent_eval\.trace_payloads`?",
         ddl,
         re.IGNORECASE,
-    ), "agent_eval.trace_payloads must be a CREATE OR REPLACE VIEW in sql/ddl.sql"
+    ), "agent_eval.trace_payloads must be a CREATE OR REPLACE VIEW in sql/core/ddl.sql"
     assert "_AllLogs" in ddl, "trace_payloads view must read from obs_logs._AllLogs"
     assert "completions" in ddl and "_FILE_NAME" in ddl, (
         "trace_payloads view must join _AllLogs with BigLake completions on _FILE_NAME"
@@ -62,7 +62,7 @@ def test_otel_spans_and_trace_payloads_are_views_over_linked_datasets() -> None:
 
 def test_otel_spans_compat_view_projects_all_columns() -> None:
     """`agent_eval.v_otel_allspans_only` & `agent_eval.otel_spans` map all required `_AllSpans` columns."""
-    ddl = (SQL_DIR / "ddl.sql").read_text(encoding="utf-8")
+    ddl = (SQL_DIR / "core" / "ddl.sql").read_text(encoding="utf-8")
 
     wrapper_match = re.search(
         r"CREATE\s+OR\s+REPLACE\s+VIEW\s+`?(?:[a-zA-Z0-9_.-]+\.)?agent_eval\.otel_spans`?\s+AS(.*?);",
@@ -123,7 +123,7 @@ def test_outcome_and_coverage_views_defined() -> None:
 
 def test_synthetic_seed_and_loadgen_isolated_to_agent_eval_seed() -> None:
     """Synthetic golden seed tables and loadgen target `agent_eval_seed`, not `agent_eval`."""
-    loadgen_sql = (SQL_DIR / "demo_time_shift_loadgen.sql").read_text(encoding="utf-8")
+    loadgen_sql = (SQL_DIR / "demo" / "demo_time_shift_loadgen.sql").read_text(encoding="utf-8")
 
     assert "agent_eval_seed" in loadgen_sql, (
         "demo_time_shift_loadgen.sql must write synthetic rows to dataset agent_eval_seed"

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
-from bq_eval.contract.otel import (
+from bq_eval.core.contract.otel import (
     FinOpsTrafficType,
     GenAISpanKind,
     OTelGenAISpanRecord,

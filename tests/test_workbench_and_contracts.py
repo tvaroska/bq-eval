@@ -12,33 +12,31 @@ from pathlib import Path
 import pytest
 
 from bq_eval import __version__
-from bq_eval.cli import create_workbench_server
-from bq_eval.cli import main as cli_main
-from bq_eval.contract.otel import GenAISpanKind
-from bq_eval.contract.results import (
-    FocusChargebackRow,
-    ShowcaseRunArtifacts,
-)
-from bq_eval.contract.rubrics import CANONICAL_RUBRICS, build_autorater_system_prompt
-from bq_eval.engine.finops import (
-    allocate_focus_hourly_chargeback,
-    diagnose_prefix_cache_dilution,
-    plan_off_peak_eval_schedule,
-)
-from bq_eval.engine.sql_eval import evaluate_hourly_burndown_in_sqlite
-from bq_eval.showcase.loadgen import (
+from bq_eval.cli.app import main as cli_main
+from bq_eval.cli.server import create_workbench_server
+from bq_eval.core.contract.otel import GenAISpanKind
+from bq_eval.core.contract.rubrics import CANONICAL_RUBRICS, build_autorater_system_prompt
+from bq_eval.demo.contract.results import ShowcaseRunArtifacts
+from bq_eval.demo.loadgen import (
     evaluate_time_shifted_corpus,
     export_time_shifted_jsonl,
     generate_time_shifted_corpus,
 )
-from bq_eval.showcase.pipeline import (
+from bq_eval.demo.pipeline import (
     DEFAULT_M2_RECEIPT_PATH,
     DEFAULT_M2_SHA256_PATH,
     build_retail_2app_bundle,
     run_showcase_pipeline,
     verify_receipt_sha256,
 )
-from bq_eval.showcase.render.renderer import render_html_scorecard
+from bq_eval.demo.render.renderer import render_html_scorecard
+from bq_eval.finops.contract.results import FocusChargebackRow
+from bq_eval.finops.engine.spend import (
+    allocate_focus_hourly_chargeback,
+    diagnose_prefix_cache_dilution,
+    plan_off_peak_eval_schedule,
+)
+from bq_eval.finops.engine.sqlite_capacity import evaluate_hourly_burndown_in_sqlite
 from tests.conftest import make_span
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -182,8 +180,8 @@ def test_m2_live_receipt_sha256_manifest_and_custom_scenario_replay(
     assert receipt.kyc_cohort.po_box_step1_traps_caught == 8
     assert receipt.kyc_cohort.ocr_step1_rejects == 8
 
-    from bq_eval.showcase.render.renderer import render_page_view_html
-    from bq_eval.showcase.render.view import build_showcase_page_view
+    from bq_eval.demo.render.renderer import render_page_view_html
+    from bq_eval.demo.render.view import build_showcase_page_view
 
     workbench_html = render_page_view_html(build_showcase_page_view(m2_artifacts, live_api=False))
     assert "28 structural + 8 PO Box + 8 OCR" in workbench_html
@@ -204,7 +202,7 @@ def test_m2_live_receipt_sha256_manifest_and_custom_scenario_replay(
     assert kyc_sum.outcome_cost_per_verified_ai_usd is not None
     assert kyc_sum.outcome_cost_per_verified_usd > kyc_sum.outcome_cost_per_verified_ai_usd
 
-    from bq_eval.showcase.pipeline import render_markdown_report
+    from bq_eval.demo.pipeline import render_markdown_report
 
     md_report = render_markdown_report(m2_artifacts)
     assert "## 5. Reconstructed Fleet Cohort Receipts" in md_report
@@ -363,7 +361,7 @@ def test_docubridge_canonical_select_views_contract() -> None:
     conn = _new_sqlite_bq_conn()
     _create_enterprise_sqlite_fixture(conn)
     _install_enterprise_views(conn)
-    step1_path = REPO_ROOT / "sql" / "step1_trace_views.sql"
+    step1_path = REPO_ROOT / "sql" / "core" / "step1_trace_views.sql"
     for extra_view in ("agent_eval.v_cost_per_verified_outcome", "agent_eval.v_skill_lineage_roi"):
         short = extra_view.split(".", 1)[1]
         sql = _transpile_bq_view_to_sqlite(_extract_view_sql_text(step1_path, extra_view))

@@ -10,15 +10,15 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from bq_eval.contract.otel import OTelGenAISpanRecord
-from bq_eval.contract.results import LiveFleetReceipt, ScenarioCorpusBundle, ShowcaseRunArtifacts
-from bq_eval.contract.rubrics import CANONICAL_RUBRICS
-from bq_eval.engine.finops import compute_span_cost_usd
-from bq_eval.showcase.pipeline import (
-    format_demo_json,
-    load_m2_live_bundle,
-    run_showcase_pipeline,
+from bq_eval.core.contract.otel import OTelGenAISpanRecord
+from bq_eval.core.contract.rubrics import CANONICAL_RUBRICS
+from bq_eval.core.engine.cost import compute_span_cost_usd
+from bq_eval.demo.contract.results import (
+    LiveFleetReceipt,
+    ScenarioCorpusBundle,
+    ShowcaseRunArtifacts,
 )
+from bq_eval.demo.pipeline import format_demo_json, load_m2_live_bundle, run_showcase_pipeline
 from scripts import bq_dry_run
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -238,7 +238,9 @@ def test_rubric_count_and_names_match_docs_csv_and_code() -> None:
     expected_count = len(CANONICAL_RUBRICS)
     assert expected_count == 8
 
-    with (REPO_ROOT / "sql" / "step2_rubrics.csv").open("r", encoding="utf-8", newline="") as f:
+    with (REPO_ROOT / "sql" / "core" / "step2_rubrics.csv").open(
+        "r", encoding="utf-8", newline=""
+    ) as f:
         csv_rows = list(csv.DictReader(f))
     assert len(csv_rows) == expected_count
 

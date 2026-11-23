@@ -9,50 +9,43 @@ from pathlib import Path
 
 import pytest
 
-from bq_eval.cli import main as cli_main
-from bq_eval.contract.otel import (
-    compute_weighted_burndown_tokens,
-    resolve_application_id,
-)
-from bq_eval.contract.results import (
-    ConfusionMatrix,
-    ModelOption,
-    ShowcaseRunArtifacts,
-    SQLTraceEvalSummary,
-)
-from bq_eval.contract.rubrics import CANONICAL_RUBRICS, wrap_untrusted_text
-from bq_eval.engine.calibration import (
+from bq_eval.cli.app import main as cli_main
+from bq_eval.core.contract.otel import compute_weighted_burndown_tokens, resolve_application_id
+from bq_eval.core.contract.results import ConfusionMatrix, SQLTraceEvalSummary
+from bq_eval.core.contract.rubrics import CANONICAL_RUBRICS, wrap_untrusted_text
+from bq_eval.core.engine.calibration import (
     compute_confusion_matrix,
     compute_gwet_ac2,
     rogan_gladen_calibrate,
 )
-from bq_eval.engine.finops import (
+from bq_eval.core.engine.sql_eval import (
+    build_ai_generate_table_judge_sql,
+    evaluate_traces_in_sqlite,
+)
+from bq_eval.demo.contract.results import ShowcaseRunArtifacts
+from bq_eval.demo.golden_seeds import build_golden_seed_templates
+from bq_eval.demo.loadgen import evaluate_time_shifted_corpus, generate_time_shifted_corpus
+from bq_eval.demo.pipeline import render_markdown_report, run_showcase_pipeline
+from bq_eval.demo.render.renderer import render_html_scorecard, write_html_scorecard
+from bq_eval.finops.contract.results import ModelOption
+from bq_eval.finops.engine.spend import (
     allocate_focus_two_pool_chargeback,
     compute_eval_finops_roi,
     compute_pareto_frontier,
     diagnose_prefix_cache_dilution,
     plan_off_peak_eval_schedule,
 )
-from bq_eval.engine.sql_eval import (
-    build_ai_generate_table_judge_sql,
-    evaluate_traces_in_sqlite,
-)
-from bq_eval.showcase.loadgen import (
-    build_golden_seed_templates,
-    evaluate_time_shifted_corpus,
-    generate_time_shifted_corpus,
-)
-from bq_eval.showcase.pipeline import render_markdown_report, run_showcase_pipeline
-from bq_eval.showcase.render.renderer import render_html_scorecard, write_html_scorecard
 from tests.conftest import make_span
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 def test_ddl_and_views_table_parity() -> None:
-    """Verify physical tables and compatibility views in `sql/ddl.sql` and `sql/views.sql`."""
-    ddl_sql = (REPO_ROOT / "sql" / "ddl.sql").read_text(encoding="utf-8")
-    views_sql = (REPO_ROOT / "sql" / "views.sql").read_text(encoding="utf-8")
+    """Verify physical tables and compatibility views in `sql/core/ddl.sql` and `sql/core/views.sql`."""
+    ddl_sql = (REPO_ROOT / "sql" / "core" / "ddl.sql").read_text(encoding="utf-8")
+    views_sql = (REPO_ROOT / "sql" / "core" / "views.sql").read_text(encoding="utf-8") + (
+        REPO_ROOT / "sql" / "finops" / "capacity_views.sql"
+    ).read_text(encoding="utf-8")
 
     expected_tables = {
         "agent_eval.app_registry",
@@ -501,14 +494,14 @@ def test_unjudged_and_low_ac2_scorecard_renders_fail_closed_without_pass_or_zero
 
 def test_progressive_step1_step2_step25_step3_pack() -> None:
     """Verify the progressive Step 1 -> Step 2 -> Step 2.5 Skill -> Step 3 SQL and CSV pack."""
-    step1_sql = (REPO_ROOT / "sql" / "step1_trace_views.sql").read_text(encoding="utf-8")
+    step1_sql = (REPO_ROOT / "sql" / "core" / "step1_trace_views.sql").read_text(encoding="utf-8")
     assert "CREATE OR REPLACE VIEW `agent_eval.v_step1_trace_waterfall`" in step1_sql
     assert "CREATE OR REPLACE VIEW `agent_eval.v_step1_trace_eval`" in step1_sql
     assert "CREATE OR REPLACE VIEW `agent_eval.v_step1_cost_per_outcome`" in step1_sql
     assert "step1_cost_per_outcome_usd" in step1_sql
     assert "unassigned_bu" in step1_sql
 
-    csv_path = REPO_ROOT / "sql" / "step2_rubrics.csv"
+    csv_path = REPO_ROOT / "sql" / "core" / "step2_rubrics.csv"
     with csv_path.open("r", encoding="utf-8", newline="") as f:
         rows = list(csv.DictReader(f))
     assert len(rows) == 8
@@ -516,7 +509,9 @@ def test_progressive_step1_step2_step25_step3_pack() -> None:
     assert rubric_ids == set(CANONICAL_RUBRICS)
     assert "contradiction_grounding_4pt_v1" in rubric_ids
     assert "pii_perturbation_invariance_4pt_v1" in rubric_ids
-    step2_sql = (REPO_ROOT / "sql" / "step2_stateless_eval.sql").read_text(encoding="utf-8")
+    step2_sql = (REPO_ROOT / "sql" / "core" / "step2_stateless_eval.sql").read_text(
+        encoding="utf-8"
+    )
     for r in rows:
         spec = CANONICAL_RUBRICS[r["rubric_id"]]
         assert r["title"] == spec.title
@@ -553,7 +548,7 @@ def test_progressive_step1_step2_step25_step3_pack() -> None:
         assert skills_link.is_symlink()
         assert skills_link.readlink().as_posix() == "../skills"
 
-    step3_sql = (REPO_ROOT / "sql" / "step3_saved_results.sql").read_text(encoding="utf-8")
+    step3_sql = (REPO_ROOT / "sql" / "core" / "step3_saved_results.sql").read_text(encoding="utf-8")
     assert "CREATE TABLE IF NOT EXISTS `agent_eval.eval_results`" in step3_sql
     assert "CREATE OR REPLACE VIEW `agent_eval.v_step3_eval_runs`" in step3_sql
     assert "CREATE OR REPLACE VIEW `agent_eval.v_step3_paired_run_comparison`" in step3_sql
@@ -627,7 +622,9 @@ def test_time_shift_loadgen_sql_and_cli_parity(tmp_path: Path) -> None:
     assert (jsonl_dir / "otel_spans.jsonl").is_file()
     assert (jsonl_dir / "trace_payloads.jsonl").is_file()
 
-    loadgen_sql = (REPO_ROOT / "sql" / "demo_time_shift_loadgen.sql").read_text(encoding="utf-8")
+    loadgen_sql = (REPO_ROOT / "sql" / "demo" / "demo_time_shift_loadgen.sql").read_text(
+        encoding="utf-8"
+    )
     assert "CREATE OR REPLACE TABLE `agent_eval_seed.seed_otel_spans`" in loadgen_sql
     assert "CREATE OR REPLACE TABLE `agent_eval_seed.seed_trace_payloads`" in loadgen_sql
     assert "CREATE OR REPLACE TABLE `agent_eval_seed.otel_spans`" in loadgen_sql

@@ -26,7 +26,7 @@ processors:
     send_batch_size: 512
     timeout: 5s
 
-  # Normalize enterprise attribution attributes expected by sql/ddl.sql (`agent_eval.otel_spans`).
+  # Normalize enterprise attribution attributes expected by sql/core/ddl.sql (`agent_eval.otel_spans`).
   # Downstream views resolve gcp.apphub.application.id -> apphub.application.id -> unregistered_app.
   resource:
     attributes:

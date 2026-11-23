@@ -5,11 +5,8 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 
-from bq_eval.showcase import (
-    render_markdown_report,
-    run_showcase_pipeline,
-    write_html_scorecard,
-)
+from bq_eval.demo.pipeline import render_markdown_report, run_showcase_pipeline
+from bq_eval.demo.render.renderer import write_html_scorecard
 
 
 def main() -> None:

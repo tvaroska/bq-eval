@@ -13,24 +13,20 @@ import pytest
 
 from bq_eval.cli import app as cli_app
 from bq_eval.cli import server as cli_server
-from bq_eval.contract.results import ShowcaseRunArtifacts
-from bq_eval.contract.rubrics import wrap_untrusted_text
-from bq_eval.engine.sql_eval import (
+from bq_eval.core.contract.rubrics import wrap_untrusted_text
+from bq_eval.core.engine.sql_eval import (
     build_ai_evaluate_agent_sql,
     build_ai_generate_table_judge_sql,
     escape_sql_xml_expr,
 )
-from bq_eval.showcase.pipeline import (
-    CorpusChoice,
-    build_retail_2app_bundle,
-    run_showcase_pipeline,
-)
-from bq_eval.showcase.render.renderer import (
+from bq_eval.demo.contract.results import ShowcaseRunArtifacts
+from bq_eval.demo.pipeline import CorpusChoice, build_retail_2app_bundle, run_showcase_pipeline
+from bq_eval.demo.render.renderer import (
     render_html_scorecard,
     render_page_view_html,
     workbench_csp_header,
 )
-from bq_eval.showcase.render.view import TabView, build_showcase_page_view
+from bq_eval.demo.render.view import TabView, build_showcase_page_view
 
 
 def test_single_pass_template_blocks_placeholder_and_inline_handler_injection() -> None:

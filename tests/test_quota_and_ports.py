@@ -12,21 +12,27 @@ from pathlib import Path
 import pytest
 
 from bq_eval.cli.app import main as cli_main
-from bq_eval.contract.otel import (
+from bq_eval.core.contract.otel import (
     BQAAAgentEvent,
     FinOpsTrafficType,
     GenAISpanKind,
     OTelGenAISpanRecord,
 )
-from bq_eval.contract.results import ConfusionMatrix
-from bq_eval.engine.ports import BigQueryEvalBackend, EvalBackend, QueryRunner, SQLiteEvalBackend
-from bq_eval.engine.quota import (
+from bq_eval.core.contract.results import ConfusionMatrix
+from bq_eval.core.engine.ports import (
+    BigQueryEvalBackend,
+    EvalBackend,
+    QueryRunner,
+    SQLiteEvalBackend,
+)
+from bq_eval.core.engine.quota import (
     DailyQuotaGuard,
     QuotaCandidateTrace,
     estimate_judge_call_tokens,
     thinking_level_headroom_tokens,
 )
-from bq_eval.showcase.pipeline import run_showcase_pipeline
+from bq_eval.demo.pipeline import run_showcase_pipeline
+from bq_eval.finops.engine.capacity_export import hourly_burndown_rows
 from scripts.bq_dry_run import split_sql_statements
 from tests.test_sql_contracts import (
     ENTERPRISE_EVAL_RESULTS_BASE_INSERT,
@@ -214,7 +220,7 @@ def test_quota_guard_concurrent_reservations_prevent_toctou_and_sql_app_view_par
 
     # Verify `v_step2_app_daily_quota_status` executes cleanly in transpiled SQLite and
     # `split_sql_statements` keeps `CREATE OR REPLACE PROCEDURE` as a single atomic statement.
-    quota_path = SQL_DIR / "step3_daily_quota_guard.sql"
+    quota_path = SQL_DIR / "core" / "step3_daily_quota_guard.sql"
     quota_text = quota_path.read_text(encoding="utf-8")
     assert "DATE(evaluated_at) >= DATE_SUB(CURRENT_DATE('UTC'), INTERVAL 7 DAY)" in quota_text
     stmts = split_sql_statements(quota_text)
@@ -521,8 +527,8 @@ def test_eval_backend_port_local_sqlite_vs_cloud_bigquery_parity() -> None:
                 loc.cost_per_verified_outcome_usd, abs=1e-12
             )
 
-    local_hourly = local_backend.evaluate_hourly_burndown(spans)
-    cloud_hourly = cloud_backend.evaluate_hourly_burndown(spans)
+    local_hourly = hourly_burndown_rows(local_backend, spans)
+    cloud_hourly = hourly_burndown_rows(cloud_backend, spans)
     assert len(local_hourly) == len(cloud_hourly) == 4
     for loc_h, cld_h in zip(local_hourly, cloud_hourly, strict=True):
         assert loc_h.timestamp == cld_h.timestamp

@@ -10,8 +10,8 @@ import sys
 from pathlib import Path
 from typing import cast
 
-from bq_eval.contract.governance import BootstrapMode, BootstrapValidationReport
-from bq_eval.engine.bootstrap import (
+from bq_eval.deploy.contract.bootstrap import BootstrapMode, BootstrapValidationReport
+from bq_eval.deploy.engine.bootstrap import (
     should_skip_dry_run_statement,
     validate_bootstrap_offline,
 )

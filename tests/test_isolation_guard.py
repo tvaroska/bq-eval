@@ -1,15 +1,22 @@
-"""Folder-level AST Import & Layer Isolation Guard (`Rule 0`).
+"""Package and layer import guard.
 
-Enforces strict folder-level Ports, Adapters and Contracts across every `bq_eval/**/*.py` file:
-- `__init__.py` (`root`): imports nothing from `bq_eval.*` or third-party libraries.
-- `contract/`: imports only stdlib, `pydantic`, and `bq_eval.contract`.
-- `engine/`: imports only stdlib, `bq_eval.contract`, and `bq_eval.engine` (zero `pydantic`,
-  zero `showcase`, zero `cli`, zero LLM SDKs).
-- `showcase/render/`: imports zero calculations — only stdlib, `pydantic`,
-  `bq_eval.contract`, and `bq_eval.showcase.render`.
-- `showcase/`: imports only stdlib, `bq_eval.contract`, `bq_eval.engine`, and `bq_eval.showcase`
-  (zero `cli`, zero LLM SDKs).
-- `cli/`: driving ports — may import `bq_eval.*` and stdlib, with zero LLM SDK imports.
+Two axes, both enforced on every `bq_eval/**/*.py` file:
+
+Packages (what may depend on what):
+- `core`: rule checks, judge SQL, calibration, cost per outcome. Depends on nothing else.
+- `finops`: chargeback, capacity, governance, multi-cloud. Depends on `core`.
+- `deploy`: bootstrap SQL rendering. Depends on `core`.
+- `labs`: experimental analyses. Depends on `core` and `finops`.
+- `demo`: corpus replay and workbench. Depends on `core` and `finops`.
+- `cli`: may import any package.
+
+Layers inside a package:
+- `contract/`: only stdlib, `pydantic`, and the `contract` layers of allowed packages.
+- `engine/`: only stdlib plus the `contract` and `engine` layers of allowed packages (no pydantic).
+- `demo/render/`: only stdlib, `pydantic`, allowed `contract` layers and `demo.render`.
+- package `__init__.py` files (except `demo` and `cli`) import nothing.
+
+No file may import LLM SDKs, `examples/`, `benchmarks/`, or use dynamic imports.
 """
 
 from __future__ import annotations
@@ -41,6 +48,14 @@ FORBIDDEN_LLM_SDK_PREFIXES: tuple[str, ...] = (
     "llama_index",
 )
 
+PACKAGE_DEPS: dict[str, tuple[str, ...]] = {
+    "core": ("core",),
+    "finops": ("core", "finops"),
+    "deploy": ("core", "deploy"),
+    "labs": ("core", "finops", "labs"),
+    "demo": ("core", "finops", "demo"),
+}
+
 
 @dataclass(frozen=True)
 class FolderRule:
@@ -50,50 +65,55 @@ class FolderRule:
     forbidden_bq_eval_prefixes: tuple[str, ...] = ()
 
 
-FOLDER_RULES: dict[str, FolderRule] = {
-    "root": FolderRule(name="root", allowed_bq_eval_prefixes=()),
-    "contract": FolderRule(
-        name="contract",
-        allowed_bq_eval_prefixes=("bq_eval.contract",),
-        allowed_third_party_roots=frozenset({"pydantic"}),
-    ),
-    "engine": FolderRule(
-        name="engine",
-        allowed_bq_eval_prefixes=("bq_eval.contract", "bq_eval.engine"),
-    ),
-    "showcase_eval": FolderRule(
-        name="showcase_eval",
-        allowed_bq_eval_prefixes=("bq_eval.contract", "bq_eval.engine", "bq_eval.showcase"),
-        forbidden_bq_eval_prefixes=("bq_eval.cli",),
-    ),
-    "showcase_renderer": FolderRule(
-        name="showcase_renderer",
-        allowed_bq_eval_prefixes=(
-            "bq_eval.contract",
-            "bq_eval.showcase.render",
-        ),
-        allowed_third_party_roots=frozenset({"pydantic"}),
-        forbidden_bq_eval_prefixes=(
-            "bq_eval.engine",
-            "bq_eval.cli",
-        ),
-    ),
-    "cli": FolderRule(
-        name="cli",
-        allowed_bq_eval_prefixes=("bq_eval",),
-    ),
-}
+def _layer_prefixes(pkg: str, layers: tuple[str, ...]) -> tuple[str, ...]:
+    return tuple(f"bq_eval.{dep}.{layer}" for dep in PACKAGE_DEPS[pkg] for layer in layers)
 
-_EXACT_ROLE_MAP: dict[str, str] = {
-    "__init__.py": "root",
-}
+
+def _build_folder_rules() -> dict[str, FolderRule]:
+    rules: dict[str, FolderRule] = {
+        "root": FolderRule(name="root", allowed_bq_eval_prefixes=()),
+        "cli": FolderRule(name="cli", allowed_bq_eval_prefixes=("bq_eval",)),
+        "demo_app": FolderRule(
+            name="demo_app",
+            allowed_bq_eval_prefixes=tuple(f"bq_eval.{d}" for d in PACKAGE_DEPS["demo"]),
+            forbidden_bq_eval_prefixes=("bq_eval.cli",),
+        ),
+        "demo_render": FolderRule(
+            name="demo_render",
+            allowed_bq_eval_prefixes=(
+                *_layer_prefixes("demo", ("contract",)),
+                "bq_eval.demo.render",
+            ),
+            allowed_third_party_roots=frozenset({"pydantic"}),
+        ),
+    }
+    for pkg in PACKAGE_DEPS:
+        rules[f"{pkg}_contract"] = FolderRule(
+            name=f"{pkg}_contract",
+            allowed_bq_eval_prefixes=_layer_prefixes(pkg, ("contract",)),
+            allowed_third_party_roots=frozenset({"pydantic"}),
+        )
+        if pkg != "demo":
+            rules[f"{pkg}_engine"] = FolderRule(
+                name=f"{pkg}_engine",
+                allowed_bq_eval_prefixes=_layer_prefixes(pkg, ("contract", "engine")),
+            )
+    return rules
+
+
+FOLDER_RULES: dict[str, FolderRule] = _build_folder_rules()
+
 _PREFIX_ROLE_MAP: tuple[tuple[str, str], ...] = (
-    ("contract/", "contract"),
-    ("engine/", "engine"),
-    ("showcase/render/", "showcase_renderer"),
-    ("showcase/", "showcase_eval"),
+    *((f"{pkg}/contract/", f"{pkg}_contract") for pkg in PACKAGE_DEPS),
+    *((f"{pkg}/engine/", f"{pkg}_engine") for pkg in PACKAGE_DEPS if pkg != "demo"),
+    ("demo/render/", "demo_render"),
+    ("demo/", "demo_app"),
     ("cli/", "cli"),
 )
+_EXACT_ROLE_MAP: dict[str, str] = {
+    "__init__.py": "root",
+    **{f"{pkg}/__init__.py": "root" for pkg in PACKAGE_DEPS if pkg != "demo"},
+}
 
 
 def _all_package_modules(root: Path = PACKAGE_DIR) -> list[Path]:
@@ -126,7 +146,7 @@ def _matches_prefix(target: str, prefix: str) -> bool:
 def _import_targets(
     source: str,
     *,
-    module_rel_path: str = "bq_eval/engine/probe.py",
+    module_rel_path: str = "bq_eval/core/engine/probe.py",
 ) -> list[str]:
     pkg_parts = list(Path(module_rel_path).parent.parts)
     targets: list[str] = []
@@ -215,57 +235,86 @@ def test_every_folder_has_one_rule_and_zero_violations() -> None:
 def test_unlisted_module_and_leaked_import_positive_controls(tmp_path: Path) -> None:
     """An unlisted root module `bq_eval/extra_core.py` cannot slip past the guard."""
     pkg = tmp_path / "bq_eval"
-    (pkg / "engine").mkdir(parents=True)
+    (pkg / "core" / "engine").mkdir(parents=True)
     (pkg / "__init__.py").write_text("__version__ = '0.3.0'\n", encoding="utf-8")
     (pkg / "extra_core.py").write_text(
-        "from bq_eval.showcase.pipeline import run_showcase_pipeline\n",
+        "from bq_eval.demo.pipeline import run_showcase_pipeline\n",
         encoding="utf-8",
     )
-    (pkg / "engine" / "leaked.py").write_text(
-        "from bq_eval.showcase.loadgen import generate_time_shifted_corpus\n",
+    (pkg / "core" / "engine" / "leaked.py").write_text(
+        "from bq_eval.finops.engine.spend import compute_pareto_frontier\n",
         encoding="utf-8",
     )
     _, problems = _scan_package_tree(pkg)
     assert any("extra_core.py" in p and UNCLASSIFIED_MODULE in p for p in problems)
-    assert any("engine/leaked.py" in p and "bq_eval.showcase.loadgen" in p for p in problems)
+    assert any(
+        "core/engine/leaked.py" in p and "bq_eval.finops.engine.spend" in p for p in problems
+    )
 
 
 @pytest.mark.parametrize(
     ("module_rel_path", "statement"),
     [
-        ("bq_eval/contract/probe.py", "from bq_eval.engine.finops import compute_span_cost_usd"),
+        # Package direction: core depends on nothing else.
         (
-            "bq_eval/contract/probe.py",
-            "from bq_eval.showcase.pipeline import run_showcase_pipeline",
-        ),
-        ("bq_eval/engine/probe.py", "from pydantic import BaseModel"),
-        (
-            "bq_eval/engine/probe.py",
-            "from bq_eval.showcase.loadgen import build_golden_seed_templates",
-        ),
-        ("bq_eval/engine/probe.py", "from bq_eval.cli.app import main"),
-        ("bq_eval/engine/probe.py", "from ..showcase import loadgen"),
-        ("bq_eval/showcase/pipeline.py", "from bq_eval.cli.app import main"),
-        (
-            "bq_eval/showcase/render/renderer.py",
-            "from bq_eval.engine.finops import compute_pareto_frontier",
+            "bq_eval/core/engine/probe.py",
+            "from bq_eval.finops.engine.spend import compute_pareto_frontier",
         ),
         (
-            "bq_eval/showcase/render/renderer.py",
-            "from bq_eval.showcase.pipeline import run_showcase_pipeline",
+            "bq_eval/core/contract/probe.py",
+            "from bq_eval.finops.contract.results import ModelOption",
         ),
-        ("bq_eval/showcase/render/renderer.py", "from .. import loadgen"),
+        ("bq_eval/core/engine/probe.py", "from bq_eval.deploy.engine.bootstrap import REPO_ROOT"),
         (
-            "bq_eval/showcase/render/view.py",
-            "from bq_eval.engine.calibration import compute_gwet_ac2",
+            "bq_eval/core/engine/probe.py",
+            "from bq_eval.demo.loadgen import build_golden_seed_templates",
         ),
+        (
+            "bq_eval/finops/engine/probe.py",
+            "from bq_eval.labs.engine.optimizer import cluster_failure_loss_bank",
+        ),
+        (
+            "bq_eval/finops/engine/probe.py",
+            "from bq_eval.demo.pipeline import run_showcase_pipeline",
+        ),
+        (
+            "bq_eval/deploy/engine/probe.py",
+            "from bq_eval.finops.engine.spend import compute_pareto_frontier",
+        ),
+        (
+            "bq_eval/demo/pipeline.py",
+            "from bq_eval.labs.engine.optimizer import cluster_failure_loss_bank",
+        ),
+        ("bq_eval/demo/pipeline.py", "from bq_eval.cli.app import main"),
+        # Layer direction inside a package.
+        (
+            "bq_eval/core/contract/probe.py",
+            "from bq_eval.core.engine.cost import compute_span_cost_usd",
+        ),
+        ("bq_eval/core/engine/probe.py", "from pydantic import BaseModel"),
+        ("bq_eval/core/engine/probe.py", "from bq_eval.cli.app import main"),
+        ("bq_eval/core/engine/probe.py", "from ...demo import loadgen"),
+        (
+            "bq_eval/demo/render/renderer.py",
+            "from bq_eval.core.engine.calibration import compute_gwet_ac2",
+        ),
+        (
+            "bq_eval/demo/render/renderer.py",
+            "from bq_eval.demo.pipeline import run_showcase_pipeline",
+        ),
+        ("bq_eval/demo/render/renderer.py", "from .. import loadgen"),
+        ("bq_eval/core/__init__.py", "from bq_eval.core.engine.cost import compute_span_cost_usd"),
+        # Global bans.
         ("bq_eval/cli/app.py", "from google.genai import Client"),
         ("bq_eval/cli/app.py", "import vertexai.preview"),
-        ("bq_eval/showcase/pipeline.py", "import openai"),
-        ("bq_eval/engine/probe.py", "import benchmarks.results"),
-        ("bq_eval/engine/probe.py", "import importlib\nimportlib.import_module('bq_eval.cli')"),
-        ("bq_eval/engine/probe.py", "__import__('bq_eval.cli')"),
-        ("bq_eval/engine/probe.py", "from ... import anything"),
+        ("bq_eval/demo/pipeline.py", "import openai"),
+        ("bq_eval/core/engine/probe.py", "import benchmarks.results"),
+        (
+            "bq_eval/core/engine/probe.py",
+            "import importlib\nimportlib.import_module('bq_eval.cli')",
+        ),
+        ("bq_eval/core/engine/probe.py", "__import__('bq_eval.cli')"),
+        ("bq_eval/core/engine/probe.py", "from .... import anything"),
         ("bq_eval/extra_unlisted.py", "import math"),
     ],
 )
@@ -281,20 +330,46 @@ def test_folder_guard_catches_every_forbidden_import(
 @pytest.mark.parametrize(
     ("module_rel_path", "statement"),
     [
-        ("bq_eval/contract/probe.py", "from pydantic import BaseModel"),
-        ("bq_eval/contract/probe.py", "from bq_eval.contract.otel import OTelGenAISpanRecord"),
-        ("bq_eval/engine/probe.py", "from bq_eval.contract.otel import OTelGenAISpanRecord"),
-        ("bq_eval/engine/probe.py", "from .finops import compute_span_cost_usd"),
+        ("bq_eval/core/contract/probe.py", "from pydantic import BaseModel"),
         (
-            "bq_eval/showcase/render/renderer.py",
-            "from bq_eval.contract.results import ShowcaseRunArtifacts",
+            "bq_eval/core/contract/probe.py",
+            "from bq_eval.core.contract.otel import OTelGenAISpanRecord",
         ),
-        ("bq_eval/showcase/render/renderer.py", "from .view import PageView"),
         (
-            "bq_eval/showcase/pipeline.py",
-            "from bq_eval.engine.sql_eval import evaluate_traces_in_sqlite",
+            "bq_eval/core/engine/probe.py",
+            "from bq_eval.core.contract.otel import OTelGenAISpanRecord",
         ),
-        ("bq_eval/cli/app.py", "from bq_eval.showcase.pipeline import run_showcase_pipeline"),
+        ("bq_eval/core/engine/probe.py", "from .cost import compute_span_cost_usd"),
+        (
+            "bq_eval/finops/engine/probe.py",
+            "from bq_eval.core.engine.cost import compute_span_cost_usd",
+        ),
+        (
+            "bq_eval/finops/contract/probe.py",
+            "from bq_eval.core.contract.results import ConfusionMatrix",
+        ),
+        (
+            "bq_eval/deploy/engine/probe.py",
+            "from bq_eval.deploy.contract.bootstrap import BootstrapMode",
+        ),
+        (
+            "bq_eval/labs/engine/probe.py",
+            "from bq_eval.finops.engine.spend import compute_pareto_frontier",
+        ),
+        (
+            "bq_eval/demo/render/renderer.py",
+            "from bq_eval.demo.contract.results import ShowcaseRunArtifacts",
+        ),
+        ("bq_eval/demo/render/renderer.py", "from .view import PageView"),
+        (
+            "bq_eval/demo/pipeline.py",
+            "from bq_eval.core.engine.sql_eval import evaluate_traces_in_sqlite",
+        ),
+        ("bq_eval/cli/app.py", "from bq_eval.demo.pipeline import run_showcase_pipeline"),
+        (
+            "bq_eval/cli/app.py",
+            "from bq_eval.labs.engine.optimizer import cluster_failure_loss_bank",
+        ),
     ],
 )
 def test_folder_guard_allows_declared_dependencies(
@@ -316,14 +391,17 @@ def test_subfolder_probes_fail_both_python_and_ast_grep_guards(tmp_path: Path) -
     assert ast_grep.is_file(), "ast-grep binary required"
 
     cases = (
-        ("bq_eval/contract/probe.py", "from ..engine import finops\n"),
-        ("bq_eval/engine/probe.py", "from pydantic import BaseModel\n"),
-        ("bq_eval/engine/probe.py", "from ..showcase import loadgen\n"),
+        ("bq_eval/core/contract/probe.py", "from ..engine import cost\n"),
+        ("bq_eval/core/engine/probe.py", "from pydantic import BaseModel\n"),
+        ("bq_eval/core/engine/probe.py", "from bq_eval.finops.engine import spend\n"),
+        ("bq_eval/core/engine/probe.py", "from ...demo import loadgen\n"),
+        ("bq_eval/finops/engine/probe.py", "from bq_eval.demo import pipeline\n"),
+        ("bq_eval/deploy/engine/probe.py", "from bq_eval.finops.engine import spend\n"),
         (
-            "bq_eval/showcase/render/renderer_probe.py",
-            "from ...engine.finops import compute_span_cost_usd\n",
+            "bq_eval/demo/render/renderer_probe.py",
+            "from bq_eval.core.engine.cost import compute_span_cost_usd\n",
         ),
-        ("bq_eval/showcase/render/renderer_probe.py", "from .. import pipeline\n"),
+        ("bq_eval/demo/render/renderer_probe.py", "from .. import pipeline\n"),
         ("bq_eval/cli/probe.py", "from google.genai import Client\n"),
     )
     for rel_path, bad_import in cases:
@@ -343,19 +421,20 @@ def test_subfolder_probes_fail_both_python_and_ast_grep_guards(tmp_path: Path) -
         probe_file.unlink()
 
 
-def test_importing_contract_and_engine_loads_no_showcase_or_cli() -> None:
-    """Importing `bq_eval`, `bq_eval.contract`, and `bq_eval.engine` pulls in zero showcase/CLI modules."""
+def test_importing_core_loads_no_other_package() -> None:
+    """Importing every `bq_eval.core` module pulls in no other bq_eval package or LLM SDK."""
     pure_modules = [
         _dotted_module_name(path)
         for path in _all_package_modules()
-        if _classify_rel_path(path.relative_to(PACKAGE_DIR).as_posix())
-        in {"root", "contract", "engine"}
+        if path.relative_to(PACKAGE_DIR).as_posix().startswith("core/")
+        or path == PACKAGE_DIR / "__init__.py"
     ]
     probe = (
         "import sys\n"
         + "".join(f"import {mod}\n" for mod in pure_modules)
         + "print(sorted(m for m in sys.modules if m.startswith(("
-        "'bq_eval.showcase', 'bq_eval.cli', 'google.genai', 'vertexai', 'openai', 'anthropic'"
+        "'bq_eval.finops', 'bq_eval.deploy', 'bq_eval.labs', 'bq_eval.demo', 'bq_eval.cli', "
+        "'google.genai', 'vertexai', 'openai', 'anthropic'"
         "))))"
     )
     result = subprocess.run(  # noqa: S603

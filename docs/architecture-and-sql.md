@@ -3,9 +3,9 @@
 ## 0. Dual-Path Capture -> Single Execution Engine (`ADR-008`)
 
 **BQ Eval & FinOps (`bq-eval`)** decouples how agent telemetry enters BigQuery from how quality, risk, and unit economics are computed:
-- **Light Capture (`BQAA` — [`sql/bqaa_adapter_views.sql`](../sql/bqaa_adapter_views.sql))**: Developers stream events from Python ADK (`BigQueryAgentAnalyticsPlugin`) or LangGraph (`BigQueryCallbackHandler`) into a single auto-created `agent_events` table. Zero-copy views (`v_bqaa_otel_spans` and `v_bqaa_trace_payloads`) deduplicate Storage Write API retries by `event_id` and map token counts and inline payloads onto the `otel_spans` / `trace_payloads` contract while preserving strict `'unregistered_app'` fallback (`ADR-003`).
-- **Full Capture (`OTel` — [`sql/ddl.sql`](../sql/ddl.sql))**: Multi-service and multi-cloud fleets emit standard OTLP to `telemetry.googleapis.com` (`obs_traces._AllSpans` + `obs_logs._AllLogs` + BigLake `completions`) with server-stamped `apphub.application.id` and W3C `baggage` (`outcome.id`).
-- **Hybrid Mode**: Combines both lanes via `UNION ALL` (`NOT EXISTS` trace deduplication in [`sql/bqaa_adapter_views.sql`](../sql/bqaa_adapter_views.sql)) so server-stamped `_AllSpans` rows take precedence while `BQAA`-only developer workloads fill in seamlessly.
+- **Light Capture (`BQAA` — [`sql/core/bqaa_adapter_views.sql`](../sql/core/bqaa_adapter_views.sql))**: Developers stream events from Python ADK (`BigQueryAgentAnalyticsPlugin`) or LangGraph (`BigQueryCallbackHandler`) into a single auto-created `agent_events` table. Zero-copy views (`v_bqaa_otel_spans` and `v_bqaa_trace_payloads`) deduplicate Storage Write API retries by `event_id` and map token counts and inline payloads onto the `otel_spans` / `trace_payloads` contract while preserving strict `'unregistered_app'` fallback (`ADR-003`).
+- **Full Capture (`OTel` — [`sql/core/ddl.sql`](../sql/core/ddl.sql))**: Multi-service and multi-cloud fleets emit standard OTLP to `telemetry.googleapis.com` (`obs_traces._AllSpans` + `obs_logs._AllLogs` + BigLake `completions`) with server-stamped `apphub.application.id` and W3C `baggage` (`outcome.id`).
+- **Hybrid Mode**: Combines both lanes via `UNION ALL` (`NOT EXISTS` trace deduplication in [`sql/core/bqaa_adapter_views.sql`](../sql/core/bqaa_adapter_views.sql)) so server-stamped `_AllSpans` rows take precedence while `BQAA`-only developer workloads fill in seamlessly.
 
 ---
 
@@ -15,23 +15,23 @@ To eliminate day-1 setup friction while supporting full enterprise governance wh
 
 | Step | SQL & Skill Artifacts | Tables Needed | Skill Needed? | What It Delivers |
 | :--- | :--- | :--- | :--- | :--- |
-| **Step 1** | [`sql/step1_trace_views.sql`](../sql/step1_trace_views.sql) | **`0` new tables** (uses existing `otel_spans`) | **No** (100% static SQL views & queries) | `v_step1_trace_waterfall`, `v_step1_trace_eval`, and `v_step1_cost_per_outcome`: waterfalls, latency P95, tool/loop errors, `$0` SQL checks, and **Day-1 Cost per Application, Business Unit & Outcome**. |
-| **Step 2** | [`sql/step2_rubrics.csv`](../sql/step2_rubrics.csv) & [`sql/step2_stateless_eval.sql`](../sql/step2_stateless_eval.sql) | **`1` table: `rubrics`** (GCS CSV external table or native table) | **No** (Static SQL for `100%` and `10%` of traces) | Seeds 8 canonical 4-point rubrics (`groundedness_4pt_v1`, `tool_trajectory_4pt_v1`, `completeness_4pt_v1`, `escalation_policy_4pt_v1`, `kyc_policy_compliance_4pt_v1`, `rfp_quote_completeness_4pt_v1`, `contradiction_grounding_4pt_v1`, `pii_perturbation_invariance_4pt_v1`), creates `v_step2_all_trace_rubric_prompts` and `v_step2_trace_rubric_prompts`, and runs stateless `AI.GENERATE_TABLE` evals on **100% of traces** or a **10% deterministic sample** without saving results. |
+| **Step 1** | [`sql/core/step1_trace_views.sql`](../sql/core/step1_trace_views.sql) | **`0` new tables** (uses existing `otel_spans`) | **No** (100% static SQL views & queries) | `v_step1_trace_waterfall`, `v_step1_trace_eval`, and `v_step1_cost_per_outcome`: waterfalls, latency P95, tool/loop errors, `$0` SQL checks, and **Day-1 Cost per Application, Business Unit & Outcome**. |
+| **Step 2** | [`sql/core/step2_rubrics.csv`](../sql/core/step2_rubrics.csv) & [`sql/core/step2_stateless_eval.sql`](../sql/core/step2_stateless_eval.sql) | **`1` table: `rubrics`** (GCS CSV external table or native table) | **No** (Static SQL for `100%` and `10%` of traces) | Seeds 8 canonical 4-point rubrics (`groundedness_4pt_v1`, `tool_trajectory_4pt_v1`, `completeness_4pt_v1`, `escalation_policy_4pt_v1`, `kyc_policy_compliance_4pt_v1`, `rfp_quote_completeness_4pt_v1`, `contradiction_grounding_4pt_v1`, `pii_perturbation_invariance_4pt_v1`), creates `v_step2_all_trace_rubric_prompts` and `v_step2_trace_rubric_prompts`, and runs stateless `AI.GENERATE_TABLE` evals on **100% of traces** or a **10% deterministic sample** without saving results. |
 | **Step 2.5** | [`skills/bq-eval/SKILL.md`](../skills/bq-eval/SKILL.md) & [`skills/bq-eval/references/sql_recipes.md`](../skills/bq-eval/references/sql_recipes.md) | Same `1` rubric table | **Yes** (Agentic Skill) | Translates plain-English requirements into new 4-point rubrics, custom trace slice queries (`5%` sample, `only the last 1 hour of traces`, error/SLA outliers, per-app filters), and custom domain Step-1+ SQL checks. |
-| **Step 3** | [`sql/step3_saved_results.sql`](../sql/step3_saved_results.sql) & [`sql/step3_daily_quota_guard.sql`](../sql/step3_daily_quota_guard.sql) | **`2` tables: `rubrics` + `eval_results`** *(plus optional `eval_daily_quota_config`)* | Optional | Persists evaluation verdicts (`eval_run_id`, `outcome_id`) across Engine A and Engine B to track longitudinal trends (`v_step3_eval_runs`), run paired model/prompt comparisons (`v_step3_paired_run_comparison` for `0%` negative flips), and cap scheduled judge token spend (`v_step2_daily_quota_status`). |
-| **Open Extensions** | [`sql/ddl.sql`](../sql/ddl.sql) & [`sql/views.sql`](../sql/views.sql) | Optional (`sme_labels`, `app_registry`, `model_pricing_catalog`) | Optional | Plugs in `~100` blind human spot-checks (`sme_labels`) for SQL Quadratic Gwet's `AC2 >= 0.80` + Rogan-Gladen 95% CIs (`v_agent_eval_and_finops_summary`), effective-dated multi-agent outcome CPVO (`v_enterprise_cost_per_verified_outcome` with per-app `app_registry.storage_usd_per_outcome`), App Hub registries, and `FOCUS 1.2` Provisioned Throughput sizing. |
+| **Step 3** | [`sql/core/step3_saved_results.sql`](../sql/core/step3_saved_results.sql) & [`sql/core/step3_daily_quota_guard.sql`](../sql/core/step3_daily_quota_guard.sql) | **`2` tables: `rubrics` + `eval_results`** *(plus optional `eval_daily_quota_config`)* | Optional | Persists evaluation verdicts (`eval_run_id`, `outcome_id`) across Engine A and Engine B to track longitudinal trends (`v_step3_eval_runs`), run paired model/prompt comparisons (`v_step3_paired_run_comparison` for `0%` negative flips), and cap scheduled judge token spend (`v_step2_daily_quota_status`). |
+| **Open Extensions** | [`sql/core/ddl.sql`](../sql/core/ddl.sql) & [`sql/core/views.sql`](../sql/core/views.sql) | Optional (`sme_labels`, `app_registry`, `model_pricing_catalog`) | Optional | Plugs in `~100` blind human spot-checks (`sme_labels`) for SQL Quadratic Gwet's `AC2 >= 0.80` + Rogan-Gladen 95% CIs (`v_agent_eval_and_finops_summary`), effective-dated multi-agent outcome CPVO (`v_enterprise_cost_per_verified_outcome` with per-app `app_registry.storage_usd_per_outcome`), App Hub registries, and `FOCUS 1.2` Provisioned Throughput sizing. |
 
 ---
 
 ## 2. Step-by-Step SQL Walkthrough (`sql/step1_*.sql` → `sql/step3_*.sql`)
 
-### 2.1 Step 1: Static SQL Views Over Existing Traces (`sql/step1_trace_views.sql`)
+### 2.1 Step 1: Static SQL Views Over Existing Traces (`sql/core/step1_trace_views.sql`)
 - **`agent_eval.v_step1_trace_waterfall`**: Normalizes `apphub_application_id`, `business_unit`, and `cost_center` via `COALESCE` (so workloads missing App Hub registration fall back directly to `'unregistered_app'` and `'unassigned_bu'`), and calculates span-level burndown and USD spend using built-in default Gemini rates (`<=200K` and `>200K` cliffs).
 - **`agent_eval.v_step1_trace_eval`**: Rolls up each `trace_id` to compute `trace_latency_ms`, `tool_call_count`, `tool_error_count`, `step1_pass` (`$0` deterministic check), and `trace_cost_usd`.
 - **`agent_eval.v_step1_cost_per_outcome`**: Aggregates by `(apphub_application_id, business_unit, cost_center)` to report `step1_pass_rate`, `p95_latency_ms`, `total_cost_usd`, and **`step1_cost_per_outcome_usd`**.
 
-### 2.2 Step 2: `1` Rubric Table + Stateless Dual-Engine Eval (`sql/step2_stateless_eval.sql`)
-- **`agent_eval.rubrics`**: Can be mounted directly from [`sql/step2_rubrics.csv`](../sql/step2_rubrics.csv) in Cloud Storage (`CREATE OR REPLACE EXTERNAL TABLE`) or created as a native BigQuery table seeded with the 8 canonical 4-point rubrics (`gemini-3.8-flash` default workhorse, `passing_score = 3`), including `EVAL-P10` contradiction-aware grounding and PII perturbation invariance rubrics.
+### 2.2 Step 2: `1` Rubric Table + Stateless Dual-Engine Eval (`sql/core/step2_stateless_eval.sql`)
+- **`agent_eval.rubrics`**: Can be mounted directly from [`sql/core/step2_rubrics.csv`](../sql/core/step2_rubrics.csv) in Cloud Storage (`CREATE OR REPLACE EXTERNAL TABLE`) or created as a native BigQuery table seeded with the 8 canonical 4-point rubrics (`gemini-3.8-flash` default workhorse, `passing_score = 3`), including `EVAL-P10` contradiction-aware grounding and PII perturbation invariance rubrics.
 - **`agent_eval.v_step2_all_trace_rubric_prompts` & `agent_eval.v_step2_trace_rubric_prompts`**: `v_step2_trace_rubric_prompts` filters `WHERE step1_pass = TRUE` so routine Step-2/Step-3 semantic scoring skips `$0` deterministic rejects, while `v_step2_all_trace_rubric_prompts` preserves failing traces for optional diagnostic error-tail inspection (with $\hat{\theta}_{\text{RG}}$ strictly restricted to `rule0_pass = TRUE` per `ADR-004`). Both escape `&`, `<`, and `>` inside `<untrusted_text>` blocks.
 - **Engine A (`AI.GENERATE_TABLE` — All Regions incl. `US`/`EU`)**: Runs 4-point ordinal rubrics statelessly on `100%` or `10%` of traces with `NOT NULL` schema fields (`reasoning_trace STRING NOT NULL, ordinal_score INT64 NOT NULL`) and returns `reasoning_trace`, `ordinal_score`, `verified_pass`, and `trace_cost_usd`.
 - **Engine B (`AI.EVALUATE_AGENT` — Private Preview, Non-Public Single-Region `BQAA` `AgentData` TVF)**: Scores Step-1 passing turns (`v_bqaa_eval_turn_filtered`) against Google's 7 managed trajectory metrics (`tool_use_quality_v1`, `final_response_quality_v1`, `hallucination_v1`, `safety_v1`, etc.) with zero `CREATE MODEL` or `CREATE CONNECTION` setup (unannounced private preview TVF not yet in public Cloud BigQuery docs).
@@ -39,16 +39,16 @@ To eliminate day-1 setup friction while supporting full enterprise governance wh
 ### 2.3 Step 2.5: Agentic Skill (`skills/bq-eval/SKILL.md`)
 - Uses [`skills/bq-eval/references/sql_recipes.md`](../skills/bq-eval/references/sql_recipes.md) to author new 4-point ordinal rubrics (`MERGE INTO agent_eval.rubrics`), compose custom slice queries (`MOD(ABS(FARM_FINGERPRINT(trace_id)), 100) < 5` for `5%`, `trace_start_time >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR)` for the last 1 hour), and create custom domain SQL views (`v_step1_custom_domain_eval`).
 
-### 2.4 Step 3: Saved Eval Outputs, Paired Comparisons & Quota Guard (`sql/step3_saved_results.sql`, `sql/step3_daily_quota_guard.sql`)
+### 2.4 Step 3: Saved Eval Outputs, Paired Comparisons & Quota Guard (`sql/core/step3_saved_results.sql`, `sql/core/step3_daily_quota_guard.sql`)
 - **`agent_eval.eval_results`**: Partitioned by `DATE(evaluated_at)` and clustered by `(apphub_application_id, rubric_id, trace_id)`, with `outcome_id` preserved for `EVAL-P11` joins and idempotent `LEFT JOIN` persistence adapters for both Engine A (`AI.GENERATE_TABLE`) and Engine B (`AI.EVALUATE_AGENT`).
 - **`agent_eval.v_step3_eval_runs` & `agent_eval.v_step3_paired_run_comparison`**: Deduplicate append-only `eval_results` on `(eval_run_id, trace_id, rubric_id)` via `QUALIFY ROW_NUMBER() ... = 1`, summarize runs by `eval_run_id`, and compare baseline -> candidate pairs temporally by `MIN(evaluated_at)` (with deterministic `base.eval_run_id < cand.eval_run_id` tie-break) on matching `trace_id`s to flag negative flips (`is_negative_flip`) without reciprocal duplicates.
 - **`agent_eval.eval_daily_quota_config`, `agent_eval.eval_daily_quota_reservations` & `agent_eval.run_daily_quota_guarded_judge(...)`**: Enforces global and per-application daily UTC judge token sub-caps across Engine A and Engine B (`ai_evaluate_agent_managed`) using non-deduped burn accounting, pre-flight `max_output_tokens` + `thinking_level` headroom, and atomic reservation transactions (`v_step2_daily_quota_status`, `v_step2_app_daily_quota_status`).
 
 ---
 
-## 3. Open Enterprise Extensions (`sql/ddl.sql` & `sql/views.sql`)
+## 3. Open Enterprise Extensions (`sql/core/ddl.sql` & `sql/core/views.sql`)
 
-When teams expand beyond Step 3 into multi-BU chargeback and calibrated Model Risk Management (`MRM`), [`sql/ddl.sql`](../sql/ddl.sql) and [`sql/views.sql`](../sql/views.sql) provision the full compatibility-view + physical-table schema:
+When teams expand beyond Step 3 into multi-BU chargeback and calibrated Model Risk Management (`MRM`), [`sql/core/ddl.sql`](../sql/core/ddl.sql) and [`sql/core/views.sql`](../sql/core/views.sql) provision the full compatibility-view + physical-table schema:
 
 | Object | Kind / Partitioning & Clustering | Purpose |
 | :--- | :--- | :--- |
@@ -65,7 +65,7 @@ When teams expand beyond Step 3 into multi-BU chargeback and calibrated Model Ri
 
 ## 4. Portable Application & Agent Identity Resolution (`EVAL-P08`)
 
-Workloads registered in App Hub (on GKE, Cloud Run, Agent Runtime, or via WIF collector resource stamping — see [`examples/otel-collector-wif.yaml`](../examples/otel-collector-wif.yaml)) carry `gcp_apphub_application_id` or `apphub.application.id`, whereas unregistered workloads have `NULL` App Hub attributes and must be flagged rather than masked by self-reported service names. Both `sql/step1_trace_views.sql`, `sql/views.sql`, `sql/bqaa_adapter_views.sql`, and `bq_eval.contract.otel.resolve_application_id()` normalize application identity via the same deterministic precedence chain (`ADR-003`):
+Workloads registered in App Hub (on GKE, Cloud Run, Agent Runtime, or via WIF collector resource stamping — see [`examples/otel-collector-wif.yaml`](../examples/otel-collector-wif.yaml)) carry `gcp_apphub_application_id` or `apphub.application.id`, whereas unregistered workloads have `NULL` App Hub attributes and must be flagged rather than masked by self-reported service names. Both `sql/core/step1_trace_views.sql`, `sql/core/views.sql`, `sql/core/bqaa_adapter_views.sql`, and `bq_eval.core.contract.otel.resolve_application_id()` normalize application identity via the same deterministic precedence chain (`ADR-003`):
 
 ```sql
 COALESCE(
@@ -82,7 +82,7 @@ COALESCE(
 
 Untrusted user prompts (`p.user_prompt`), retrieved chunks (`p.retrieved_context`), and model responses (`p.final_response`) could contain literal `</untrusted_text>` tags designed to break out of the judge's XML boundary and spoof `<score>4</score>`.
 
-`v_step2_all_trace_rubric_prompts`, `v_step2_trace_rubric_prompts`, and `bq_eval.engine.sql_eval.build_ai_generate_table_judge_sql()` enforce two hard safeguards:
+`v_step2_all_trace_rubric_prompts`, `v_step2_trace_rubric_prompts`, and `bq_eval.core.engine.sql_eval.build_ai_generate_table_judge_sql()` enforce two hard safeguards:
 1. **SQL-Level XML Entity Escaping (`EVAL-P02`):** Wraps `p.user_prompt`, `p.retrieved_context`, and `p.final_response` in nested `REPLACE(REPLACE(REPLACE(COALESCE(col, ''), '&', '&amp;'), '<', '&lt;'), '>', '&gt;')` before interpolating into `<untrusted_text>` blocks.
 2. **Two-Mode Stratified Deterministic Sampling (`FARM_FINGERPRINT`, `EVAL-P08`):** Routine Step-2 semantic scoring filters `step1_pass = TRUE` / `rule0_pass = TRUE` (`v_step2_trace_rubric_prompts`, `v_bqaa_eval_turn_filtered`, or `build_ai_generate_table_judge_sql(..., include_rule0_failures=False)`), routing `5%`–`10%` healthy canaries plus `100%` tool-error/SLA-tail passes (`t.tool_error_count > 0 OR t.trace_latency_ms > t.sla_latency_ms`) to the judge for `90–95%` cost reduction. Optional diagnostic root-cause sweeps (`v_step2_all_trace_rubric_prompts` or `include_rule0_failures=True`) include `NOT t.rule0_pass` failures, while `v_agent_eval_and_finops_summary` always restricts $\hat{\theta}_{\text{RG}}$ to `WHERE rule0_pass = TRUE` and bills `100%` of judge runs (`ADR-004`).
 
@@ -118,46 +118,46 @@ A single business outcome (KYC approval, RFP award, loan consolidation) spans mu
 
 ### 7.0 Cold Project Prerequisites & Regional Compatibility
 
-1. **Substitute Placeholders Before Running SQL**: Set `${PROJECT_ID}`, `${DATASET_ID}` (default `agent_eval`), `${PAYLOAD_BUCKET}` (`YOUR_GENAI_PAYLOAD_BUCKET` in [`sql/ddl.sql`](../sql/ddl.sql)), and `${CONNECTION_ID}` (`us.vertex_ai_connection` in `sql/ddl.sql` / `sql/step2_stateless_eval.sql`).
+1. **Substitute Placeholders Before Running SQL**: Set `${PROJECT_ID}`, `${DATASET_ID}` (default `agent_eval`), `${PAYLOAD_BUCKET}` (`YOUR_GENAI_PAYLOAD_BUCKET` in [`sql/core/ddl.sql`](../sql/core/ddl.sql)), and `${CONNECTION_ID}` (`us.vertex_ai_connection` in `sql/core/ddl.sql` / `sql/core/step2_stateless_eval.sql`).
 2. **Region Alignment (`US`/`EU` vs. Single-Region)**: `AI.GENERATE_TABLE` (Engine A) supports `US`/`EU` multi-regions (`us.vertex_ai_connection`) as well as single regions, whereas `AI.EVALUATE_AGENT` (Engine B; Private Preview, non-public TVF unannounced in public Cloud BigQuery docs) currently requires one of the 14 listed single regions (e.g., `us-central1`). Provision the dataset and Vertex AI connection in matching locations before running DDL.
-3. **Create Dataset First (`CREATE SCHEMA`)**: [`sql/bqaa_adapter_views.sql`](../sql/bqaa_adapter_views.sql) defines views inside `agent_eval` without issuing `CREATE SCHEMA`. On a cold project, create `${DATASET_ID}` first via `bq mk --dataset` (or run `CREATE SCHEMA IF NOT EXISTS agent_eval`).
+3. **Create Dataset First (`CREATE SCHEMA`)**: [`sql/core/bqaa_adapter_views.sql`](../sql/core/bqaa_adapter_views.sql) defines views inside `agent_eval` without issuing `CREATE SCHEMA`. On a cold project, create `${DATASET_ID}` first via `bq mk --dataset` (or run `CREATE SCHEMA IF NOT EXISTS agent_eval`).
 
 ### 7.1 Step 1 on BigQuery (`0` New Result Tables, No Skill)
 
-Choose **one** compatibility ingestion path (`otel_spans` + `trace_payloads`) before deploying [`sql/step1_trace_views.sql`](../sql/step1_trace_views.sql):
+Choose **one** compatibility ingestion path (`otel_spans` + `trace_payloads`) before deploying [`sql/core/step1_trace_views.sql`](../sql/core/step1_trace_views.sql):
 
 ```bash
 # Step 0: create target dataset in matching location (e.g. US for Engine A, us-central1 for Engine B)
 bq mk --dataset --location=US "${PROJECT_ID}:${DATASET_ID}"
 
 # Option 1 — Full Capture (_AllSpans + _AllLogs + BigLake completions):
-#   First replace YOUR_GENAI_PAYLOAD_BUCKET and us.vertex_ai_connection in sql/ddl.sql
-bq query --project_id="${PROJECT_ID}" --use_legacy_sql=false < sql/ddl.sql
+#   First replace YOUR_GENAI_PAYLOAD_BUCKET and us.vertex_ai_connection in sql/core/ddl.sql
+bq query --project_id="${PROJECT_ID}" --use_legacy_sql=false < sql/core/ddl.sql
 
 # Option 2 — Light Capture (BQAA agent_events) or Hybrid Mode C:
-#   First uncomment Mode A (BQAA-only) or Mode C (Hybrid) in sql/bqaa_adapter_views.sql
+#   First uncomment Mode A (BQAA-only) or Mode C (Hybrid) in sql/core/bqaa_adapter_views.sql
 #   so agent_eval.otel_spans and agent_eval.trace_payloads exist before Step 1
-bq query --project_id="${PROJECT_ID}" --use_legacy_sql=false < sql/bqaa_adapter_views.sql
+bq query --project_id="${PROJECT_ID}" --use_legacy_sql=false < sql/core/bqaa_adapter_views.sql
 
 # Deploy static Step-1 views over agent_eval.otel_spans + agent_eval.trace_payloads
-bq query --project_id="${PROJECT_ID}" --use_legacy_sql=false < sql/step1_trace_views.sql
+bq query --project_id="${PROJECT_ID}" --use_legacy_sql=false < sql/core/step1_trace_views.sql
 
 # Optional isolated demo seed: populates 800 synthetic traces in `agent_eval_seed` (not `agent_eval`)
-bq query --project_id="${PROJECT_ID}" --use_legacy_sql=false < sql/demo_time_shift_loadgen.sql
+bq query --project_id="${PROJECT_ID}" --use_legacy_sql=false < sql/demo/demo_time_shift_loadgen.sql
 ```
 
 ### 7.2 Step 2 & Step 3 on BigQuery
 
 > [!NOTE]
-> Deploying [`sql/step2_stateless_eval.sql`](../sql/step2_stateless_eval.sql), [`sql/step3_saved_results.sql`](../sql/step3_saved_results.sql), and [`sql/step3_daily_quota_guard.sql`](../sql/step3_daily_quota_guard.sql) creates only schemas, views, and the stored procedure (`$0` LLM cost). Run on-demand judge SQL via `bq-eval judge-sql` or invoke `CALL agent_eval.run_daily_quota_guarded_judge(...)` after replacing `${CONNECTION_ID}`.
+> Deploying [`sql/core/step2_stateless_eval.sql`](../sql/core/step2_stateless_eval.sql), [`sql/core/step3_saved_results.sql`](../sql/core/step3_saved_results.sql), and [`sql/core/step3_daily_quota_guard.sql`](../sql/core/step3_daily_quota_guard.sql) creates only schemas, views, and the stored procedure (`$0` LLM cost). Run on-demand judge SQL via `bq-eval judge-sql` or invoke `CALL agent_eval.run_daily_quota_guarded_judge(...)` after replacing `${CONNECTION_ID}`.
 
 ```bash
 # Step 2: create remote models (update CONNECTION_ID), agent_eval.rubrics, and prompt views
-bq query --project_id="${PROJECT_ID}" --use_legacy_sql=false < sql/step2_stateless_eval.sql
+bq query --project_id="${PROJECT_ID}" --use_legacy_sql=false < sql/core/step2_stateless_eval.sql
 
 # Step 3: create eval_results, deduplicated run views, paired comparisons, and quota guard tables/views
-bq query --project_id="${PROJECT_ID}" --use_legacy_sql=false < sql/step3_saved_results.sql
-bq query --project_id="${PROJECT_ID}" --use_legacy_sql=false < sql/step3_daily_quota_guard.sql
+bq query --project_id="${PROJECT_ID}" --use_legacy_sql=false < sql/core/step3_saved_results.sql
+bq query --project_id="${PROJECT_ID}" --use_legacy_sql=false < sql/core/step3_daily_quota_guard.sql
 ```
 
 ### 7.3 Local CLI Helpers & Verification Suite

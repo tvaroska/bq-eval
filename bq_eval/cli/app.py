@@ -12,31 +12,31 @@ from typing import cast
 from bq_eval import __version__
 from bq_eval.cli.bootstrap_cmd import register_bootstrap_subparser, run_bootstrap_command
 from bq_eval.cli.server import create_workbench_server
-from bq_eval.contract.otel import BQAAAgentEvent
-from bq_eval.contract.pricing import MANAGED_EVALUATE_AGENT_METRICS
-from bq_eval.engine.bqaa import (
+from bq_eval.core.contract.otel import BQAAAgentEvent
+from bq_eval.core.contract.pricing import MANAGED_EVALUATE_AGENT_METRICS
+from bq_eval.core.engine.bqaa import (
     bqaa_events_to_otel_spans,
     bqaa_events_to_trace_payloads,
     deduplicate_bqaa_events,
 )
-from bq_eval.engine.ports import SQLiteEvalBackend
-from bq_eval.engine.sql_eval import (
+from bq_eval.core.engine.ports import SQLiteEvalBackend
+from bq_eval.core.engine.sql_eval import (
     build_ai_evaluate_agent_sql,
     build_ai_generate_table_judge_sql,
 )
-from bq_eval.showcase.loadgen import (
+from bq_eval.demo.loadgen import (
     evaluate_time_shifted_corpus,
     export_time_shifted_jsonl,
     generate_time_shifted_corpus,
     render_loadgen_markdown_report,
 )
-from bq_eval.showcase.pipeline import (
+from bq_eval.demo.pipeline import (
     CorpusChoice,
     format_demo_json,
     render_markdown_report,
     run_showcase_pipeline,
 )
-from bq_eval.showcase.render.renderer import write_html_scorecard
+from bq_eval.demo.render.renderer import write_html_scorecard
 
 
 def build_parser() -> argparse.ArgumentParser:

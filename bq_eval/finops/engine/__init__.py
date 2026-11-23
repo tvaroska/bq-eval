@@ -1,0 +1,1 @@
+"""Spend and capacity logic."""

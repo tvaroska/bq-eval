@@ -11,18 +11,15 @@ import pytest
 import sqlglot
 from sqlglot import exp
 
-from bq_eval.cli import main as cli_main
-from bq_eval.contract.otel import BQAAAgentEvent
-from bq_eval.contract.results import ConfusionMatrix
-from bq_eval.engine.bqaa import (
+from bq_eval.cli.app import main as cli_main
+from bq_eval.core.contract.otel import BQAAAgentEvent
+from bq_eval.core.contract.results import ConfusionMatrix
+from bq_eval.core.engine.bqaa import (
     bqaa_events_to_otel_spans,
     bqaa_events_to_trace_payloads,
     deduplicate_bqaa_events,
 )
-from bq_eval.engine.sql_eval import (
-    build_ai_evaluate_agent_sql,
-    evaluate_traces_in_sqlite,
-)
+from bq_eval.core.engine.sql_eval import build_ai_evaluate_agent_sql, evaluate_traces_in_sqlite
 from tests.conftest import REQUIRED_OTEL_SPANS_VIEW_COLUMNS
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -39,13 +36,15 @@ def _projected_columns_of_view(sql_text: str, view_name: str) -> list[str]:
 
 
 def test_bqaa_adapter_sql_contract_and_strict_fallback() -> None:
-    """Verify `sql/bqaa_adapter_views.sql` 39/39 ordered column parity, live Mode A/C views, dedup, and strict fallback."""
-    adapter_sql = (REPO_ROOT / "sql" / "bqaa_adapter_views.sql").read_text(encoding="utf-8")
-    ddl_sql = (REPO_ROOT / "sql" / "ddl.sql").read_text(encoding="utf-8")
+    """Verify `sql/core/bqaa_adapter_views.sql` 39/39 ordered column parity, live Mode A/C views, dedup, and strict fallback."""
+    adapter_sql = (REPO_ROOT / "sql" / "core" / "bqaa_adapter_views.sql").read_text(
+        encoding="utf-8"
+    )
+    ddl_sql = (REPO_ROOT / "sql" / "core" / "ddl.sql").read_text(encoding="utf-8")
     schema_cols = tuple(
         col["name"]
         for col in json.loads(
-            (REPO_ROOT / "sql" / "otel_spans_schema.json").read_text(encoding="utf-8")
+            (REPO_ROOT / "sql" / "core" / "otel_spans_schema.json").read_text(encoding="utf-8")
         )
     )
     assert len(REQUIRED_OTEL_SPANS_VIEW_COLUMNS) == 39
@@ -113,8 +112,8 @@ def test_bqaa_mode_a_and_mode_c_transpile_to_sqlite_with_null_shadow_outcome_and
         _transpile_bq_view_to_sqlite,
     )
 
-    adapter_path = REPO_ROOT / "sql" / "bqaa_adapter_views.sql"
-    ddl_path = REPO_ROOT / "sql" / "ddl.sql"
+    adapter_path = REPO_ROOT / "sql" / "core" / "bqaa_adapter_views.sql"
+    ddl_path = REPO_ROOT / "sql" / "core" / "ddl.sql"
     bqaa_view_sql = _transpile_bq_view_to_sqlite(
         _extract_view_sql_text(adapter_path, "agent_eval.v_bqaa_otel_spans")
     )
@@ -506,7 +505,7 @@ def test_ai_evaluate_agent_sql_builder_and_cli_engine_b_default_canary(
 
 def test_public_sql_and_terminology_hygiene() -> None:
     """Ensure SQL files contain no scratchpad project IDs and docs avoid Path A/B collisions."""
-    for sql_file in sorted((REPO_ROOT / "sql").glob("*.sql")):
+    for sql_file in sorted((REPO_ROOT / "sql").rglob("*.sql")):
         content = sql_file.read_text(encoding="utf-8")
         assert "btv-scratch" not in content, (
             f"{sql_file.name} leaks scratchpad project ID into public SQL"

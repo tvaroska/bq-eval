@@ -9,36 +9,40 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlglot import exp
 
-from bq_eval.contract.governance import (
-    AppGovernanceRecord,
-    AutonomyTier,
-    CapacityDeadlineJobPayload,
-    LifecycleTrackPolicy,
-    RiskLevel,
-)
-from bq_eval.contract.optimizer import PairedEvalOutcome
-from bq_eval.contract.otel import (
+from bq_eval.core.contract.otel import (
     FinOpsTrafficType,
     GenAISpanKind,
     ServingTrafficType,
     TracePayloadRecord,
     normalize_serving_traffic_type,
 )
-from bq_eval.contract.pricing import DEFAULT_MODEL_SKUS, normalize_model_name
-from bq_eval.engine.chargeback_3pool import (
+from bq_eval.core.contract.pricing import DEFAULT_MODEL_SKUS, normalize_model_name
+from bq_eval.core.engine.cost import compute_span_burndown_tokens, compute_span_cost_usd
+from bq_eval.core.engine.otel_export import (
+    GenAISpanRecorder,
+    RingBufferSpanExporter,
+    format_x_cloud_trace_context,
+    parse_trace_context_headers,
+)
+from bq_eval.core.engine.ports import SQLiteEvalBackend
+from bq_eval.core.engine.sql_eval import evaluate_traces_in_sqlite
+from bq_eval.finops.contract.chargeback import CapacityDeadlineJobPayload
+from bq_eval.finops.contract.governance import (
+    AppGovernanceRecord,
+    AutonomyTier,
+    LifecycleTrackPolicy,
+    RiskLevel,
+)
+from bq_eval.finops.engine.chargeback_three_pool import (
     allocate_focus_three_pool_hourly_chargeback,
     build_capacity_residual_schedule_request,
 )
-from bq_eval.engine.finops import (
-    compute_span_burndown_tokens,
-    compute_span_cost_usd,
-)
-from bq_eval.engine.governance import (
+from bq_eval.finops.engine.governance import (
     InferenceRequestLogRecord,
     evaluate_app_governance,
     reconcile_inference_requests,
 )
-from bq_eval.engine.omni import (
+from bq_eval.finops.engine.multicloud import (
     FORBIDDEN_RAW_PAYLOAD_COLUMNS,
     RemoteTraceSliceRecord,
     build_omni_in_residency_judge_sql,
@@ -47,24 +51,17 @@ from bq_eval.engine.omni import (
     reconcile_multicloud_cpvo,
     verify_zero_raw_payload_egress,
 )
-from bq_eval.engine.optimizer import (
+from bq_eval.finops.engine.sqlite_capacity import (
+    evaluate_5m_breaches_in_sqlite,
+    evaluate_hourly_burndown_in_sqlite,
+    evaluate_interaction_lineage_in_sqlite,
+)
+from bq_eval.labs.contract.optimizer import PairedEvalOutcome
+from bq_eval.labs.engine.optimizer import (
     cluster_failure_loss_bank,
     evaluate_clause_scoped_nfr_gate,
     export_atif_v1_8_trajectories,
     sanitize_atif_text,
-)
-from bq_eval.engine.otel_export import (
-    GenAISpanRecorder,
-    RingBufferSpanExporter,
-    format_x_cloud_trace_context,
-    parse_trace_context_headers,
-)
-from bq_eval.engine.ports import SQLiteEvalBackend
-from bq_eval.engine.sql_eval import (
-    evaluate_5m_breaches_in_sqlite,
-    evaluate_hourly_burndown_in_sqlite,
-    evaluate_interaction_lineage_in_sqlite,
-    evaluate_traces_in_sqlite,
 )
 from tests.conftest import make_span
 from tests.test_sql_contracts import (
@@ -285,7 +282,7 @@ def test_inference_reconciliation_and_rl1_rl5_governance_parity() -> None:
     _install_enterprise_views(conn)
     _install_extra_views(
         conn,
-        "views.sql",
+        "finops/capacity_views.sql",
         ("agent_eval.v_inference_request_reconciliation", "agent_eval.v_app_risk_governance"),
     )
     conn.executemany(
@@ -460,7 +457,9 @@ def test_three_pool_focus_chargeback_and_capacity_bq_g1_wire_contract() -> None:
     conn = _new_sqlite_bq_conn()
     _create_enterprise_sqlite_fixture(conn)
     _install_enterprise_views(conn)
-    _install_extra_views(conn, "views.sql", ("agent_eval.v_focus_three_pool_hourly_chargeback",))
+    _install_extra_views(
+        conn, "finops/capacity_views.sql", ("agent_eval.v_focus_three_pool_hourly_chargeback",)
+    )
     conn.executemany(
         "INSERT INTO app_registry (apphub_application_id, cost_center, funded_gsus) VALUES (?,?,?)",
         [("app-funded", "CC-FUNDED", 5.0), ("app-burst", "CC-BURST", 5.0)],
@@ -479,8 +478,8 @@ def test_three_pool_focus_chargeback_and_capacity_bq_g1_wire_contract() -> None:
 
 
 def test_bigquery_omni_zero_egress_ast_proof_and_multicloud_cpvo() -> None:
-    """`sql/omni_spoke_views.sql` proves zero raw prompt egress, strict fallback, and unified CPVO."""
-    omni_sql = (SQL_DIR / "omni_spoke_views.sql").read_text(encoding="utf-8")
+    """`sql/finops/omni_spoke_views.sql` proves zero raw prompt egress, strict fallback, and unified CPVO."""
+    omni_sql = (SQL_DIR / "finops" / "omni_spoke_views.sql").read_text(encoding="utf-8")
     stmts = _parse_bigquery_statements(omni_sql, "omni_spoke_views.sql")
     ok, violations = verify_zero_raw_payload_egress(omni_sql)
     assert ok, f"Zero-egress violation: {violations}"
@@ -597,7 +596,7 @@ def test_sessions_5m_breaches_optimize_lane_and_ring_buffer() -> None:
     _install_enterprise_views(conn)
     _install_extra_views(
         conn,
-        "views.sql",
+        "finops/capacity_views.sql",
         ("agent_eval.v_interaction_session_lineage", "agent_eval.v_live_slo_and_429_breaches"),
     )
     for sp in spans:
@@ -657,7 +656,7 @@ def test_clause_scoped_nfr_gate_loss_bank_and_atif_export() -> None:
     _create_enterprise_sqlite_fixture(conn)
     _install_extra_views(
         conn,
-        "step3_saved_results.sql",
+        "core/step3_saved_results.sql",
         ("agent_eval.v_step3_paired_run_comparison", "agent_eval.v_step3_policy_nfr_gate"),
     )
     conn.executemany(

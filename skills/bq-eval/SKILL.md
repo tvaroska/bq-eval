@@ -2,7 +2,7 @@
 name: bq-eval
 description: >-
   Step 2.5+ Agentic Skill for BQ Eval & FinOps (`bq-eval`). Works identically
-  across Light Capture (`BQAA` `agent_events` via `sql/bqaa_adapter_views.sql`)
+  across Light Capture (`BQAA` `agent_events` via `sql/core/bqaa_adapter_views.sql`)
   and Full Capture (OpenTelemetry `_AllSpans`). Translates plain-English
   evaluation requirements into 4-point ordinal rubrics (`step2_rubrics.csv` /
   `agent_eval.rubrics`), custom BigQuery `AI.GENERATE_TABLE` (Engine A) or
@@ -15,14 +15,14 @@ description: >-
 
 ## When to Use This Skill (And When Not To)
 
-- **Step 0 (Choose Ingestion Mode)**: Point `agent_eval.otel_spans` and `agent_eval.trace_payloads` at **Light Capture (`BQAA` `agent_events`)** using [`../../sql/bqaa_adapter_views.sql`](../../sql/bqaa_adapter_views.sql), **Full Capture (OpenTelemetry `_AllSpans`)** using [`../../sql/ddl.sql`](../../sql/ddl.sql), or **Hybrid `UNION ALL`**.
-- **Step 1 (Basic Trace Evals & Cost per Outcome — `0` New Tables)**: **Do NOT need this skill.** Deploy static [`../../sql/step1_trace_views.sql`](../../sql/step1_trace_views.sql) directly on existing traces or `BQAA` events.
-- **Step 2 (Default Rubrics on 100% or 10% of Traces — `1` Rubric Table)**: **Do NOT need this skill** if running the pre-built rubrics in [`../../sql/step2_rubrics.csv`](../../sql/step2_rubrics.csv) with [`../../sql/step2_stateless_eval.sql`](../../sql/step2_stateless_eval.sql).
+- **Step 0 (Choose Ingestion Mode)**: Point `agent_eval.otel_spans` and `agent_eval.trace_payloads` at **Light Capture (`BQAA` `agent_events`)** using [`../../sql/core/bqaa_adapter_views.sql`](../../sql/core/bqaa_adapter_views.sql), **Full Capture (OpenTelemetry `_AllSpans`)** using [`../../sql/core/ddl.sql`](../../sql/core/ddl.sql), or **Hybrid `UNION ALL`**.
+- **Step 1 (Basic Trace Evals & Cost per Outcome — `0` New Tables)**: **Do NOT need this skill.** Deploy static [`../../sql/core/step1_trace_views.sql`](../../sql/core/step1_trace_views.sql) directly on existing traces or `BQAA` events.
+- **Step 2 (Default Rubrics on 100% or 10% of Traces — `1` Rubric Table)**: **Do NOT need this skill** if running the pre-built rubrics in [`../../sql/core/step2_rubrics.csv`](../../sql/core/step2_rubrics.csv) with [`../../sql/core/step2_stateless_eval.sql`](../../sql/core/step2_stateless_eval.sql).
 - **Step 2.5 (Custom Rubrics & Custom Trace Slices)**: **Use this skill** whenever a user asks in plain English to:
   1. **Define a new rubric** (e.g., *"Add a rubric checking that commercial underwriting summaries explain the primary risk driver without promising coverage"*).
   2. **Run an evaluation on a custom slice of traces** (e.g., *"Run groundedness on 5% of traces"*, *"Run only on the last 1 hour of traces"*, *"Run on slow traces over 4 seconds for `claims-triage-agent`"*).
   3. **Add custom domain checks to Step 1** (e.g., checking app-specific JSON keys, `[DOC-xxx]` citation anchors, or tool-to-answer math in SQL).
-  4. **Save outputs to Step 3 (`eval_results`) or compare two runs** for `0%` negative flips ([`../../sql/step3_saved_results.sql`](../../sql/step3_saved_results.sql)).
+  4. **Save outputs to Step 3 (`eval_results`) or compare two runs** for `0%` negative flips ([`../../sql/core/step3_saved_results.sql`](../../sql/core/step3_saved_results.sql)).
 
 Read [`references/sql_recipes.md`](references/sql_recipes.md) for copy-paste and composable BigQuery SQL templates.
 
@@ -47,7 +47,7 @@ When the user describes a new evaluation criterion in plain English:
      `First write reasoning_trace citing specific evidence, then emit ordinal_score (1..4).`
 
 2. **Register the Rubric in CSV and/or BigQuery**:
-   - Append the row to [`../../sql/step2_rubrics.csv`](../../sql/step2_rubrics.csv) (if using the Cloud Storage CSV external table), **or**
+   - Append the row to [`../../sql/core/step2_rubrics.csv`](../../sql/core/step2_rubrics.csv) (if using the Cloud Storage CSV external table), **or**
    - Execute a `MERGE INTO agent_eval.rubrics` statement in BigQuery (see [`references/sql_recipes.md`](references/sql_recipes.md)).
 
 ---
@@ -74,6 +74,6 @@ The source is **always traces** via `agent_eval.v_step2_trace_rubric_prompts`. C
 
 ## Workflow 3: Promote Stateless Runs to Step 3 (`eval_results`)
 
-When the user asks to **save** the evaluation outputs (for historical trends or paired model comparisons in [`../../sql/step3_saved_results.sql`](../../sql/step3_saved_results.sql)):
+When the user asks to **save** the evaluation outputs (for historical trends or paired model comparisons in [`../../sql/core/step3_saved_results.sql`](../../sql/core/step3_saved_results.sql)):
 - Copy the full 16-column Step-3 `INSERT INTO \`agent_eval.eval_results\` (...)` template from [`references/sql_recipes.md`](references/sql_recipes.md) — Recipe 8 for Engine A (`AI.GENERATE_TABLE`) or Recipe 6 for Engine B (`AI.EVALUATE_AGENT`) — using a named `eval_run_id` (e.g., `'run_2026_11_06_last_1h'`) so `outcome_id`, `rule0_pass`, `binary_pass`, and judge token columns align with `agent_eval.v_step3_eval_runs` and `agent_eval.v_step3_paired_run_comparison`.
 - Always keep the `LEFT JOIN \`agent_eval.eval_results\` AS existing ON cand.trace_id = existing.trace_id AND cand.rubric_id = existing.rubric_id AND existing.eval_run_id = '...' WHERE ... AND existing.eval_id IS NULL` idempotency guard so re-running never double-bills already-scored traces.

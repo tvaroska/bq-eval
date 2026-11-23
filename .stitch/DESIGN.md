@@ -36,7 +36,7 @@
 - **Code, Identifiers & SQL**: `"Roboto Mono"`, `"JetBrains Mono Variable"`, `"JetBrains Mono"`, `ui-monospace`, `monospace`.
 - **Tabular Numerals**: Apply `font-variant-numeric: tabular-nums` across all KPI cards, pass-rate tables, confidence intervals, token counts, and USD columns (`text-align: right` on numeric cells).
 - **Reduced Motion**: Respect `@media (prefers-reduced-motion: reduce)` by disabling transitions on tabs and controls.
-- **Single-Point HTML Escaping & Fail-Closed Truthfulness**: Render exclusively from typed `PageView` objects in `bq_eval/showcase/renderer.py` through one `_esc()` (`html.escape(..., quote=True)`) boundary. Never turn `None` (`UNJUDGED` / `UNCALIBRATED`) into `0.0%` or `$0.0000`, and never display `PASS` when `passes_irr_gate` is `False` or `None`.
+- **Single-Point HTML Escaping & Fail-Closed Truthfulness**: Render exclusively from typed `PageView` objects in `bq_eval/demo/renderer.py` through one `_esc()` (`html.escape(..., quote=True)`) boundary. Never turn `None` (`UNJUDGED` / `UNCALIBRATED`) into `0.0%` or `$0.0000`, and never display `PASS` when `passes_irr_gate` is `False` or `None`.
 
 ## 4. Layout & 4-Tab Workbench Architecture (`bq-eval serve` & `--html-out`)
 - **Max Container Width**: `1280px`, `24px` outer padding, `16px` grid gap, `8px`–`12px` card border-radius with `1px solid var(--outline-variant)`.
@@ -50,5 +50,5 @@
 - No decorative left-edge or top-edge colored accent bars on cards.
 - No icon-in-circle KPI headers, warm/cream paper backgrounds, or serif display headings.
 - No `feTurbulence` SVG noise overlays or staggered list reveal animations.
-- No embedded evaluation/FinOps math in browser JavaScript (all calculations execute in `bq_eval/engine/`).
+- No embedded evaluation/FinOps math in browser JavaScript (all calculations execute in `bq_eval/core/engine/`).
 - No synthetic `0.0%`, `$0.0000`, or hardcoded `PASS` badges on `UNJUDGED`, `UNCALIBRATED`, or failing-IRR rows.

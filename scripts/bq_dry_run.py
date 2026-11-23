@@ -19,7 +19,7 @@ from typing import Any
 import sqlglot
 from sqlglot import TokenType
 
-from bq_eval.engine.sql_eval import (
+from bq_eval.core.engine.sql_eval import (
     build_ai_evaluate_agent_sql,
     build_ai_generate_table_judge_sql,
 )
@@ -183,7 +183,7 @@ def collect_dry_run_manifest(
     skip_generated: bool = False,
 ) -> dict[str, Any]:
     """Build a sanitized statement inventory (`checked` vs. `skipped`) across `sql/*.sql`."""
-    sql_files = [SQL_DIR / name for name in files] if files else sorted(SQL_DIR.glob("*.sql"))
+    sql_files = [SQL_DIR / name for name in files] if files else sorted(SQL_DIR.rglob("*.sql"))
     per_file: dict[str, dict[str, int]] = {}
     total_checked = 0
     total_skipped = 0
@@ -198,7 +198,7 @@ def collect_dry_run_manifest(
                 file_skipped += 1
             else:
                 file_checked += 1
-        per_file[sql_file.name] = {
+        per_file[sql_file.relative_to(SQL_DIR).as_posix()] = {
             "checked": file_checked,
             "skipped": file_skipped,
             "total": file_checked + file_skipped,
@@ -286,7 +286,7 @@ def _run_live_dry_run(
     skip_generated: bool,
     receipt_out: Path | None,
 ) -> int:
-    sql_files = [SQL_DIR / name for name in files] if files else sorted(SQL_DIR.glob("*.sql"))
+    sql_files = [SQL_DIR / name for name in files] if files else sorted(SQL_DIR.rglob("*.sql"))
     failures: list[str] = []
     per_file: dict[str, dict[str, int]] = {}
     checked = 0
@@ -306,11 +306,14 @@ def _run_live_dry_run(
             checked += 1
             file_checked += 1
             if ok:
-                print(f"PASS {sql_file.name}#{idx}")
+                print(f"PASS {sql_file.relative_to(SQL_DIR).as_posix()}#{idx}")
             else:
-                print(f"FAIL {sql_file.name}#{idx}: {output}", file=sys.stderr)
-                failures.append(f"{sql_file.name}#{idx}")
-        per_file[sql_file.name] = {
+                print(
+                    f"FAIL {sql_file.relative_to(SQL_DIR).as_posix()}#{idx}: {output}",
+                    file=sys.stderr,
+                )
+                failures.append(f"{sql_file.relative_to(SQL_DIR).as_posix()}#{idx}")
+        per_file[sql_file.relative_to(SQL_DIR).as_posix()] = {
             "checked": file_checked,
             "skipped": file_skipped,
             "total": file_checked + file_skipped,

@@ -7,50 +7,55 @@
   "live_bq_dry_run_executed": false,
   "mode": "offline_sqlglot_manifest",
   "per_file": {
-    "bqaa_adapter_views.sql": {
+    "core/bqaa_adapter_views.sql": {
       "checked": 7,
       "skipped": 1,
       "total": 8
     },
-    "ddl.sql": {
+    "core/ddl.sql": {
       "checked": 18,
       "skipped": 9,
       "total": 27
     },
-    "demo_time_shift_loadgen.sql": {
-      "checked": 4,
-      "skipped": 1,
-      "total": 5
-    },
-    "omni_spoke_views.sql": {
-      "checked": 4,
-      "skipped": 2,
-      "total": 6
-    },
-    "step1_trace_views.sql": {
+    "core/step1_trace_views.sql": {
       "checked": 10,
       "skipped": 1,
       "total": 11
     },
-    "step2_stateless_eval.sql": {
+    "core/step2_stateless_eval.sql": {
       "checked": 7,
       "skipped": 2,
       "total": 9
     },
-    "step3_daily_quota_guard.sql": {
+    "core/step3_daily_quota_guard.sql": {
       "checked": 5,
       "skipped": 1,
       "total": 6
     },
-    "step3_saved_results.sql": {
+    "core/step3_saved_results.sql": {
       "checked": 4,
       "skipped": 0,
       "total": 4
     },
-    "views.sql": {
-      "checked": 12,
+    "core/views.sql": {
+      "checked": 6,
       "skipped": 0,
-      "total": 12
+      "total": 6
+    },
+    "demo/demo_time_shift_loadgen.sql": {
+      "checked": 4,
+      "skipped": 1,
+      "total": 5
+    },
+    "finops/capacity_views.sql": {
+      "checked": 6,
+      "skipped": 0,
+      "total": 6
+    },
+    "finops/omni_spoke_views.sql": {
+      "checked": 4,
+      "skipped": 2,
+      "total": 6
     }
   },
   "project_id": "showcase-project",

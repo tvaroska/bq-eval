@@ -10,14 +10,15 @@ from pathlib import Path
 import pytest
 
 from bq_eval.cli.app import main as cli_main
-from bq_eval.contract.otel import OTelGenAISpanRecord
-from bq_eval.contract.results import ConfusionMatrix
-from bq_eval.engine.bootstrap import (
+from bq_eval.core.contract.otel import OTelGenAISpanRecord
+from bq_eval.core.contract.results import ConfusionMatrix
+from bq_eval.core.engine.sql_eval import evaluate_traces_in_sqlite
+from bq_eval.deploy.engine.bootstrap import (
     normalize_payload_prefix,
     substitute_sql_parameters,
     validate_bootstrap_offline,
 )
-from bq_eval.engine.empirical_proof import (
+from bq_eval.labs.engine.empirical_proof import (
     BlindHumanLabelRow,
     analyze_unconfounded_context_cliff_arms,
     build_bq_query_cost_row,
@@ -27,7 +28,6 @@ from bq_eval.engine.empirical_proof import (
     sum_bq_query_costs_by_app,
     validate_blind_dual_human_labels,
 )
-from bq_eval.engine.sql_eval import evaluate_traces_in_sqlite
 from tests.conftest import make_span
 from tests.test_sql_contracts import (
     ENTERPRISE_EVAL_RESULTS_BASE_INSERT,
@@ -118,7 +118,7 @@ def test_bootstrap_offline_schema_all_modes_and_cli(
 
 def test_dual_schema_completions_top_level_and_nested_json_payloads() -> None:
     """`v_otel_logs_payloads_only` reads both top-level `completions` columns and nested `payload` JSON."""
-    ddl_path = SQL_DIR / "ddl.sql"
+    ddl_path = SQL_DIR / "core" / "ddl.sql"
     logs_view_sql = _transpile_bq_view_to_sqlite(
         _extract_view_sql_text(ddl_path, "agent_eval.v_otel_logs_payloads_only")
         .replace("`obs_logs._AllLogs`", "`_AllLogs`")
