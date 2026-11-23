@@ -181,6 +181,15 @@ def test_m2_live_receipt_sha256_manifest_and_custom_scenario_replay(
     assert receipt.kyc_cohort.structural_step1_rejects == 28
     assert receipt.kyc_cohort.po_box_step1_traps_caught == 8
     assert receipt.kyc_cohort.ocr_step1_rejects == 8
+
+    from bq_eval.showcase.render.renderer import render_page_view_html
+    from bq_eval.showcase.render.view import build_showcase_page_view
+
+    workbench_html = render_page_view_html(build_showcase_page_view(m2_artifacts, live_api=False))
+    assert "28 structural + 8 PO Box + 8 OCR" in workbench_html
+    assert "44 of 280 cases rejected" in workbench_html
+    assert "28/28" not in workbench_html
+    assert "8/8" not in workbench_html
     assert sum(m.verified_outcomes for m in receipt.rfp_modalities) == 35
     assert sum(c.total_traces for c in receipt.attribution_cohorts) == 343
 

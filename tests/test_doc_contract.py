@@ -163,14 +163,12 @@ def _assert_results_match_kpis(readme: str, parsed: dict[str, Any]) -> None:
 
     kyc = kpi["live_kyc_280_cases"]
     kyc_cpvo = f"${summaries['kyc-address-verification']['outcome_cost_per_verified_usd']:.4f}"
-    assert (
-        f"`{kyc['structural_step1_rejects']}/{kyc['structural_step1_rejects']}` structural"
-        in readme
-    )
-    assert (
-        f"`{kyc['po_box_step1_traps_caught']}/{kyc['po_box_step1_traps_caught']}` PO Box" in readme
-    )
+    assert f"`{kyc['structural_step1_rejects']}` structural" in readme
+    assert f"`{kyc['po_box_step1_traps_caught']}` PO Box" in readme
     assert f"`{kyc['ocr_step1_rejects']}` OCR" in readme
+    # Step-1 rejects are counts by reason; the receipt holds no planted total to divide by.
+    assert f"`{kyc['structural_step1_rejects']}/" not in readme
+    assert f"`{kyc['po_box_step1_traps_caught']}/" not in readme
     assert f"`{kyc['judged_rows']}` Rule-0 passing" in readme
     assert f"`AC2 = {kyc['gwet_ac2']:.4f}`" in readme
     assert f"calibrated `{kyc['calibrated_pass_rate'] * 100:.2f}%`" in readme

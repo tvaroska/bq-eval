@@ -284,16 +284,24 @@ def _build_live_receipt_cards(receipt: LiveFleetReceipt) -> tuple[CardView, ...]
             ),
             rows=(
                 (
-                    CellView(text="Step 1 Deterministic SQL Catches"),
+                    CellView(text="Step 1 Rule-Check Rejects"),
                     CellView(
                         text=(
-                            f"{kyc.structural_step1_rejects}/{kyc.structural_step1_rejects} structural + "
-                            f"{kyc.po_box_step1_traps_caught}/{kyc.po_box_step1_traps_caught} PO Box"
+                            f"{kyc.structural_step1_rejects} structural + "
+                            f"{kyc.po_box_step1_traps_caught} PO Box + "
+                            f"{kyc.ocr_step1_rejects} OCR"
                         ),
                         align_right=True,
                         strong=True,
                     ),
-                    CellView(text="Screened at $0 LLM judge spend before Tier 2"),
+                    # The receipt records reject counts by reason, not a planted total,
+                    # so these are counts rather than caught/planted ratios.
+                    CellView(
+                        text=(
+                            f"{kyc.structural_step1_rejects + kyc.po_box_step1_traps_caught + kyc.ocr_step1_rejects}"
+                            f" of {kyc.total_cases} cases rejected at $0 judge spend"
+                        )
+                    ),
                 ),
                 (
                     CellView(text="Step 2 Semantic Trap Recall (Flash)"),
