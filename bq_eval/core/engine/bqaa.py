@@ -41,6 +41,23 @@ def _first_non_empty(*candidates: object) -> str | None:
     return None
 
 
+def _parse_optional_int(raw: object) -> int | None:
+    """Parse int, whole float, or numeric string matching SQL `SAFE_CAST(... AS INT64)`."""
+    result: int | None = None
+    if isinstance(raw, int) and not isinstance(raw, bool):
+        result = raw
+    elif isinstance(raw, float) and raw.is_integer():
+        result = int(raw)
+    elif isinstance(raw, str):
+        text = raw.strip()
+        if text:
+            try:
+                result = int(text)
+            except ValueError:
+                result = None
+    return result
+
+
 def resolve_bqaa_trace_id(ev: BQAAAgentEvent) -> str:
     """Resolve canonical trace ID (`attributes.otel.trace_id` -> `trace_id` -> `invocation_id`)."""
     otel_ctx = ev.attributes.get("otel")
@@ -113,7 +130,7 @@ def _resolve_tool_call_status(ev: BQAAAgentEvent) -> str | None:
         return explicit.upper()
 
     raw_code = ev.content.get("code")
-    code_int = int(raw_code) if isinstance(raw_code, (int, float)) else None
+    code_int = _parse_optional_int(raw_code)
     msg = ev.error_message or ""
     status = "TOOL_ERROR"
     if code_int in {408, 503, 504} or _TIMEOUT_RE.search(msg):
@@ -179,9 +196,10 @@ def _bqaa_event_to_span(ev: BQAAAgentEvent) -> OTelGenAISpanRecord | None:
         meta.get("request_type_header"),
     )
     raw_http = ev.content.get("code", attrs.get("http.response.status_code"))
+    parsed_http = _parse_optional_int(raw_http)
     http_code = (
-        int(raw_http)
-        if isinstance(raw_http, (int, float)) and 100 <= int(raw_http) <= 599
+        parsed_http
+        if parsed_http is not None and 100 <= parsed_http <= 599
         else (500 if is_error else 200)
     )
     raw_turn = meta.get("interaction.turn_index", attrs.get("turn_index"))

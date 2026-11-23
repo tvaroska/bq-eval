@@ -1,4 +1,4 @@
-"""Capture-Once, Time-Shift & Multiply Demo Load Generator (`bq_eval.showcase.loadgen`)."""
+"""Capture-Once, Time-Shift & Multiply Demo Load Generator (`bq_eval.demo.loadgen`)."""
 
 from __future__ import annotations
 

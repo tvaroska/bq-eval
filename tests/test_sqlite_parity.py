@@ -299,7 +299,9 @@ def test_sqlite_v_outcomes_ordering_step2_all_pass_counterparty_and_multi_rubric
 
 def test_real_p95_and_latest_array_agg_plus_strict_judge_pricing() -> None:
     """Transpiled `APPROX_QUANTILES` computes real P95 (not MAX), `ARRAY_AGG DESC` picks latest, and unknown judge returns NULL."""
-    views_sql = (SQL_DIR / "core" / "views.sql").read_text(encoding="utf-8")
+    views_sql = (SQL_DIR / "core" / "views.sql").read_text(encoding="utf-8") + (
+        SQL_DIR / "core" / "summary_views.sql"
+    ).read_text(encoding="utf-8")
     assert "ELSE 0.15" not in views_sql
     assert "ELSE 0.60" not in views_sql
 
@@ -428,8 +430,9 @@ def test_prefix_cache_dilution_direction_and_wif_collector_attribute() -> None:
 
 
 def test_value_parity_step1_step2_xml_escaping_step3_runs_and_ddl_views() -> None:
-    """Execute transpiled `v_step1_trace_eval`, `v_step2_all_trace_rubric_prompts`, `v_step3_eval_runs`, and `sql/core/ddl.sql` views."""
-    ddl_path = SQL_DIR / "core" / "ddl.sql"
+    """Execute transpiled `v_step1_trace_eval`, `v_step2_all_trace_rubric_prompts`, `v_step3_eval_runs`, and compat views."""
+    compat_path = SQL_DIR / "core" / "otel_compat_views.sql"
+    pricing_path = SQL_DIR / "core" / "pricing_seed.sql"
     step1_path = SQL_DIR / "core" / "step1_trace_views.sql"
     step2_path = SQL_DIR / "core" / "step2_stateless_eval.sql"
     step3_path = SQL_DIR / "core" / "step3_saved_results.sql"
@@ -502,24 +505,24 @@ def test_value_parity_step1_step2_xml_escaping_step3_runs_and_ddl_views() -> Non
     )
 
     allspans_only_sql = _transpile_bq_view_to_sqlite(
-        _extract_view_sql_text(ddl_path, "agent_eval.v_otel_allspans_only")
+        _extract_view_sql_text(compat_path, "agent_eval.v_otel_allspans_only")
         .replace("`obs_traces._AllSpans`", "`_AllSpans`")
         .replace("status.code", "status_code_raw")
         .replace("resource.attributes", "resource_attributes")
     )
     otel_spans_sql = _transpile_bq_view_to_sqlite(
-        _extract_view_sql_text(ddl_path, "agent_eval.otel_spans")
+        _extract_view_sql_text(compat_path, "agent_eval.otel_spans")
     )
     logs_only_sql = _transpile_bq_view_to_sqlite(
-        _extract_view_sql_text(ddl_path, "agent_eval.v_otel_logs_payloads_only")
+        _extract_view_sql_text(compat_path, "agent_eval.v_otel_logs_payloads_only")
         .replace("`obs_logs._AllLogs`", "`_AllLogs`")
         .replace("l.resource.labels", "l.resource_labels")
     )
     trace_payloads_sql = _transpile_bq_view_to_sqlite(
-        _extract_view_sql_text(ddl_path, "agent_eval.trace_payloads")
+        _extract_view_sql_text(compat_path, "agent_eval.trace_payloads")
     )
     pricing_sql = _transpile_bq_view_to_sqlite(
-        _extract_view_sql_text(step1_path, "agent_eval.v_default_model_pricing")
+        _extract_view_sql_text(pricing_path, "agent_eval.v_default_model_pricing")
     )
     wf_sql = _transpile_bq_view_to_sqlite(
         _extract_view_sql_text(step1_path, "agent_eval.v_step1_trace_waterfall")

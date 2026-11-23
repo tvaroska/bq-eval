@@ -659,10 +659,9 @@ def test_policy_sha256_and_amended_clause_ids_in_judge_sql_and_ddl() -> None:
     with pytest.raises(ValueError, match="policy_sha256"):
         build_ai_generate_table_judge_sql(project_id="demo-proj", policy_sha256="not-a-sha")
 
-    ddl = (REPO_ROOT / "sql" / "core" / "ddl.sql").read_text(encoding="utf-8")
     step3 = (REPO_ROOT / "sql" / "core" / "step3_saved_results.sql").read_text(encoding="utf-8")
-    assert "policy_sha256 STRING" in ddl and "amended_clause_ids STRING" in ddl
-    assert "policy_sha256 STRING" in step3 and "policy_changed" in step3
+    assert "policy_sha256 STRING" in step3 and "amended_clause_ids STRING" in step3
+    assert "policy_changed" in step3
 
 
 def test_public_doc_hygiene_marks_evaluate_agent_preview() -> None:

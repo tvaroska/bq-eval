@@ -34,39 +34,42 @@ def _all_sql_text() -> str:
 
 
 def test_otel_spans_and_trace_payloads_are_views_over_linked_datasets() -> None:
-    """`ddl.sql` defines `otel_spans` and `trace_payloads` as views over `_AllSpans` and `_AllLogs`."""
+    """`otel_compat_views.sql` defines `otel_spans` and `trace_payloads` as views over `_AllSpans` and `_AllLogs`."""
     ddl = (SQL_DIR / "core" / "ddl.sql").read_text(encoding="utf-8")
+    compat = (SQL_DIR / "core" / "otel_compat_views.sql").read_text(encoding="utf-8")
 
     assert re.search(
         r"CREATE\s+OR\s+REPLACE\s+VIEW\s+`?(?:[a-zA-Z0-9_.-]+\.)?agent_eval\.otel_spans`?",
-        ddl,
+        compat,
         re.IGNORECASE,
-    ), "agent_eval.otel_spans must be a CREATE OR REPLACE VIEW in sql/core/ddl.sql"
+    ), "agent_eval.otel_spans must be a CREATE OR REPLACE VIEW in sql/core/otel_compat_views.sql"
     assert not re.search(
         r"CREATE\s+TABLE(?:\s+IF\s+NOT\s+EXISTS)?\s+`?(?:[a-zA-Z0-9_.-]+\.)?agent_eval\.otel_spans`?",
-        ddl,
+        ddl + "\n" + compat,
         re.IGNORECASE,
-    ), "agent_eval.otel_spans must not be a physical CREATE TABLE in sql/core/ddl.sql"
-    assert "_AllSpans" in ddl, "otel_spans view must read from obs_traces._AllSpans"
+    ), "agent_eval.otel_spans must not be a physical CREATE TABLE"
+    assert "_AllSpans" in compat, "otel_spans view must read from obs_traces._AllSpans"
 
     assert re.search(
         r"CREATE\s+OR\s+REPLACE\s+VIEW\s+`?(?:[a-zA-Z0-9_.-]+\.)?agent_eval\.trace_payloads`?",
-        ddl,
+        compat,
         re.IGNORECASE,
-    ), "agent_eval.trace_payloads must be a CREATE OR REPLACE VIEW in sql/core/ddl.sql"
-    assert "_AllLogs" in ddl, "trace_payloads view must read from obs_logs._AllLogs"
-    assert "completions" in ddl and "_FILE_NAME" in ddl, (
+    ), (
+        "agent_eval.trace_payloads must be a CREATE OR REPLACE VIEW in sql/core/otel_compat_views.sql"
+    )
+    assert "_AllLogs" in compat, "trace_payloads view must read from obs_logs._AllLogs"
+    assert "completions" in compat and "_FILE_NAME" in compat, (
         "trace_payloads view must join _AllLogs with BigLake completions on _FILE_NAME"
     )
 
 
 def test_otel_spans_compat_view_projects_all_columns() -> None:
     """`agent_eval.v_otel_allspans_only` & `agent_eval.otel_spans` map all required `_AllSpans` columns."""
-    ddl = (SQL_DIR / "core" / "ddl.sql").read_text(encoding="utf-8")
+    compat = (SQL_DIR / "core" / "otel_compat_views.sql").read_text(encoding="utf-8")
 
     wrapper_match = re.search(
         r"CREATE\s+OR\s+REPLACE\s+VIEW\s+`?(?:[a-zA-Z0-9_.-]+\.)?agent_eval\.otel_spans`?\s+AS(.*?);",
-        ddl,
+        compat,
         re.IGNORECASE | re.DOTALL,
     )
     assert wrapper_match is not None, "Could not locate agent_eval.otel_spans view body"
@@ -74,7 +77,7 @@ def test_otel_spans_compat_view_projects_all_columns() -> None:
 
     view_match = re.search(
         r"CREATE\s+OR\s+REPLACE\s+VIEW\s+`?(?:[a-zA-Z0-9_.-]+\.)?agent_eval\.v_otel_allspans_only`?\s+AS(.*?);",
-        ddl,
+        compat,
         re.IGNORECASE | re.DOTALL,
     )
     assert view_match is not None, "Could not locate agent_eval.v_otel_allspans_only view body"

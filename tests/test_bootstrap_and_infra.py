@@ -157,9 +157,9 @@ def test_bootstrap_offline_schema_all_modes_and_cli(
 
 def test_dual_schema_completions_top_level_and_nested_json_payloads() -> None:
     """`v_otel_logs_payloads_only` reads both top-level `completions` columns and nested `payload` JSON."""
-    ddl_path = SQL_DIR / "core" / "ddl.sql"
+    compat_path = SQL_DIR / "core" / "otel_compat_views.sql"
     logs_view_sql = _transpile_bq_view_to_sqlite(
-        _extract_view_sql_text(ddl_path, "agent_eval.v_otel_logs_payloads_only")
+        _extract_view_sql_text(compat_path, "agent_eval.v_otel_logs_payloads_only")
         .replace("`obs_logs._AllLogs`", "`_AllLogs`")
         .replace("l.resource.labels", "l.resource_labels")
     )
@@ -322,7 +322,10 @@ def test_wheel_contains_sql_and_receipt(tmp_path: Path) -> None:
         names = set(zf.namelist())
         for required in (
             "bq_eval/_bundled/sql/core/ddl.sql",
+            "bq_eval/_bundled/sql/core/otel_compat_views.sql",
+            "bq_eval/_bundled/sql/core/pricing_seed.sql",
             "bq_eval/_bundled/sql/core/views.sql",
+            "bq_eval/_bundled/sql/core/summary_views.sql",
             "bq_eval/_bundled/sql/core/step1_trace_views.sql",
             "bq_eval/_bundled/sql/core/step2_stateless_eval.sql",
             "bq_eval/_bundled/sql/finops/capacity_views.sql",

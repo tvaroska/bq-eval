@@ -404,8 +404,8 @@ def test_results_doc_kpis_match_demo_json_and_offline_twin() -> None:
     )
     manifest = bq_dry_run.collect_dry_run_manifest(project_id="showcase-project")
     assert dry_run_receipt == manifest
-    assert manifest["checked"] == 75
-    assert manifest["skipped"] == 17
+    assert manifest["checked"] == 74
+    assert manifest["skipped"] == 15
 
     _assert_results_match_kpis(
         results_md,

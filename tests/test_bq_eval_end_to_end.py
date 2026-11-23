@@ -43,16 +43,22 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 def test_ddl_and_views_table_parity() -> None:
-    """Verify physical tables and compatibility views in `sql/core/ddl.sql` and `sql/core/views.sql`."""
+    """Verify single-definition tables/models/views and `<= 35 KB` SQL file ceiling (`S-13`)."""
     ddl_sql = (REPO_ROOT / "sql" / "core" / "ddl.sql").read_text(encoding="utf-8")
-    views_sql = (REPO_ROOT / "sql" / "core" / "views.sql").read_text(encoding="utf-8") + (
-        REPO_ROOT / "sql" / "finops" / "capacity_views.sql"
-    ).read_text(encoding="utf-8")
+    compat_sql = (REPO_ROOT / "sql" / "core" / "otel_compat_views.sql").read_text(encoding="utf-8")
+    step2_sql = (REPO_ROOT / "sql" / "core" / "step2_stateless_eval.sql").read_text(
+        encoding="utf-8"
+    )
+    step3_sql = (REPO_ROOT / "sql" / "core" / "step3_saved_results.sql").read_text(encoding="utf-8")
+    views_sql = (
+        (REPO_ROOT / "sql" / "core" / "views.sql").read_text(encoding="utf-8")
+        + (REPO_ROOT / "sql" / "core" / "summary_views.sql").read_text(encoding="utf-8")
+        + (REPO_ROOT / "sql" / "finops" / "capacity_views.sql").read_text(encoding="utf-8")
+    )
 
-    expected_tables = {
+    expected_ddl_tables = {
         "agent_eval.app_registry",
         "agent_eval.golden_cases",
-        "agent_eval.eval_results",
         "agent_eval.sme_labels",
         "agent_eval.model_pricing_catalog",
         "agent_eval.inference_request_logs",
@@ -65,20 +71,23 @@ def test_ddl_and_views_table_parity() -> None:
     created_tables = set(
         re.findall(r"CREATE TABLE IF NOT EXISTS `(agent_eval\.[a-z0-9_]+)`", ddl_sql)
     )
-    assert created_tables == expected_tables
+    assert created_tables == expected_ddl_tables
+    assert "CREATE OR REPLACE VIEW" not in ddl_sql
+    assert "CREATE MODEL" not in ddl_sql
+    assert "CREATE TABLE IF NOT EXISTS `agent_eval.eval_results`" in step3_sql
+    assert "CREATE MODEL IF NOT EXISTS `agent_eval.gemini_3_8_flash_judge`" in step2_sql
+    assert "CREATE MODEL IF NOT EXISTS `agent_eval.gemini_4_argon_judge`" in step2_sql
 
-    expected_ddl_views = {
+    expected_compat_views = {
         "agent_eval.v_otel_allspans_only",
         "agent_eval.otel_spans",
         "agent_eval.v_otel_logs_payloads_only",
         "agent_eval.trace_payloads",
     }
-    created_ddl_views = set(
-        re.findall(r"CREATE OR REPLACE VIEW `(agent_eval\.[a-z0-9_]+)`", ddl_sql)
+    created_compat_views = set(
+        re.findall(r"CREATE OR REPLACE VIEW `(agent_eval\.[a-z0-9_]+)`", compat_sql)
     )
-    assert created_ddl_views == expected_ddl_views
-    assert "CREATE MODEL IF NOT EXISTS `agent_eval.gemini_3_8_flash_judge`" in ddl_sql
-    assert "CREATE MODEL IF NOT EXISTS `agent_eval.gemini_4_argon_judge`" in ddl_sql
+    assert created_compat_views == expected_compat_views
 
     expected_views = {
         "agent_eval.v_bq_query_cost_attribution",
@@ -97,6 +106,20 @@ def test_ddl_and_views_table_parity() -> None:
     created_views = set(re.findall(r"CREATE OR REPLACE VIEW `(agent_eval\.[a-z0-9_]+)`", views_sql))
     assert created_views == expected_views
     assert not list((REPO_ROOT / "sql").rglob("demo_docubridge_extensions.sql"))
+
+    table_defs: dict[str, list[str]] = {}
+    model_defs: dict[str, list[str]] = {}
+    for sql_file in sorted((REPO_ROOT / "sql").rglob("*.sql")):
+        assert sql_file.stat().st_size <= 35_000, (
+            f"{sql_file.relative_to(REPO_ROOT)} is {sql_file.stat().st_size} B (> 35 KB ceiling)"
+        )
+        text = sql_file.read_text(encoding="utf-8")
+        for tbl in re.findall(r"CREATE\s+TABLE\s+IF\s+NOT\s+EXISTS\s+`([^`]+)`", text):
+            table_defs.setdefault(tbl, []).append(sql_file.name)
+        for mdl in re.findall(r"CREATE\s+MODEL\s+IF\s+NOT\s+EXISTS\s+`([^`]+)`", text):
+            model_defs.setdefault(mdl, []).append(sql_file.name)
+    assert {k: v for k, v in table_defs.items() if len(v) > 1} == {}
+    assert {k: v for k, v in model_defs.items() if len(v) > 1} == {}
 
 
 def test_weighted_burndown_standard_and_long_context_cliff() -> None:

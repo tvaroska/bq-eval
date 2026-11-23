@@ -16,12 +16,20 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-import sqlglot
-from sqlglot import TokenType
-
 from bq_eval.core.engine.sql_eval import (
     build_ai_evaluate_agent_sql,
     build_ai_generate_table_judge_sql,
+)
+from bq_eval.deploy.engine.bootstrap import (
+    SKIP_DRY_RUN_PREFIXES as SKIP_DRY_RUN_PREFIXES,
+)
+from bq_eval.deploy.engine.bootstrap import (
+    normalize_payload_prefix,
+    should_skip_dry_run_statement,
+    split_sql_statements_stdlib,
+)
+from bq_eval.deploy.engine.bootstrap import (
+    strip_leading_sql_comments as strip_leading_sql_comments,
 )
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -32,15 +40,6 @@ DATASET_PREFIXES: tuple[str, ...] = (
     "agent_eval_seed",
     "obs_traces",
     "obs_logs",
-)
-
-SKIP_DRY_RUN_PREFIXES: tuple[str, ...] = (
-    "CREATE SCHEMA",
-    "CREATE EXTERNAL TABLE",
-    "CREATE MODEL",
-    "CREATE OR REPLACE PROCEDURE",
-    "CREATE PROCEDURE",
-    "ALTER TABLE",
 )
 
 
@@ -55,9 +54,7 @@ def qualify_project_datasets(  # noqa: PLR0913
 ) -> str:
     """Substitute bootstrap placeholders and prefix bare dataset refs with `project_id.` in memory."""
     bucket = payload_bucket or project_id
-    prefix = payload_prefix.lstrip("/")
-    if prefix and not prefix.endswith("/"):
-        prefix = f"{prefix}/"
+    prefix = normalize_payload_prefix(payload_prefix)
     qualified = (
         sql.replace("${PROJECT_ID}", project_id)
         .replace("${DATASET_ID}", dataset_id)
@@ -76,91 +73,14 @@ def qualify_project_datasets(  # noqa: PLR0913
     return qualified
 
 
-def strip_leading_sql_comments(sql: str) -> str:
-    """Strip leading whitespace, `--`/`#` line comments, and `/* ... */` block comments."""
-    i, n = 0, len(sql)
-    while i < n:
-        if sql[i].isspace():
-            i += 1
-        elif sql.startswith("--", i) or sql.startswith("#", i):
-            nl = sql.find("\n", i)
-            i = n if nl == -1 else nl + 1
-        elif sql.startswith("/*", i):
-            end = sql.find("*/", i + 2)
-            if end == -1:
-                return ""
-            i = end + 2
-        else:
-            break
-    return sql[i:].strip()
-
-
 def should_skip_dry_run(statement: str) -> bool:
     """Return True for empty/comment-only chunks and bootstrap DDL skipped in `--dry_run`."""
-    cleaned = strip_leading_sql_comments(statement)
-    if not cleaned:
-        return True
-    upper = cleaned.upper()
-    return any(upper.startswith(prefix) for prefix in SKIP_DRY_RUN_PREFIXES)
-
-
-def _advance_block_depths(
-    tokens: Sequence[sqlglot.Token],
-    idx: int,
-    block_depth: int,
-    case_depth: int,
-) -> tuple[int, int]:
-    tok = tokens[idx]
-    if tok.token_type == TokenType.CASE:
-        return block_depth, case_depth + 1
-    upper_text = tok.text.upper()
-    if upper_text == "BEGIN":
-        next_text = tokens[idx + 1].text.upper() if idx + 1 < len(tokens) else ""
-        return (block_depth + 1 if next_text != "TRANSACTION" else block_depth), case_depth
-    if upper_text == "END":
-        next_text = tokens[idx + 1].text.upper() if idx + 1 < len(tokens) else ""
-        if next_text in {"IF", "LOOP", "WHILE", "FOR"}:
-            return block_depth, case_depth
-        if case_depth > 0:
-            return block_depth, case_depth - 1
-        return max(0, block_depth - 1), case_depth
-    return block_depth, case_depth
+    return should_skip_dry_run_statement(statement)
 
 
 def split_sql_statements(sql: str) -> list[str]:
-    """Split a multi-statement BigQuery SQL script via `sqlglot`'s BigQuery lexer.
-
-    Preserves `BEGIN ... END;` procedure blocks as single statements while stripping leading
-    `--`/`#` and `/* ... */` comments so statements begin cleanly at their SQL keyword.
-    """
-    tokens = sqlglot.tokenize(sql, read="bigquery")
-    if not tokens:
-        return []
-
-    statements: list[str] = []
-    chunk_start = 0
-    has_non_semicolon = False
-    block_depth = 0
-    case_depth = 0
-
-    for idx, tok in enumerate(tokens):
-        if tok.token_type == TokenType.SEMICOLON and block_depth == 0:
-            if has_non_semicolon:
-                stmt = strip_leading_sql_comments(sql[chunk_start : tok.start])
-                if stmt:
-                    statements.append(stmt)
-            chunk_start = tok.end + 1
-            has_non_semicolon = False
-            continue
-        block_depth, case_depth = _advance_block_depths(tokens, idx, block_depth, case_depth)
-        if tok.token_type != TokenType.SEMICOLON:
-            has_non_semicolon = True
-
-    if has_non_semicolon:
-        tail = strip_leading_sql_comments(sql[chunk_start:])
-        if tail:
-            statements.append(tail)
-    return statements
+    """Split a multi-statement BigQuery SQL script via `bootstrap.split_sql_statements_stdlib`."""
+    return split_sql_statements_stdlib(sql)
 
 
 def _generated_sql_cases(project_id: str) -> list[tuple[str, str]]:
@@ -182,7 +102,7 @@ def collect_dry_run_manifest(
     *,
     skip_generated: bool = False,
 ) -> dict[str, Any]:
-    """Build a sanitized statement inventory (`checked` vs. `skipped`) across `sql/*.sql`."""
+    """Build a sanitized statement inventory (`checked` vs. `skipped`) across `sql/**/*.sql`."""
     sql_files = [SQL_DIR / name for name in files] if files else sorted(SQL_DIR.rglob("*.sql"))
     per_file: dict[str, dict[str, int]] = {}
     total_checked = 0
@@ -240,7 +160,7 @@ def dry_run_statement(bq_bin: str, project_id: str, statement: str) -> tuple[boo
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Run live BigQuery --dry_run validation against sql/*.sql and generated SQL.",
+        description="Run live BigQuery --dry_run validation against sql/**/*.sql and generated SQL.",
     )
     parser.add_argument(
         "--project-id",

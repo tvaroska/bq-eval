@@ -146,11 +146,12 @@ def compute_weighted_burndown_tokens(  # noqa: PLR0913
         0, input_tokens - cached_input_tokens - cache_write_5m_tokens - cache_write_1h_tokens
     )
     if long_context_threshold is not None and input_tokens > long_context_threshold:
+        cliff_scale = long_uncached_weight / uncached_weight if uncached_weight > 0 else 1.0
         return (
             long_uncached_weight * uncached_input
             + long_cached_weight * cached_input_tokens
-            + cache_write_5m_weight * cache_write_5m_tokens
-            + cache_write_1h_weight * cache_write_1h_tokens
+            + (cache_write_5m_weight * cliff_scale) * cache_write_5m_tokens
+            + (cache_write_1h_weight * cliff_scale) * cache_write_1h_tokens
             + long_output_weight * (output_tokens + thinking_tokens)
         )
     return (

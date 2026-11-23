@@ -1,5 +1,5 @@
 {
-  "checked": 75,
+  "checked": 74,
   "generated_statements": [
     "build_ai_generate_table_judge_sql",
     "build_ai_evaluate_agent_sql"
@@ -13,14 +13,24 @@
       "total": 8
     },
     "core/ddl.sql": {
-      "checked": 18,
-      "skipped": 9,
-      "total": 27
+      "checked": 12,
+      "skipped": 6,
+      "total": 18
+    },
+    "core/otel_compat_views.sql": {
+      "checked": 4,
+      "skipped": 0,
+      "total": 4
+    },
+    "core/pricing_seed.sql": {
+      "checked": 2,
+      "skipped": 0,
+      "total": 2
     },
     "core/step1_trace_views.sql": {
-      "checked": 10,
+      "checked": 9,
       "skipped": 1,
-      "total": 11
+      "total": 10
     },
     "core/step2_stateless_eval.sql": {
       "checked": 8,
@@ -34,13 +44,18 @@
     },
     "core/step3_saved_results.sql": {
       "checked": 4,
+      "skipped": 1,
+      "total": 5
+    },
+    "core/summary_views.sql": {
+      "checked": 1,
       "skipped": 0,
-      "total": 4
+      "total": 1
     },
     "core/views.sql": {
-      "checked": 6,
+      "checked": 5,
       "skipped": 0,
-      "total": 6
+      "total": 5
     },
     "demo/demo_time_shift_loadgen.sql": {
       "checked": 4,
@@ -68,5 +83,5 @@
     "CREATE PROCEDURE",
     "ALTER TABLE"
   ],
-  "skipped": 17
+  "skipped": 15
 }

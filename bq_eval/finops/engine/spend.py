@@ -6,10 +6,13 @@ import math
 from collections.abc import Mapping, Sequence
 
 from bq_eval.core.contract.otel import (
+    CACHED_INPUT_BURNDOWN_WEIGHT,
+    LONG_CONTEXT_CACHED_BURNDOWN_WEIGHT,
     LONG_CONTEXT_THRESHOLD_TOKENS,
+    LONG_CONTEXT_UNCACHED_BURNDOWN_WEIGHT,
+    UNCACHED_INPUT_BURNDOWN_WEIGHT,
     OTelGenAISpanRecord,
 )
-from bq_eval.core.engine.cost import _LONG_CACHE_BURNDOWN_DELTA, _STD_CACHE_BURNDOWN_DELTA
 from bq_eval.finops.contract.results import (
     EvalFinOpsROI,
     FocusChargebackRow,
@@ -17,6 +20,11 @@ from bq_eval.finops.contract.results import (
     OffPeakSchedulePlan,
     ParetoEvalResult,
     PrefixCacheDilutionReport,
+)
+
+_STD_CACHE_BURNDOWN_DELTA: float = UNCACHED_INPUT_BURNDOWN_WEIGHT - CACHED_INPUT_BURNDOWN_WEIGHT
+_LONG_CACHE_BURNDOWN_DELTA: float = (
+    LONG_CONTEXT_UNCACHED_BURNDOWN_WEIGHT - LONG_CONTEXT_CACHED_BURNDOWN_WEIGHT
 )
 
 
@@ -293,7 +301,7 @@ def allocate_focus_hourly_chargeback(  # noqa: PLR0913
     app_cost_centers: Mapping[str, str],
     hourly_reserved_pt_capacity_tokens: float,
     reserved_pt_fixed_cost_usd: float,
-    payg_overflow_usd_per_1m_weighted: float = 0.0,
+    payg_overflow_usd_per_1m_weighted: float = 0.15,
     platform_owner_id: str = "platform-shared-reservation",
     platform_cost_center: str = "CC-PLATFORM-IDLE",
 ) -> list[FocusChargebackRow]:

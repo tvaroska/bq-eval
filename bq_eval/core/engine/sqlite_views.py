@@ -506,7 +506,6 @@ gwet_irr AS (
         apphub_application_id,
         rubric_id,
         CASE
-            WHEN pair_count = 0 THEN NULL
             WHEN ABS(1.0 - ((26.0 / 27.0) * (pi_1 * (1.0 - pi_1) + pi_2 * (1.0 - pi_2) + pi_3 * (1.0 - pi_3) + pi_4 * (1.0 - pi_4)))) < 1e-12
                 THEN 1.0
             ELSE (
@@ -520,7 +519,7 @@ gwet_irr AS (
 rg_base AS (
     SELECT
         a.*,
-        COALESCE(j.rubric_id, 'groundedness_4pt_v1') AS rubric_id,
+        COALESCE(j.rubric_id, cfg.rubric_id) AS rubric_id,
         p.p95_latency_ms,
         COALESCE(j.judged_samples, 0) AS judged_samples,
         j.raw_judge_pass_rate,

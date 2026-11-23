@@ -26,15 +26,15 @@ from tests.sql_helpers import (
 
 def test_pricing_empty_catalog_fallback_suffix_stripping_and_ddl_seed() -> None:
     """`v_trace_waterfall` with an empty catalog prices Argon/suffixed Argon at $0.175 and marks unknown NULL."""
-    ddl_text = (SQL_DIR / "core" / "ddl.sql").read_text(encoding="utf-8")
-    assert "MERGE INTO `agent_eval.model_pricing_catalog`" in ddl_text
+    seed_text = (SQL_DIR / "core" / "pricing_seed.sql").read_text(encoding="utf-8")
+    assert "MERGE INTO `agent_eval.model_pricing_catalog`" in seed_text
     for sku in (
         "gemini-3.5-flash-lite",
         "gemini-3.8-flash",
         "gemini-4-argon",
         "ai_evaluate_agent_managed",
     ):
-        assert f"'{sku}'" in ddl_text
+        assert f"'{sku}'" in seed_text
 
     conn = _new_sqlite_bq_conn()
     _create_enterprise_sqlite_fixture(conn)
@@ -182,7 +182,7 @@ def test_sql_pricing_constants_match_python_default_model_skus() -> None:
     ]
     assert cost_defs == ["bq_eval/core/engine/cost.py"]
 
-    ddl_text = (SQL_DIR / "core" / "ddl.sql").read_text(encoding="utf-8")
+    seed_text = (SQL_DIR / "core" / "pricing_seed.sql").read_text(encoding="utf-8")
     select_sku_re = re.compile(
         r"SELECT\s+'([^']+)'(?:\s+AS\s+model_name)?,\s*"
         r"'([^']+)'(?:\s+AS\s+provider)?,\s*"
@@ -203,7 +203,7 @@ def test_sql_pricing_constants_match_python_default_model_skus() -> None:
     parsed_ddl: dict[
         str, tuple[str, str, float, float, float, float, float, float | None, float, float, float]
     ] = {}
-    for m in select_sku_re.finditer(ddl_text):
+    for m in select_sku_re.finditer(seed_text):
         thresh_raw = m.group(9)
         thresh: float | None = None if "NULL" in thresh_raw else float(thresh_raw)
         parsed_ddl[m.group(1)] = (
@@ -250,7 +250,7 @@ def test_sql_pricing_constants_match_python_default_model_skus() -> None:
 
     default_pricing_sql = _transpile_bq_view_to_sqlite(
         _extract_view_sql_text(
-            SQL_DIR / "core" / "step1_trace_views.sql", "agent_eval.v_default_model_pricing"
+            SQL_DIR / "core" / "pricing_seed.sql", "agent_eval.v_default_model_pricing"
         )
     )
     step1_wf = _transpile_bq_view_to_sqlite(

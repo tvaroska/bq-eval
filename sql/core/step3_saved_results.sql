@@ -30,11 +30,20 @@ CREATE TABLE IF NOT EXISTS `agent_eval.eval_results` (
   evaluated_at TIMESTAMP NOT NULL OPTIONS (description = 'UTC judge execution timestamp.')
 )
 PARTITION BY DATE(evaluated_at)
-CLUSTER BY apphub_application_id, rubric_id, trace_id;
+CLUSTER BY apphub_application_id, rubric_id, trace_id
+OPTIONS (
+  description = 'Tier 2 AI.GENERATE_TABLE evaluation results with judge token telemetry and outcome_id attribution.'
+);
+
+ALTER TABLE `agent_eval.eval_results`
+  ADD COLUMN IF NOT EXISTS outcome_id STRING OPTIONS (description = 'Business outcome identifier (outcome.id).'),
+  ADD COLUMN IF NOT EXISTS policy_sha256 STRING OPTIONS (description = 'SHA-256 hash of active policy text.'),
+  ADD COLUMN IF NOT EXISTS amended_clause_ids STRING OPTIONS (description = 'Comma-separated clause IDs modified under active policy.'),
+  ADD COLUMN IF NOT EXISTS target_clause_id STRING OPTIONS (description = 'Optional clause identifier evaluated for clause-scoped NFR gating.');
 
 -- Idempotent Engine A persistence runs via `CALL agent_eval.run_daily_quota_guarded_judge(...)`
--- (`sql/step3_daily_quota_guard.sql`); Engine B (`AI.EVALUATE_AGENT`, private preview / non-public TVF) persistence SQL
--- is emitted via `bq_eval.engine.sql_eval.build_ai_evaluate_agent_sql(..., persist_run_id=...)`.
+-- (`sql/core/step3_daily_quota_guard.sql`); Engine B (`AI.EVALUATE_AGENT`, private preview / non-public TVF) persistence SQL
+-- is emitted via `bq_eval.core.engine.sql_eval.build_ai_evaluate_agent_sql(..., persist_run_id=...)`.
 
 -- View 3A: Deduplicated Saved Run-Level Summary (`v_step3_eval_runs`)
 CREATE OR REPLACE VIEW `agent_eval.v_step3_eval_runs` AS

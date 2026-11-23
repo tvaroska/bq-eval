@@ -41,7 +41,7 @@ def test_bqaa_adapter_sql_contract_and_strict_fallback() -> None:
     adapter_sql = (REPO_ROOT / "sql" / "core" / "bqaa_adapter_views.sql").read_text(
         encoding="utf-8"
     )
-    ddl_sql = (REPO_ROOT / "sql" / "core" / "ddl.sql").read_text(encoding="utf-8")
+    compat_sql = (REPO_ROOT / "sql" / "core" / "otel_compat_views.sql").read_text(encoding="utf-8")
     schema_cols = tuple(
         col["name"]
         for col in json.loads(
@@ -64,12 +64,12 @@ def test_bqaa_adapter_sql_contract_and_strict_fallback() -> None:
 
     assert "PARTITION BY event_id ORDER BY timestamp DESC" in adapter_sql
 
-    ddl_allspans_cols = _projected_columns_of_view(ddl_sql, "agent_eval.v_otel_allspans_only")
+    compat_allspans_cols = _projected_columns_of_view(compat_sql, "agent_eval.v_otel_allspans_only")
     bqaa_cols = _projected_columns_of_view(adapter_sql, "agent_eval.v_bqaa_otel_spans")
     expected_cols = list(REQUIRED_OTEL_SPANS_VIEW_COLUMNS)
-    assert ddl_allspans_cols == expected_cols
+    assert compat_allspans_cols == expected_cols
     assert bqaa_cols == expected_cols
-    assert "SELECT * FROM `agent_eval.v_otel_allspans_only`" in ddl_sql
+    assert "SELECT * FROM `agent_eval.v_otel_allspans_only`" in compat_sql
     assert "SELECT * FROM `agent_eval.v_otel_allspans_only`" in adapter_sql
     assert "FROM `agent_eval.v_bqaa_otel_spans`" in adapter_sql
 
@@ -114,7 +114,7 @@ def test_bqaa_mode_a_and_mode_c_transpile_to_sqlite_with_null_shadow_outcome_and
     )
 
     adapter_path = REPO_ROOT / "sql" / "core" / "bqaa_adapter_views.sql"
-    ddl_path = REPO_ROOT / "sql" / "core" / "ddl.sql"
+    compat_path = REPO_ROOT / "sql" / "core" / "otel_compat_views.sql"
     bqaa_view_sql = _transpile_bq_view_to_sqlite(
         _extract_view_sql_text(adapter_path, "agent_eval.v_bqaa_otel_spans")
     )
@@ -122,13 +122,13 @@ def test_bqaa_mode_a_and_mode_c_transpile_to_sqlite_with_null_shadow_outcome_and
         _extract_view_sql_text(adapter_path, "agent_eval.v_bqaa_trace_payloads")
     )
     allspans_view_sql = _transpile_bq_view_to_sqlite(
-        _extract_view_sql_text(ddl_path, "agent_eval.v_otel_allspans_only")
+        _extract_view_sql_text(compat_path, "agent_eval.v_otel_allspans_only")
         .replace("`obs_traces._AllSpans`", "`_AllSpans`")
         .replace("status.code", "status_code_raw")
         .replace("resource.attributes", "resource_attributes")
     )
     logs_payloads_sql = _transpile_bq_view_to_sqlite(
-        _extract_view_sql_text(ddl_path, "agent_eval.v_otel_logs_payloads_only")
+        _extract_view_sql_text(compat_path, "agent_eval.v_otel_logs_payloads_only")
         .replace("`obs_logs._AllLogs`", "`_AllLogs`")
         .replace("l.resource.labels", "l.resource_labels")
     )

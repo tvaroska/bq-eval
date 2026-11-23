@@ -3,10 +3,6 @@
 from __future__ import annotations
 
 from bq_eval.core.contract.otel import (
-    CACHED_INPUT_BURNDOWN_WEIGHT,
-    LONG_CONTEXT_CACHED_BURNDOWN_WEIGHT,
-    LONG_CONTEXT_UNCACHED_BURNDOWN_WEIGHT,
-    UNCACHED_INPUT_BURNDOWN_WEIGHT,
     OTelGenAISpanRecord,
     ServingTrafficType,
     compute_weighted_burndown_tokens,
@@ -18,27 +14,27 @@ from bq_eval.core.contract.pricing import (
     normalize_model_name,
 )
 
-_STD_CACHE_BURNDOWN_DELTA: float = UNCACHED_INPUT_BURNDOWN_WEIGHT - CACHED_INPUT_BURNDOWN_WEIGHT
-
-
-_LONG_CACHE_BURNDOWN_DELTA: float = (
-    LONG_CONTEXT_UNCACHED_BURNDOWN_WEIGHT - LONG_CONTEXT_CACHED_BURNDOWN_WEIGHT
-)
-
 
 def resolve_span_sku(
     span: OTelGenAISpanRecord,
     sku: ModelPricingSKU | None = None,
 ) -> ModelPricingSKU | None:
-    """Resolve effective `ModelPricingSKU` for a span (returns `None` for zero-token/`none` spans)."""
+    """Resolve effective `ModelPricingSKU` for a span (returns `None` only for zero-token spans)."""
     if sku is not None:
         return sku
-    if (
-        not span.model_name
-        or span.model_name == "none"
-        or (span.input_tokens == 0 and span.output_tokens == 0 and span.thinking_tokens == 0)
-    ):
+    has_tokens = (
+        span.input_tokens > 0
+        or span.output_tokens > 0
+        or span.thinking_tokens > 0
+        or span.cache_write_5m_tokens > 0
+        or span.cache_write_1h_tokens > 0
+    )
+    if not has_tokens:
         return None
+    if not span.model_name or span.model_name == "none":
+        raise ValueError(
+            f"Cannot price non-zero tokens on span {span.span_id!r} with model_name={span.model_name!r}."
+        )
     normalized = normalize_model_name(span.model_name)
     resolved = DEFAULT_MODEL_SKUS.get(normalized)
     if resolved is None:
@@ -124,26 +120,26 @@ def compute_span_cost_usd(
 
     uncached_input = span.uncached_input_tokens
     output_and_thinking = span.output_tokens + span.thinking_tokens
-    cw5_usd = (span.cache_write_5m_tokens / 1e6) * resolved.effective_cache_write_5m_usd_per_1m
-    cw1_usd = (span.cache_write_1h_tokens / 1e6) * resolved.effective_cache_write_1h_usd_per_1m
     is_cliff = (
         resolved.long_context_threshold_tokens is not None
         and span.input_tokens > resolved.long_context_threshold_tokens
     )
     if is_cliff:
+        cw5_rate = resolved.long_context_input_usd_per_1m * resolved.burndown_cache_write_5m_weight
+        cw1_rate = resolved.long_context_input_usd_per_1m * resolved.burndown_cache_write_1h_weight
         base_usd = (
             (uncached_input / 1e6) * resolved.long_context_input_usd_per_1m
             + (span.cached_input_tokens / 1e6) * resolved.long_context_cached_usd_per_1m
-            + cw5_usd
-            + cw1_usd
+            + (span.cache_write_5m_tokens / 1e6) * cw5_rate
+            + (span.cache_write_1h_tokens / 1e6) * cw1_rate
             + (output_and_thinking / 1e6) * resolved.long_context_output_usd_per_1m
         )
     else:
         base_usd = (
             (uncached_input / 1e6) * resolved.input_usd_per_1m
             + (span.cached_input_tokens / 1e6) * resolved.cached_input_usd_per_1m
-            + cw5_usd
-            + cw1_usd
+            + (span.cache_write_5m_tokens / 1e6) * resolved.effective_cache_write_5m_usd_per_1m
+            + (span.cache_write_1h_tokens / 1e6) * resolved.effective_cache_write_1h_usd_per_1m
             + (output_and_thinking / 1e6) * resolved.output_usd_per_1m
         )
     return base_usd * paygo_multiplier_for_span(span, resolved)

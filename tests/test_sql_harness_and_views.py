@@ -79,6 +79,7 @@ def _find_trace_id_with_mod(predicate_upper: int, *, include: bool) -> str:
 
 def test_step1_coverage_cost_and_step2_slice_views_execute() -> None:
     """Execute `v_otel_spans_coverage`, `v_step1_cost_per_outcome`, and all 5 Step-2 prompt/slice views."""
+    pricing_path = SQL_DIR / "core" / "pricing_seed.sql"
     step1_path = SQL_DIR / "core" / "step1_trace_views.sql"
     step2_path = SQL_DIR / "core" / "step2_stateless_eval.sql"
 
@@ -95,7 +96,7 @@ def test_step1_coverage_cost_and_step2_slice_views_execute() -> None:
     )
 
     for sql_path, view_name in (
-        (step1_path, "agent_eval.v_default_model_pricing"),
+        (pricing_path, "agent_eval.v_default_model_pricing"),
         (step1_path, "agent_eval.v_step1_trace_waterfall"),
         (step1_path, "agent_eval.v_step1_trace_eval"),
         (step1_path, "agent_eval.v_step1_cost_per_outcome"),
@@ -543,18 +544,19 @@ def test_bqaa_eval_turn_filtered_and_omni_views_execute() -> None:
 
 def test_mixed_business_unit_trace_is_deterministic() -> None:
     """`v_step1_trace_eval` resolves mixed-unit traces deterministically to the root/non-default BU & CC (S-9)."""
+    pricing_path = SQL_DIR / "core" / "pricing_seed.sql"
     step1_path = SQL_DIR / "core" / "step1_trace_views.sql"
     conn = _new_sqlite_bq_conn()
     _create_enterprise_sqlite_fixture(conn)
-    for view_name in (
-        "agent_eval.v_default_model_pricing",
-        "agent_eval.v_step1_trace_waterfall",
-        "agent_eval.v_step1_trace_eval",
+    for sql_path, view_name in (
+        (pricing_path, "agent_eval.v_default_model_pricing"),
+        (step1_path, "agent_eval.v_step1_trace_waterfall"),
+        (step1_path, "agent_eval.v_step1_trace_eval"),
     ):
         short = view_name.split(".", maxsplit=1)[1]
         conn.execute(
             f"CREATE VIEW {short} AS "
-            f"{_transpile_bq_view_to_sqlite(_extract_view_sql_text(step1_path, view_name))}"
+            f"{_transpile_bq_view_to_sqlite(_extract_view_sql_text(sql_path, view_name))}"
         )
     base = datetime(2026, 11, 21, 12, 0, 0, tzinfo=UTC)
     # Child span without BU/CC inserted first; root span with explicit BU/CC inserted second

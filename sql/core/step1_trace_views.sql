@@ -11,32 +11,8 @@ OPTIONS (
   description = 'BQ Eval: Step 1-3 progressive trace evaluation, rubric catalog, and cost management.'
 );
 
--- View 1.0: Canonical Built-In Default 1P & 3P Model Pricing (`v_default_model_pricing`)
---   Single fallback SKU table shared across Step 1 and Enterprise views (`0` extra tables).
-CREATE OR REPLACE VIEW `agent_eval.v_default_model_pricing` AS
-SELECT
-  'gemini-4-argon' AS model_name, 'google' AS provider, 'long_term_ga' AS lifecycle_track,
-  1.25 AS input_usd_per_1m, 0.125 AS cached_input_usd_per_1m, 1.25 AS cache_write_5m_usd_per_1m, 1.25 AS cache_write_1h_usd_per_1m, 5.00 AS output_usd_per_1m,
-  200000 AS long_context_threshold_tokens, 2.50 AS long_context_input_usd_per_1m, 0.250 AS long_context_cached_usd_per_1m, 18.75 AS long_context_output_usd_per_1m,
-  1.0 AS burndown_uncached_weight, 0.1 AS burndown_cached_weight, 1.0 AS burndown_cache_write_5m_weight, 1.0 AS burndown_cache_write_1h_weight, 4.0 AS burndown_output_weight,
-  2.0 AS burndown_long_uncached_weight, 0.2 AS burndown_long_cached_weight, 7.5 AS burndown_long_output_weight,
-  1.8 AS priority_paygo_multiplier, 0.5 AS flex_paygo_multiplier
-UNION ALL
-SELECT 'gemini-4-carbon', 'google', 'short_term_ga', 1.25, 0.125, 1.25, 1.25, 5.00, 200000, 2.50, 0.250, 18.75, 1.0, 0.1, 1.0, 1.0, 4.0, 2.0, 0.2, 7.5, 1.8, 0.5
-UNION ALL
-SELECT 'gemini-3.5-flash-lite', 'google', 'long_term_ga', 0.075, 0.0075, 0.075, 0.075, 0.30, 200000, 0.15, 0.015, 1.125, 1.0, 0.1, 1.0, 1.0, 4.0, 2.0, 0.2, 7.5, 1.8, 0.5
-UNION ALL
-SELECT 'gemini-3.8-flash', 'google', 'long_term_ga', 0.15, 0.015, 0.15, 0.15, 0.60, 200000, 0.30, 0.030, 2.25, 1.0, 0.1, 1.0, 1.0, 4.0, 2.0, 0.2, 7.5, 1.8, 0.5
-UNION ALL
-SELECT 'ai_evaluate_agent_managed', 'google', 'long_term_ga', 0.15, 0.015, 0.15, 0.15, 0.60, 200000, 0.30, 0.030, 2.25, 1.0, 0.1, 1.0, 1.0, 4.0, 2.0, 0.2, 7.5, 1.8, 0.5
-UNION ALL
-SELECT 'claude-sonnet-4-6', 'anthropic', 'long_term_ga', 3.00, 0.30, 3.75, 6.00, 15.00, CAST(NULL AS INT64), 3.00, 0.30, 15.00, 1.0, 0.1, 1.25, 2.0, 5.0, 1.0, 0.1, 5.0, 1.8, 0.5
-UNION ALL
-SELECT 'claude-opus-4-6', 'anthropic', 'long_term_ga', 15.00, 1.50, 18.75, 30.00, 75.00, CAST(NULL AS INT64), 15.00, 1.50, 75.00, 1.0, 0.1, 1.25, 2.0, 5.0, 1.0, 0.1, 5.0, 1.8, 0.5
-UNION ALL
-SELECT 'claude-sonnet-5-5', 'anthropic', 'long_term_ga', 3.00, 0.30, 3.75, 6.00, 15.00, CAST(NULL AS INT64), 3.00, 0.30, 15.00, 1.0, 0.1, 1.25, 2.0, 5.0, 1.0, 0.1, 5.0, 1.8, 0.5;
-
 -- View 1A: Span-Level Waterfall with Portable App/BU ID, 1P/3P Burndown & PayGo Multipliers
+--   Joins `agent_eval.v_default_model_pricing` (defined in `sql/core/pricing_seed.sql`).
 CREATE OR REPLACE VIEW `agent_eval.v_step1_trace_waterfall` AS
 SELECT
   s.trace_id,
@@ -105,8 +81,8 @@ SELECT
     WHEN p.long_context_threshold_tokens IS NOT NULL AND s.input_tokens > p.long_context_threshold_tokens THEN
       (COALESCE(p.burndown_long_uncached_weight, 2.0) * GREATEST(0, s.input_tokens - s.cached_input_tokens - COALESCE(s.cache_write_5m_tokens, 0) - COALESCE(s.cache_write_1h_tokens, 0)))
       + (COALESCE(p.burndown_long_cached_weight, 0.2) * s.cached_input_tokens)
-      + (COALESCE(p.burndown_cache_write_5m_weight, 1.0) * COALESCE(s.cache_write_5m_tokens, 0))
-      + (COALESCE(p.burndown_cache_write_1h_weight, 1.0) * COALESCE(s.cache_write_1h_tokens, 0))
+      + ((COALESCE(p.burndown_long_uncached_weight, 2.0) / COALESCE(NULLIF(p.burndown_uncached_weight, 0.0), 1.0)) * COALESCE(p.burndown_cache_write_5m_weight, 1.0) * COALESCE(s.cache_write_5m_tokens, 0))
+      + ((COALESCE(p.burndown_long_uncached_weight, 2.0) / COALESCE(NULLIF(p.burndown_uncached_weight, 0.0), 1.0)) * COALESCE(p.burndown_cache_write_1h_weight, 1.0) * COALESCE(s.cache_write_1h_tokens, 0))
       + (COALESCE(p.burndown_long_output_weight, 7.5) * (s.output_tokens + s.thinking_tokens))
     ELSE
       (COALESCE(p.burndown_uncached_weight, 1.0) * GREATEST(0, s.input_tokens - s.cached_input_tokens - COALESCE(s.cache_write_5m_tokens, 0) - COALESCE(s.cache_write_1h_tokens, 0)))
@@ -134,8 +110,8 @@ SELECT
           WHEN p.long_context_threshold_tokens IS NOT NULL AND s.input_tokens > p.long_context_threshold_tokens THEN
             (GREATEST(0, s.input_tokens - s.cached_input_tokens - COALESCE(s.cache_write_5m_tokens, 0) - COALESCE(s.cache_write_1h_tokens, 0)) / 1e6) * p.long_context_input_usd_per_1m
             + (s.cached_input_tokens / 1e6) * p.long_context_cached_usd_per_1m
-            + (COALESCE(s.cache_write_5m_tokens, 0) / 1e6) * p.cache_write_5m_usd_per_1m
-            + (COALESCE(s.cache_write_1h_tokens, 0) / 1e6) * p.cache_write_1h_usd_per_1m
+            + (COALESCE(s.cache_write_5m_tokens, 0) / 1e6) * (p.long_context_input_usd_per_1m * COALESCE(p.burndown_cache_write_5m_weight, 1.0))
+            + (COALESCE(s.cache_write_1h_tokens, 0) / 1e6) * (p.long_context_input_usd_per_1m * COALESCE(p.burndown_cache_write_1h_weight, 1.0))
             + ((s.output_tokens + s.thinking_tokens) / 1e6) * p.long_context_output_usd_per_1m
           ELSE
             (GREATEST(0, s.input_tokens - s.cached_input_tokens - COALESCE(s.cache_write_5m_tokens, 0) - COALESCE(s.cache_write_1h_tokens, 0)) / 1e6) * p.input_usd_per_1m
@@ -335,13 +311,43 @@ WITH server_span_compute AS (
     SUM(
       (w.latency_ms / 1000.0)
       * (
-        (COALESCE(SAFE_CAST(JSON_VALUE(w.attributes, '$."service.vcpu"') AS FLOAT64), 2.0) * 0.00002400)
-        + (COALESCE(SAFE_CAST(JSON_VALUE(w.attributes, '$."service.gib"') AS FLOAT64), 2.0) * 0.00000250)
+        (
+          COALESCE(
+            IF(
+              SAFE_CAST(JSON_VALUE(w.attributes, '$."service.vcpu"') AS FLOAT64) > 0,
+              SAFE_CAST(JSON_VALUE(w.attributes, '$."service.vcpu"') AS FLOAT64),
+              NULL
+            ),
+            2.0
+          ) * 0.00002400
+        )
+        + (
+          COALESCE(
+            IF(
+              SAFE_CAST(JSON_VALUE(w.attributes, '$."service.gib"') AS FLOAT64) > 0,
+              SAFE_CAST(JSON_VALUE(w.attributes, '$."service.gib"') AS FLOAT64),
+              NULL
+            ),
+            2.0
+          ) * 0.00000250
+        )
       )
     ) AS estimated_compute_usd,
-    MAX(SAFE_CAST(JSON_VALUE(w.attributes, '$."outcome.storage_usd"') AS FLOAT64)) AS explicit_storage_usd,
+    MAX(
+      IF(
+        SAFE_CAST(JSON_VALUE(w.attributes, '$."outcome.storage_usd"') AS FLOAT64) >= 0,
+        SAFE_CAST(JSON_VALUE(w.attributes, '$."outcome.storage_usd"') AS FLOAT64),
+        NULL
+      )
+    ) AS explicit_storage_usd,
     COALESCE(
-      MAX(SAFE_CAST(JSON_VALUE(w.attributes, '$."outcome.storage_usd"') AS FLOAT64)),
+      MAX(
+        IF(
+          SAFE_CAST(JSON_VALUE(w.attributes, '$."outcome.storage_usd"') AS FLOAT64) >= 0,
+          SAFE_CAST(JSON_VALUE(w.attributes, '$."outcome.storage_usd"') AS FLOAT64),
+          NULL
+        )
+      ),
       0.000020
     ) AS estimated_storage_usd
   FROM `agent_eval.v_step1_trace_waterfall` AS w

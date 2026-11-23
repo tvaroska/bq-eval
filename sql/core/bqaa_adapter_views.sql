@@ -275,8 +275,9 @@ GROUP BY trace_id;
 
 -- -----------------------------------------------------------------------------
 -- 3. Step-1 Pre-Filtered Turn View for Engine B (`AI.EVALUATE_AGENT`)
---   * Self-contained over `v_bqaa_otel_spans` so fresh Light Capture projects
---     deploy `bqaa_adapter_views.sql` in one pass before `step1_trace_views.sql`.
+--   * Self-contained over `v_bqaa_otel_spans` + `v_default_model_pricing`
+--     (`sql/core/pricing_seed.sql`) so fresh Light Capture projects deploy
+--     `bqaa_adapter_views.sql` in one pass before `step1_trace_views.sql`.
 --   * Matches routine Step-2 semantics (`step1_pass = TRUE` and
 --     `NOT has_tool_loop`) over BQAA's `{table}_eval_turn` (`AgentData` JSON)
 --     to skip $0 deterministic rejects before invoking `AI.EVALUATE_AGENT`.
@@ -284,16 +285,7 @@ GROUP BY trace_id;
 --     excluded from calibrated theta_RG via `WHERE rule0_pass = TRUE`.
 -- -----------------------------------------------------------------------------
 CREATE OR REPLACE VIEW `agent_eval.v_bqaa_eval_turn_filtered` AS
-WITH default_skus AS (
-  SELECT 'gemini-4-argon' AS model_name, 1.25 AS input_usd_per_1m, 0.125 AS cached_input_usd_per_1m, 5.00 AS output_usd_per_1m, 200000 AS long_context_threshold_tokens, 2.50 AS long_context_input_usd_per_1m, 0.250 AS long_context_cached_usd_per_1m, 18.75 AS long_context_output_usd_per_1m
-  UNION ALL
-  SELECT 'gemini-3.5-flash-lite', 0.075, 0.0075, 0.30, 200000, 0.15, 0.015, 1.125
-  UNION ALL
-  SELECT 'gemini-3.8-flash', 0.15, 0.015, 0.60, 200000, 0.30, 0.030, 2.25
-  UNION ALL
-  SELECT 'ai_evaluate_agent_managed', 0.15, 0.015, 0.60, 200000, 0.30, 0.030, 2.25
-),
-bqaa_span_costs AS (
+WITH bqaa_span_costs AS (
   SELECT
     s.trace_id,
     s.parent_span_id,
@@ -317,19 +309,28 @@ bqaa_span_costs AS (
     s.tool_call_status,
     COALESCE(s.rule0_pass, s.status_code != 'ERROR') AS rule0_pass,
     CASE
-      WHEN s.model_name IS NULL OR s.model_name = 'none' OR (s.input_tokens = 0 AND s.output_tokens = 0 AND s.thinking_tokens = 0) THEN 0.0
-      WHEN s.input_tokens > COALESCE(p.long_context_threshold_tokens, 200000) THEN
-        (GREATEST(0, s.input_tokens - s.cached_input_tokens) / 1e6) * p.long_context_input_usd_per_1m
+      WHEN s.input_tokens = 0
+        AND s.output_tokens = 0
+        AND s.thinking_tokens = 0
+        AND COALESCE(s.cache_write_5m_tokens, 0) = 0
+        AND COALESCE(s.cache_write_1h_tokens, 0) = 0 THEN 0.0
+      WHEN p.long_context_threshold_tokens IS NOT NULL
+        AND s.input_tokens > p.long_context_threshold_tokens THEN
+        (GREATEST(0, s.input_tokens - s.cached_input_tokens - COALESCE(s.cache_write_5m_tokens, 0) - COALESCE(s.cache_write_1h_tokens, 0)) / 1e6) * p.long_context_input_usd_per_1m
         + (s.cached_input_tokens / 1e6) * p.long_context_cached_usd_per_1m
+        + (COALESCE(s.cache_write_5m_tokens, 0) / 1e6) * (p.long_context_input_usd_per_1m * COALESCE(p.burndown_cache_write_5m_weight, 1.0))
+        + (COALESCE(s.cache_write_1h_tokens, 0) / 1e6) * (p.long_context_input_usd_per_1m * COALESCE(p.burndown_cache_write_1h_weight, 1.0))
         + ((s.output_tokens + s.thinking_tokens) / 1e6) * p.long_context_output_usd_per_1m
       ELSE
-        (GREATEST(0, s.input_tokens - s.cached_input_tokens) / 1e6) * p.input_usd_per_1m
+        (GREATEST(0, s.input_tokens - s.cached_input_tokens - COALESCE(s.cache_write_5m_tokens, 0) - COALESCE(s.cache_write_1h_tokens, 0)) / 1e6) * p.input_usd_per_1m
         + (s.cached_input_tokens / 1e6) * p.cached_input_usd_per_1m
+        + (COALESCE(s.cache_write_5m_tokens, 0) / 1e6) * COALESCE(p.cache_write_5m_usd_per_1m, p.input_usd_per_1m)
+        + (COALESCE(s.cache_write_1h_tokens, 0) / 1e6) * COALESCE(p.cache_write_1h_usd_per_1m, p.input_usd_per_1m)
         + ((s.output_tokens + s.thinking_tokens) / 1e6) * p.output_usd_per_1m
     END AS span_cost_usd
   FROM `agent_eval.v_bqaa_otel_spans` AS s
-  LEFT JOIN default_skus AS p
-    ON REGEXP_REPLACE(s.model_name, r'-(?:\d{3}|ga|rc|qcd|preview)$', '') = p.model_name
+  LEFT JOIN `agent_eval.v_default_model_pricing` AS p
+    ON REGEXP_REPLACE(REGEXP_REPLACE(s.model_name, r'^.*/', ''), r'-(?:\d{3}|ga|rc|qcd|preview)$', '') = p.model_name
 ),
 bqaa_step1_eval AS (
   SELECT

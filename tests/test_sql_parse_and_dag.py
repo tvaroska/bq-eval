@@ -285,7 +285,9 @@ def test_views_sql_rule0_and_pricing_catalog_parity() -> None:
             f"v_trace_waterfall must read {catalog_col} from model_pricing_catalog"
         )
 
-    views_text = (SQL_DIR / "core" / "views.sql").read_text(encoding="utf-8")
+    views_text = (SQL_DIR / "core" / "views.sql").read_text(encoding="utf-8") + (
+        SQL_DIR / "core" / "summary_views.sql"
+    ).read_text(encoding="utf-8")
     assert "COALESCE(m.input_usd_per_1m, 1.25)" not in views_text, (
         "Hardcoded Argon fallback $1.25 conflicts with Flash fallback $0.15; dispatch by judge_model"
     )

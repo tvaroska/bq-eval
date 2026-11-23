@@ -40,14 +40,27 @@ def _parse_outcome_verified_flag(raw_value: object) -> int | None:
     return 0
 
 
-def _parse_optional_float(raw_value: object, default: float | None = None) -> float | None:
+def _parse_optional_float(
+    raw_value: object,
+    default: float | None = None,
+    *,
+    min_value: float | None = None,
+    strictly_greater: bool = False,
+) -> float | None:
     if raw_value is None or isinstance(raw_value, bool):
         return default
     try:
         parsed = float(str(raw_value))
     except ValueError:
         return default
-    return parsed if math.isfinite(parsed) else default
+    if not math.isfinite(parsed):
+        return default
+    if min_value is not None:
+        if strictly_greater and parsed <= min_value:
+            return default
+        if not strictly_greater and parsed < min_value:
+            return default
+    return parsed
 
 
 def insert_sqlite_spans(
@@ -72,9 +85,21 @@ def insert_sqlite_spans(
             )
             else 0
         )
-        service_vcpu = _parse_optional_float(s.attributes.get("service.vcpu"), 2.0) or 2.0
-        service_gib = _parse_optional_float(s.attributes.get("service.gib"), 2.0) or 2.0
-        outcome_storage_usd = _parse_optional_float(s.attributes.get("outcome.storage_usd"), None)
+        service_vcpu = (
+            _parse_optional_float(
+                s.attributes.get("service.vcpu"), 2.0, min_value=0.0, strictly_greater=True
+            )
+            or 2.0
+        )
+        service_gib = (
+            _parse_optional_float(
+                s.attributes.get("service.gib"), 2.0, min_value=0.0, strictly_greater=True
+            )
+            or 2.0
+        )
+        outcome_storage_usd = _parse_optional_float(
+            s.attributes.get("outcome.storage_usd"), None, min_value=0.0
+        )
         start_utc = (
             s.start_time.replace(tzinfo=UTC)
             if s.start_time.tzinfo is None

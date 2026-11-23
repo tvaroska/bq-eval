@@ -112,21 +112,22 @@ def _advance_word_depth(
 
 
 def _skip_sql_token_or_comment(sql: str, i: int) -> int | None:
-    """Advance past a single-quoted literal, backtick identifier, or SQL comment if present."""
+    """Advance past a quoted literal, backtick identifier, or SQL comment if present."""
     n = len(sql)
-    if sql.startswith("--", i):
+    if sql.startswith("--", i) or sql.startswith("#", i):
         nl = sql.find("\n", i)
         return n if nl == -1 else nl + 1
     if sql.startswith("/*", i):
         end = sql.find("*/", i + 2)
         return -1 if end == -1 else end + 2
-    if sql[i] == "'":
+    if sql[i] in {"'", '"'}:
+        quote = sql[i]
         i += 1
         while i < n:
             if sql[i] == "\\":
                 i += 2
                 continue
-            if sql[i] == "'":
+            if sql[i] == quote:
                 return i + 1
             i += 1
         return -1
@@ -295,16 +296,26 @@ def _build_mode_core_statements(
     mode: BootstrapMode,
     valid_project: str,
     valid_dataset: str,
-    ddl_stmts: list[str],
-    bqaa_stmts: list[str],
+    loaded: dict[str, list[str]],
 ) -> list[tuple[str, str]]:
+    ddl_stmts = loaded["core/ddl.sql"]
+    pricing_stmts = loaded["core/pricing_seed.sql"]
+    compat_stmts = loaded.get("core/otel_compat_views.sql", [])
+    bqaa_stmts = loaded.get("core/bqaa_adapter_views.sql", [])
+
     if mode == "full":
-        return [(f"core/ddl.sql#{i}", s) for i, s in enumerate(ddl_stmts, start=1)]
+        out = [(f"core/ddl.sql#{i}", s) for i, s in enumerate(ddl_stmts, start=1)]
+        out.extend((f"core/pricing_seed.sql#{i}", s) for i, s in enumerate(pricing_stmts, start=1))
+        out.extend(
+            (f"core/otel_compat_views.sql#{i}", s) for i, s in enumerate(compat_stmts, start=1)
+        )
+        return out
     if mode == "light":
         out = [
             (f"core/ddl.sql#{i}", s)
             for i, s in enumerate(_filter_light_mode_statements(ddl_stmts), start=1)
         ]
+        out.extend((f"core/pricing_seed.sql#{i}", s) for i, s in enumerate(pricing_stmts, start=1))
         out.extend(
             (f"core/bqaa_adapter_views.sql#{i}", s)
             for i, s in enumerate(_filter_light_mode_statements(bqaa_stmts), start=1)
@@ -325,11 +336,13 @@ def _build_mode_core_statements(
         )
         return out
 
-    out = [
-        (f"core/ddl.sql#{i}", s)
-        for i, s in enumerate(ddl_stmts, start=1)
+    out = [(f"core/ddl.sql#{i}", s) for i, s in enumerate(ddl_stmts, start=1)]
+    out.extend((f"core/pricing_seed.sql#{i}", s) for i, s in enumerate(pricing_stmts, start=1))
+    out.extend(
+        (f"core/otel_compat_views.sql#{i}", s)
+        for i, s in enumerate(compat_stmts, start=1)
         if _target_object_short_name(s) not in {"otel_spans", "trace_payloads"}
-    ]
+    )
     out.extend((f"core/bqaa_adapter_views.sql#{i}", s) for i, s in enumerate(bqaa_stmts, start=1))
     out.append(
         (
@@ -393,12 +406,20 @@ def render_bootstrap_statements(  # noqa: PLR0913
         )
         return split_sql_statements_stdlib(rendered)
 
+    loaded_core: dict[str, list[str]] = {
+        "core/ddl.sql": _load("core/ddl.sql"),
+        "core/pricing_seed.sql": _load("core/pricing_seed.sql"),
+    }
+    if mode != "light":
+        loaded_core["core/otel_compat_views.sql"] = _load("core/otel_compat_views.sql")
+    if mode != "full":
+        loaded_core["core/bqaa_adapter_views.sql"] = _load("core/bqaa_adapter_views.sql")
+
     ordered = _build_mode_core_statements(
         mode=mode,
         valid_project=valid_project,
         valid_dataset=valid_dataset,
-        ddl_stmts=_load("core/ddl.sql"),
-        bqaa_stmts=_load("core/bqaa_adapter_views.sql") if mode != "full" else [],
+        loaded=loaded_core,
     )
     common_files = [
         "core/step1_trace_views.sql",
@@ -406,6 +427,7 @@ def render_bootstrap_statements(  # noqa: PLR0913
         "core/step3_saved_results.sql",
         "core/step3_daily_quota_guard.sql",
         "core/views.sql",
+        "core/summary_views.sql",
         "finops/capacity_views.sql",
     ]
     if include_omni and (resolved_sql_dir / "finops" / "omni_spoke_views.sql").is_file():

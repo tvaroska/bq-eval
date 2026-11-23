@@ -1,6 +1,6 @@
 """GM3 Light HTML Workbench Renderer with single-point XSS escaping.
 
-Imports zero calculation modules (`bq_eval.engine` is strictly forbidden here).
+Imports zero calculation modules (`bq_eval.{core,finops,deploy}.engine` is strictly forbidden here).
 """
 
 from __future__ import annotations

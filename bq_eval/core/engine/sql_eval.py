@@ -10,7 +10,6 @@ from bq_eval.core.contract.otel import OTelGenAISpanRecord
 from bq_eval.core.contract.pricing import (
     JUDGE_MODEL_ENDPOINTS,
     MANAGED_EVALUATE_AGENT_METRICS,
-    normalize_model_name,
 )
 from bq_eval.core.contract.results import BqQueryCostRow, ConfusionMatrix, SQLTraceEvalSummary
 from bq_eval.core.contract.rubrics import CANONICAL_RUBRICS, build_autorater_system_prompt
@@ -22,15 +21,12 @@ from bq_eval.core.engine.sqlite_twin import (
 from bq_eval.core.engine.sqlite_views import SQLITE_TABLES_DDL, SQLITE_VIEWS_DDL
 
 __all__ = [
-    "JUDGE_MODEL_ENDPOINTS",
-    "MANAGED_EVALUATE_AGENT_METRICS",
     "build_ai_evaluate_agent_sql",
     "build_ai_generate_table_judge_sql",
     "escape_sql_xml_expr",
     "evaluate_all_rubrics_in_sqlite",
     "evaluate_step1_traces_in_sqlite",
     "evaluate_traces_in_sqlite",
-    "normalize_model_name",
 ]
 
 

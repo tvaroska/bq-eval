@@ -488,11 +488,13 @@ def _create_enterprise_sqlite_fixture(conn: sqlite3.Connection) -> None:
 
 
 def _install_enterprise_views(conn: sqlite3.Connection) -> None:
+    pricing_path = SQL_DIR / "core" / "pricing_seed.sql"
     views_path = SQL_DIR / "core" / "views.sql"
+    summary_path = SQL_DIR / "core" / "summary_views.sql"
     step1_path = SQL_DIR / "core" / "step1_trace_views.sql"
     capacity_path = SQL_DIR / "finops" / "capacity_views.sql"
     for path, name in (
-        (step1_path, "agent_eval.v_default_model_pricing"),
+        (pricing_path, "agent_eval.v_default_model_pricing"),
         (step1_path, "agent_eval.v_step1_trace_waterfall"),
         (step1_path, "agent_eval.v_step1_trace_eval"),
         (step1_path, "agent_eval.v_outcomes"),
@@ -503,7 +505,7 @@ def _install_enterprise_views(conn: sqlite3.Connection) -> None:
         (views_path, "agent_eval.v_trace_sql_evaluation"),
         (views_path, "agent_eval.v_enterprise_cost_per_verified_outcome"),
         (views_path, "agent_eval.v_counterparty_spend"),
-        (views_path, "agent_eval.v_agent_eval_and_finops_summary"),
+        (summary_path, "agent_eval.v_agent_eval_and_finops_summary"),
         (capacity_path, "agent_eval.v_capacity_hourly_burndown_export"),
     ):
         short_name = name.split(".", 1)[1]
