@@ -148,7 +148,7 @@ def _assert_live_receipt_recomputes_from_spans(
             assert cohort.attribution_coverage_pct == 100.0
 
 
-def _assert_readme_matches_kpis(readme: str, parsed: dict[str, Any]) -> None:
+def _assert_results_match_kpis(readme: str, parsed: dict[str, Any]) -> None:
     kpi = parsed["kpi_table"]
     summaries = parsed["artifacts"]["summaries"]
     twin_order = kpi["offline_twin_50_traces"]["order_support_agent"]
@@ -186,9 +186,11 @@ def _assert_readme_matches_kpis(readme: str, parsed: dict[str, Any]) -> None:
     assert f"`{skill['cpvo_reduction_pct']:.1f}%` drop" in readme
 
 
-def test_readme_kpi_rows_match_demo_json_and_offline_twin() -> None:
-    """`bq-eval demo --format json` & bundle spans reproduce `README.md` and dry-run receipt (`M8-1`, `M8-2`, `M8-4`)."""
+def test_results_doc_kpis_match_demo_json_and_offline_twin() -> None:
+    """`bq-eval demo --format json` & bundle spans reproduce `docs/results.md` and dry-run receipt."""
+    results_md = (REPO_ROOT / "docs" / "results.md").read_text(encoding="utf-8")
     readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    getting_started = (REPO_ROOT / "docs" / "getting-started.md").read_text(encoding="utf-8")
     bundle = load_m2_live_bundle()
     assert bundle.live_receipt is not None
     artifacts = run_showcase_pipeline(corpus="m2-live")
@@ -206,7 +208,7 @@ def test_readme_kpi_rows_match_demo_json_and_offline_twin() -> None:
     assert summaries["unregistered_app"]["outcome_verified_count"] == 0
     assert summaries["unregistered_app"]["outcome_cost_per_verified_usd"] is None
 
-    _assert_readme_matches_kpis(readme, parsed)
+    _assert_results_match_kpis(results_md, parsed)
 
     dry_run_receipt = json.loads(
         (REPO_ROOT / "benchmarks" / "results" / "bq_dry_run_receipt.json").read_text(
@@ -217,7 +219,7 @@ def test_readme_kpi_rows_match_demo_json_and_offline_twin() -> None:
     assert dry_run_receipt == manifest
     assert manifest["checked"] == 73
     assert manifest["skipped"] == 17
-    assert "`73`" in readme
+    assert "`73`" in results_md
 
     for token in (
         "uv sync --extra dev",
@@ -227,9 +229,10 @@ def test_readme_kpi_rows_match_demo_json_and_offline_twin() -> None:
         "bq_eval.cli bootstrap",
         "BigQueryAgentAnalyticsPlugin",
     ):
-        assert token in readme
-    for stale in ("rfp_quote_accuracy_4pt_v1", "51/51", "0.0 mocks"):
-        assert stale not in readme
+        assert token in getting_started
+    for doc in (readme, results_md, getting_started):
+        for stale in ("rfp_quote_accuracy_4pt_v1", "51/51", "0.0 mocks"):
+            assert stale not in doc
 
 
 def test_rubric_count_and_names_match_docs_csv_and_code() -> None:
@@ -271,7 +274,7 @@ def test_license_and_skill_eval_yaml_fail_closed_contract() -> None:
 
 
 def test_documented_test_count_matches_pytest_collection() -> None:
-    """Test count cited in `README.md` and `AGENTS.md` matches actual collected pytest items."""
+    """Test count cited in `docs/results.md` and `AGENTS.md` matches actual collected pytest items."""
     res = subprocess.run(
         [sys.executable, "-m", "pytest", "--collect-only", "-q", "-p", "no:cacheprovider"],
         cwd=REPO_ROOT,
@@ -284,10 +287,10 @@ def test_documented_test_count_matches_pytest_collection() -> None:
     assert m is not None, f"Could not parse pytest collection output:\n{res.stdout}"
     collected = int(m.group(1))
 
-    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    results_md = (REPO_ROOT / "docs" / "results.md").read_text(encoding="utf-8")
     agents_md = (REPO_ROOT / "AGENTS.md").read_text(encoding="utf-8")
-    assert f"`{collected}/{collected}` tests" in readme, (
-        f"README.md test count out of sync with collected={collected}"
+    assert f"`{collected}/{collected}` tests" in results_md, (
+        f"docs/results.md test count out of sync with collected={collected}"
     )
     assert f"`{collected}` tests" in agents_md, (
         f"AGENTS.md test count out of sync with collected={collected}"

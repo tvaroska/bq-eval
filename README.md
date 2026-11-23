@@ -4,62 +4,56 @@ Agents don't fail loudly on monitoring dashboards: a looping tool or 200K-token 
 
 ![BQ Eval and FinOps In-Warehouse Views](docs/assets/architecture_card.svg)
 
-## Verified Receipts
+## How It Works
 
-Static [rule views](sql/step1_trace_views.sql) check every trace at **`$0` LLM judge cost** (BigQuery scan bytes apply) over `agent_events` or `_AllSpans` (`39`-col [adapter parity](tests/test_bqaa_dual_path.py)). Scheduled queries persist sampled scores under a `2M`-token/day [quota guard](sql/step3_daily_quota_guard.sql). [Dry-run validation](benchmarks/results/bq_dry_run_receipt.json) parses **`73`** SQL statements via `sqlglot` (`17` DDL/proc skipped; opt-in GCP `--dry_run` in [`bq_dry_run.py`](scripts/bq_dry_run.py)). SQLite mirrors BigQuery math (`< 1e-12` parity, **`146/146` tests**). The [fleet receipt](benchmarks/results/m2_live_receipt.json) (`343` reconstructed cases, `676` spans, `333` `outcome.closed`, `0` human labels; `gemini-4-argon` reference judge; `AC2` = Quadratic Gwet's) replays below:
+Agent traces already land in BigQuery, through BigQuery Agent Analytics or OpenTelemetry. I evaluate them there instead of copying them into a separate eval tool.
 
-| Scope | Measured Result | Proof |
+1. **Rule checks on every trace.** SQL views flag tool errors, loops, slow runs and broken outputs. No new tables and no AI cost, only BigQuery scan bytes.
+2. **An AI judge on a sample.** A judge model scores the failing tail plus a small random sample against a 4-point rubric. Failing traces are oversampled, so the raw pass rate is biased; the views correct it and report a confidence interval. An app with no judged traces gets an empty result, never a fake zero.
+3. **Saved runs and cost per outcome.** Scores are saved per run, so two agent versions can be compared. Agent spend and judge spend are divided by finished business outcomes, not by traces.
+
+The same SQL runs on a local SQLite copy, so the demo and the tests need no cloud account.
+
+## Results
+
+These numbers replay 343 reconstructed cases (676 spans). There are no human labels yet: the judge is checked against a stronger reference model. Full figures and denominators are in [results](docs/results.md), and CI fails if they drift from the demo output.
+
+| Scenario | What it shows | Headline |
 | :--- | :--- | :--- |
-| **Twin (`50`)** | `order-support-agent` (`40`, `catalog-enrichment-agent` `10/10` unjudged `NULL`): `38/40` (`95%`) rules, `18/20` canary + `0/2` tail (`81.8%` pooled vs. `87.4%` calibrated `[64.7%, 100%]`), `$0.0232`/outcome (`$0.7160` agent + `$0.0550` judge) | [SQL tests](tests/test_sql_contracts.py) |
-| **KYC (`280`)** | `28/28` structural + `8/8` PO Box + `8` OCR (`44` `$0`-LLM rejects); `20/20` traps (`100%` `[83.9%, 100%]`, `0/216` FP); across `236` Rule-0 passing judged rows, `30/30` Flash/Argon match (`AC2 = 0.8605`, calibrated `91.53%` `[87.97%, 95.08%]`, `$0.0054`/outcome) | [Fleet receipt](benchmarks/results/m2_live_receipt.json) |
-| **RFP (`35`)** | `100%` pass (`35/35`): `A2A_PATH_A` (`8`) `$0.0000` AI vs. Flash (`17`) `$0.00035` AI vs. `>200K` Argon (`10`) `$0.7226` AI (mixes tier & cliff) | [E2E tests](tests/test_bq_eval_end_to_end.py) |
-| **Skill (`18`) & shadow (`10`)** | `100%` pass (`18/18`): `1.0.0` (`8`) `$0.08350` AI/outcome to `1.1.0` (`10`) `$0.000588` AI/outcome (`99.3%` drop, excl. wages; `9/9` auto, `1/1` escalated); `10` shadow hit `unregistered_app` (`0%`, `NULL`) | [Contract tests](tests/test_workbench_and_contracts.py) |
+| Judge cost model, 100k traces | Screening with rules before judging | Judge spend down 92.2% ($250 to $19.62) |
+| Address checks, 280 cases | Rules catch the cheap failures first | 44 rejects at no AI cost; 20 of 20 planted traps caught, 0 false alarms in 216 |
+| Address checks, judged rows | Fast judge against a stronger model | 30 of 30 pass/fail matches; corrected pass rate 91.5% (88.0% to 95.1%) |
+| Order support, 50 traces | Why raw pass rates mislead | Raw 81.8%, corrected 87.4% (wide interval, 65% to 100%) |
+| Skill upgrade, 18 cases | Cost per outcome across versions | AI cost per outcome down 99.3% (8 vs. 10 cases) |
 
-[Cost model](bq_eval/engine/finops.py): on `100k` traces (`3%` tail + `5%` canary), rule screening cuts judge spend `92.2%` (`$250` to `$19.62`) while catching `100%` of rule/telemetry-detectable tail failures missed by uniform `5%` sampling.
+## Why Not Langfuse, LangSmith, Datadog or Cloud Billing?
 
-## Why Not Langfuse, LangSmith, Datadog, Cloud Billing, or Managed Eval?
+Use them for prompt work, annotation and alerts. This repo covers what they leave out: evaluating where the traces already live, and tying spend to finished work.
 
-**`bq-eval` is the missing Silver/Gold attribution layer between raw AI telemetry and Cloud Billing FOCUS 1.2.** Use Langfuse, LangSmith, or plain SQL for prompt UIs, annotation queues, or `< 50`-trace slices.
-
-| Incumbent | What It Does Well | Gap `bq-eval` Fills |
+| Tool | Good at | Missing for this job |
 | :--- | :--- | :--- |
-| **Langfuse / LangSmith** | Prompt iteration, annotation UIs, dev tracing | Copies traces out of BigQuery; omits warehouse rules, debiased samples, and `>200K` cliffs |
-| **Datadog LLM** | APM alerts, latency, raw token spend | Stops at cost/trace; misses verified outcomes, judge spend, and `NULL` on unjudged apps |
-| **Cloud Billing FOCUS 1.2** | Standardized multi-cloud SKU invoices | Leaves reserved GSUs unattributed, skips `>200K` cliffs, mixes `Prod`/`Eval` |
-| **BQAA + `AI.EVALUATE_AGENT` *(preview, non-public)*** | 3-line capture, zero-setup turn scoring | Omits App Hub ownership, calibration, `$0` LLM rule filtering, and outcome cost |
+| Langfuse / LangSmith | Prompt iteration, annotation, dev tracing | Copies traces out of the warehouse; no bias correction for sampled scores |
+| Datadog LLM Observability | Alerts, latency, token spend | Stops at cost per trace; no finished outcomes or judge spend |
+| Cloud Billing (FOCUS 1.2) | Standard invoices across clouds | No reserved capacity split per app; misses the higher price above 200K tokens; mixes production and eval spend |
+| BigQuery Agent Analytics | Three-line capture and managed scoring (AI.EVALUATE_AGENT, private preview) | No app ownership, bias correction, free rule checks or cost per outcome |
 
 ## Where This Breaks
 
-1. **Synthetic docs & model labels:** `m2_live_receipt.json` holds `343` reconstructed cases (`676` spans, `0` human SME labels); `AC2 = 0.8605` compares `gemini-3.8-flash` to `gemini-4-argon` (`[87.97%, 95.08%]` uses point judge rates). Regulated use needs `~100` blind human labels.
-2. **Small slices & mixed cliffs:** Skill (`n=8` vs. `n=10`) excludes engineering/SME wages; RFP (`35`) mixes tier and `>200K` cliff.
-3. **Scheduled writes, caps & dialects:** `AI.GENERATE_TABLE` verdicts persist under a `2M`-token daily cap. `AI.EVALUATE_AGENT` (private preview) supports `14` single regions (`us.vertex_ai_connection` targets `US`) and estimates tokens via `CHAR_LENGTH / 4`. [`sqlite_views.py`](bq_eval/engine/sqlite_views.py) mirrors `APPROX_QUANTILES` and `ARRAY_AGG` (`< 1e-12` parity).
-4. **Cloud credentials for live runs:** Local runs use SQLite, `bq-eval bootstrap --offline-schema`, and `terraform test`; live GCP `--dry_run` and `terraform apply` require `--project-id`, `bq`, and `gcloud auth`.
+1. **No human labels yet.** Judge agreement (AC2 0.86) compares a fast model with a stronger model. Regulated use needs about 100 blind human labels.
+2. **Small, mixed slices.** The skill upgrade compares 8 and 10 cases and leaves out engineering time. The long-document test (35 cases) changes model and price tier at once, so it can't isolate either.
+3. **Caps and preview limits.** Saved judge runs stop at a 2M-token daily cap. AI.EVALUATE_AGENT is a private preview in 14 single regions and estimates tokens as characters divided by 4.
+4. **Live runs need a GCP project.** Everything local runs on SQLite and offline schema checks. Deploying needs a project, the bq CLI and gcloud auth.
 
 ## Quick Start
-
-Run the CLI, workbench, loadgen, judge SQL, bootstrap, or dry-run:
 
 ```bash
 uv sync --extra dev
 uv run python -m bq_eval.cli demo --html-out /tmp/bq_eval_scorecard.html
 uv run python -m bq_eval.cli serve --port 8080
-uv run python -m bq_eval.cli loadgen --replicas 50 --last-hour-replicas 15
-uv run python -m bq_eval.cli judge-sql --engine generate-table --project-id my-gcp-project --canary-pct 5
-uv run python -m bq_eval.cli bootstrap --mode hybrid --project-id my-gcp-project --offline-schema
-uv run python scripts/bq_dry_run.py --offline-manifest /tmp/bq_dry_run_manifest.json
-uv run python scripts/bq_dry_run.py --project-id YOUR_GCP_PROJECT  # requires authenticated `bq` CLI
 ```
 
-3-line Light Capture (`agent_events` via Storage Write API):
-
-```python
-bqaa_cfg = BigQueryLoggerConfig(custom_metadata={"apphub.application.id": "my-app"})
-bqaa_plugin = BigQueryAgentAnalyticsPlugin(project_id="my-gcp-project", dataset_id="agent_eval", config=bqaa_cfg)
-runner = Runner(agent=root_agent, app_name="my-app", session_service=session_svc, plugins=[bqaa_plugin])
-```
-
-Try `--corpus retail-2app`, `--format json`, or `uv run pytest -p no:cacheprovider -v` (`146/146` tests).
+The demo replays the 343 cases and writes a scorecard; serve opens the same workbench locally. Capture setup, judge SQL, deployment and dry runs are in [getting started](docs/getting-started.md).
 
 ### Deep Dives
 
-- [SQL & calibration](docs/architecture-and-sql.md) · [`BQAA` & `_AllSpans`](docs/bqaa-and-dual-path-architecture.md) · [Cliffs & chargeback](docs/finops-and-cost-management.md) · [Rubric skill](skills/bq-eval/SKILL.md) · [Invariants](CRITICAL.md) · [ADRs](DECISIONS.md) · [Roadmap](docs/roadmap.md)
+- [Results](docs/results.md) · [Getting started](docs/getting-started.md) · [SQL & calibration](docs/architecture-and-sql.md) · [BQAA & OpenTelemetry capture](docs/bqaa-and-dual-path-architecture.md) · [Cost & chargeback](docs/finops-and-cost-management.md) · [Rubric skill](skills/bq-eval/SKILL.md) · [Invariants](CRITICAL.md) · [Decisions](DECISIONS.md) · [Roadmap](docs/roadmap.md)
