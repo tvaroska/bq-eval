@@ -7,10 +7,11 @@ import re
 from collections.abc import Sequence
 from pathlib import Path
 
+from bq_eval.core.engine.resources import resolve_packaged_data
 from bq_eval.deploy.contract.bootstrap import BootstrapMode, BootstrapValidationReport
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-DEFAULT_SQL_DIR = REPO_ROOT / "sql"
+DEFAULT_SQL_DIR = resolve_packaged_data("sql")
 
 _PROJECT_RE = re.compile(r"^[a-zA-Z0-9_-]{2,64}$")
 _DATASET_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]{0,127}$")
@@ -213,6 +214,11 @@ def substitute_sql_parameters(  # noqa: PLR0913
     traces_dataset_id: str = "obs_traces",
     logs_dataset_id: str = "obs_logs",
     seed_dataset_id: str = "agent_eval_seed",
+    aws_omni_connection_id: str | None = None,
+    aws_s3_bucket: str | None = None,
+    azure_omni_connection_id: str | None = None,
+    azure_storage_account: str | None = None,
+    azure_container: str | None = None,
 ) -> str:
     """Render parameterized BigQuery SQL with concrete project, dataset, connection, and bucket."""
     valid_project = _validate_param(project_id, _PROJECT_RE, "project_id")
@@ -230,12 +236,26 @@ def substitute_sql_parameters(  # noqa: PLR0913
         .replace("${CONNECTION_ID}", valid_conn)
         .replace("${PAYLOAD_BUCKET}", valid_bucket)
         .replace("${PREFIX}", valid_prefix)
-        .replace("${AWS_OMNI_CONNECTION_ID}", "aws-us-east-1.omni_connection")
-        .replace("${AZURE_OMNI_CONNECTION_ID}", "azure-eastus2.omni_connection")
-        .replace("${AWS_S3_BUCKET}", f"{valid_bucket}-aws-otel")
-        .replace("${AZURE_STORAGE_ACCOUNT}", "enterpriseazureotel")
-        .replace("${AZURE_CONTAINER}", "otel-spans")
     )
+    if aws_omni_connection_id is not None:
+        valid_aws_conn = _validate_param(
+            aws_omni_connection_id, _CONNECTION_RE, "aws_omni_connection_id"
+        )
+        rendered = rendered.replace("${AWS_OMNI_CONNECTION_ID}", valid_aws_conn)
+    if aws_s3_bucket is not None:
+        valid_aws_bucket = _validate_param(aws_s3_bucket, _BUCKET_RE, "aws_s3_bucket")
+        rendered = rendered.replace("${AWS_S3_BUCKET}", valid_aws_bucket)
+    if azure_omni_connection_id is not None:
+        valid_az_conn = _validate_param(
+            azure_omni_connection_id, _CONNECTION_RE, "azure_omni_connection_id"
+        )
+        rendered = rendered.replace("${AZURE_OMNI_CONNECTION_ID}", valid_az_conn)
+    if azure_storage_account is not None:
+        valid_az_acct = _validate_param(azure_storage_account, _BUCKET_RE, "azure_storage_account")
+        rendered = rendered.replace("${AZURE_STORAGE_ACCOUNT}", valid_az_acct)
+    if azure_container is not None:
+        valid_az_ctr = _validate_param(azure_container, _BUCKET_RE, "azure_container")
+        rendered = rendered.replace("${AZURE_CONTAINER}", valid_az_ctr)
     rendered = rendered.replace("`agent_eval`", f"`{valid_project}.{valid_dataset}`")
     rendered = rendered.replace("`agent_eval_seed`", f"`{valid_project}.{valid_seed}`")
     rendered = rendered.replace("`agent_eval.", f"`{valid_project}.{valid_dataset}.")
@@ -339,17 +359,23 @@ def render_bootstrap_statements(  # noqa: PLR0913
     traces_dataset_id: str = "obs_traces",
     logs_dataset_id: str = "obs_logs",
     include_omni: bool = False,
-    sql_dir: Path = DEFAULT_SQL_DIR,
+    aws_omni_connection_id: str | None = None,
+    aws_s3_bucket: str | None = None,
+    azure_omni_connection_id: str | None = None,
+    azure_storage_account: str | None = None,
+    azure_container: str | None = None,
+    sql_dir: Path | None = None,
 ) -> list[tuple[str, str]]:
     """Build ordered `(label, sql_statement)` list for cold-start `light`, `full`, or `hybrid` deploy."""
     if mode not in ("light", "full", "hybrid"):
         raise ValueError(f"Unsupported bootstrap mode {mode!r}: expected light, full, or hybrid.")
 
+    resolved_sql_dir = sql_dir if sql_dir is not None else resolve_packaged_data("sql")
     valid_project = _validate_param(project_id, _PROJECT_RE, "project_id")
     valid_dataset = _validate_param(dataset_id, _DATASET_RE, "dataset_id")
 
     def _load(filename: str) -> list[str]:
-        raw = (sql_dir / filename).read_text(encoding="utf-8")
+        raw = (resolved_sql_dir / filename).read_text(encoding="utf-8")
         rendered = substitute_sql_parameters(
             raw,
             project_id=valid_project,
@@ -359,6 +385,11 @@ def render_bootstrap_statements(  # noqa: PLR0913
             payload_prefix=payload_prefix,
             traces_dataset_id=traces_dataset_id,
             logs_dataset_id=logs_dataset_id,
+            aws_omni_connection_id=aws_omni_connection_id,
+            aws_s3_bucket=aws_s3_bucket,
+            azure_omni_connection_id=azure_omni_connection_id,
+            azure_storage_account=azure_storage_account,
+            azure_container=azure_container,
         )
         return split_sql_statements_stdlib(rendered)
 
@@ -377,7 +408,7 @@ def render_bootstrap_statements(  # noqa: PLR0913
         "core/views.sql",
         "finops/capacity_views.sql",
     ]
-    if include_omni and (sql_dir / "finops" / "omni_spoke_views.sql").is_file():
+    if include_omni and (resolved_sql_dir / "finops" / "omni_spoke_views.sql").is_file():
         common_files.append("finops/omni_spoke_views.sql")
 
     for fname in common_files:
@@ -487,9 +518,15 @@ def validate_bootstrap_offline(  # noqa: PLR0913
     payload_bucket: str | None = None,
     payload_prefix: str = "bq-eval/",
     include_omni: bool = False,
-    sql_dir: Path = DEFAULT_SQL_DIR,
+    aws_omni_connection_id: str | None = None,
+    aws_s3_bucket: str | None = None,
+    azure_omni_connection_id: str | None = None,
+    azure_storage_account: str | None = None,
+    azure_container: str | None = None,
+    sql_dir: Path | None = None,
 ) -> tuple[BootstrapValidationReport, list[tuple[str, str]]]:
     """Validate rendered bootstrap SQL offline (zero GCP credentials) across placeholders, schema & DAG."""
+    resolved_sql_dir = sql_dir if sql_dir is not None else resolve_packaged_data("sql")
     stmts = render_bootstrap_statements(
         mode=mode,
         project_id=project_id,
@@ -498,9 +535,14 @@ def validate_bootstrap_offline(  # noqa: PLR0913
         payload_bucket=payload_bucket,
         payload_prefix=payload_prefix,
         include_omni=include_omni,
-        sql_dir=sql_dir,
+        aws_omni_connection_id=aws_omni_connection_id,
+        aws_s3_bucket=aws_s3_bucket,
+        azure_omni_connection_id=azure_omni_connection_id,
+        azure_storage_account=azure_storage_account,
+        azure_container=azure_container,
+        sql_dir=resolved_sql_dir,
     )
-    schema_path = sql_dir / "core" / "otel_spans_schema.json"
+    schema_path = resolved_sql_dir / "core" / "otel_spans_schema.json"
     schema_cols = [str(col["name"]) for col in json.loads(schema_path.read_text(encoding="utf-8"))]
 
     unresolved: set[str] = set()

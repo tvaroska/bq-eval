@@ -365,6 +365,8 @@ latest_eval_verdicts AS (
   LEFT JOIN `agent_eval.v_trace_sql_evaluation` AS t
     ON e.trace_id = t.trace_id
   WHERE COALESCE(e.outcome_id, t.outcome_id) IS NOT NULL
+    AND e.binary_pass IS NOT NULL
+    AND (e.ordinal_score IS NULL OR e.ordinal_score BETWEEN 1 AND 4)
   QUALIFY ROW_NUMBER() OVER (
     PARTITION BY e.trace_id, e.rubric_id
     ORDER BY e.evaluated_at DESC
@@ -658,6 +660,8 @@ latest_rule0_evals AS (
     binary_pass
   FROM deduped_eval_results
   WHERE rule0_pass = TRUE
+    AND binary_pass IS NOT NULL
+    AND (ordinal_score IS NULL OR ordinal_score BETWEEN 1 AND 4)
   QUALIFY ROW_NUMBER() OVER (
     PARTITION BY apphub_application_id, trace_id, rubric_id
     ORDER BY evaluated_at DESC

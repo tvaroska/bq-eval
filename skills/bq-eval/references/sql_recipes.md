@@ -302,9 +302,18 @@ SELECT
   reasoning_trace,
   ordinal_score,
   (ordinal_score >= passing_score) AS binary_pass,
-  DIV(LENGTH(prompt), 4) AS judge_input_tokens,
-  DIV(LENGTH(COALESCE(reasoning_trace, '')), 4) + 12 AS judge_output_tokens,
-  0 AS judge_thinking_tokens,
+  COALESCE(
+    SAFE_CAST(JSON_VALUE(full_response, '$.usageMetadata.promptTokenCount') AS INT64),
+    DIV(LENGTH(prompt), 4)
+  ) AS judge_input_tokens,
+  COALESCE(
+    SAFE_CAST(JSON_VALUE(full_response, '$.usageMetadata.candidatesTokenCount') AS INT64),
+    DIV(LENGTH(COALESCE(reasoning_trace, '')), 4) + 12
+  ) AS judge_output_tokens,
+  COALESCE(
+    SAFE_CAST(JSON_VALUE(full_response, '$.usageMetadata.thoughtsTokenCount') AS INT64),
+    0
+  ) AS judge_thinking_tokens,
   CURRENT_TIMESTAMP() AS evaluated_at
 FROM AI.GENERATE_TABLE(
   MODEL `agent_eval.gemini_3_8_flash_judge`,
@@ -323,5 +332,7 @@ FROM AI.GENERATE_TABLE(
     'reasoning_trace STRING NOT NULL, ordinal_score INT64 NOT NULL' AS output_schema,
     '{"generation_config": {"temperature": 0.0, "max_output_tokens": 2048, "thinking_config": {"thinking_level": "LOW"}}}' AS model_params
   )
-);
+)
+WHERE COALESCE(status, '') = ''
+  AND ordinal_score BETWEEN 1 AND 4;
 ```

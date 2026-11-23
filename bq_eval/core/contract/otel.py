@@ -236,21 +236,6 @@ class OTelGenAISpanRecord(BaseModel):
             - self.cache_write_1h_tokens,
         )
 
-    @property
-    def is_long_context_cliff(self) -> bool:
-        return self.input_tokens > LONG_CONTEXT_THRESHOLD_TOKENS
-
-    @property
-    def weighted_burndown_tokens(self) -> float:
-        return compute_weighted_burndown_tokens(
-            input_tokens=self.input_tokens,
-            cached_input_tokens=self.cached_input_tokens,
-            output_tokens=self.output_tokens,
-            thinking_tokens=self.thinking_tokens,
-            cache_write_5m_tokens=self.cache_write_5m_tokens,
-            cache_write_1h_tokens=self.cache_write_1h_tokens,
-        )
-
 
 class TracePayloadRecord(BaseModel):
     """Prompt, retrieved context, and final response payload row (`agent_eval.trace_payloads`)."""

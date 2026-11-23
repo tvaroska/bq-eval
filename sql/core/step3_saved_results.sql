@@ -130,8 +130,10 @@ SELECT
   (
     (base.policy_sha256 IS DISTINCT FROM cand.policy_sha256)
     AND COALESCE(cand.target_clause_id, base.target_clause_id) IS NOT NULL
-    AND CONCAT(',', COALESCE(cand.amended_clause_ids, ''), ',')
-      LIKE CONCAT('%,', COALESCE(cand.target_clause_id, base.target_clause_id), ',%')
+    AND STRPOS(
+      CONCAT(',', REPLACE(COALESCE(cand.amended_clause_ids, ''), ' ', ''), ','),
+      CONCAT(',', COALESCE(cand.target_clause_id, base.target_clause_id), ',')
+    ) > 0
   ) AS is_clause_amended,
   base.ordinal_score AS baseline_score,
   cand.ordinal_score AS candidate_score,
@@ -144,8 +146,10 @@ SELECT
     AND NOT (
       (base.policy_sha256 IS DISTINCT FROM cand.policy_sha256)
       AND COALESCE(cand.target_clause_id, base.target_clause_id) IS NOT NULL
-      AND CONCAT(',', COALESCE(cand.amended_clause_ids, ''), ',')
-        LIKE CONCAT('%,', COALESCE(cand.target_clause_id, base.target_clause_id), ',%')
+      AND STRPOS(
+        CONCAT(',', REPLACE(COALESCE(cand.amended_clause_ids, ''), ' ', ''), ','),
+        CONCAT(',', COALESCE(cand.target_clause_id, base.target_clause_id), ',')
+      ) > 0
     )
   ) AS is_unamended_negative_flip,
   (NOT base.binary_pass AND cand.binary_pass) AS is_positive_flip,

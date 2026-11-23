@@ -181,6 +181,23 @@ WITH combined_spokes AS (
   SELECT * FROM `agent_eval.v_omni_aws_spoke_spans`
   UNION ALL
   SELECT * FROM `agent_eval.v_omni_azure_spoke_spans`
+),
+attributed_spokes AS (
+  SELECT
+    *,
+    ROW_NUMBER() OVER (
+      PARTITION BY cloud_provider, apphub_application_id, trace_id
+      ORDER BY start_time, span_id
+    ) AS trace_span_rank,
+    CASE
+      WHEN outcome_verified AND outcome_id IS NOT NULL THEN
+        ROW_NUMBER() OVER (
+          PARTITION BY cloud_provider, apphub_application_id, outcome_id
+          ORDER BY start_time, span_id
+        )
+      ELSE NULL
+    END AS verified_outcome_span_rank
+  FROM combined_spokes
 )
 SELECT
   cloud_provider,
@@ -190,14 +207,14 @@ SELECT
   workload_principal,
   model_name,
   finops_traffic_type,
-  COUNT(DISTINCT trace_id) AS total_traces,
-  COUNT(DISTINCT IF(rule0_pass, trace_id, NULL)) AS rule0_passing_traces,
-  COUNT(DISTINCT IF(outcome_verified AND outcome_id IS NOT NULL, outcome_id, NULL)) AS verified_outcomes,
+  COUNTIF(trace_span_rank = 1) AS total_traces,
+  COUNTIF(trace_span_rank = 1 AND rule0_pass) AS rule0_passing_traces,
+  COUNTIF(verified_outcome_span_rank = 1) AS verified_outcomes,
   SUM(input_tokens) AS total_input_tokens,
   SUM(output_tokens) AS total_output_tokens,
   SUM(weighted_burndown_tokens) AS weighted_burndown_tokens,
   SUM(span_cost_usd) AS total_spend_usd
-FROM combined_spokes
+FROM attributed_spokes
 GROUP BY
   cloud_provider,
   cloud_region,
@@ -210,17 +227,73 @@ GROUP BY
 -- -----------------------------------------------------------------------------
 -- 4. Unified Multi-Cloud CPVO View (`v_unified_multicloud_cpvo`)
 --    * Reconciles local GCP outcomes + `agent_eval.remote_trace_slices` rollups
+--    * Counts each GCP outcome and trace once per application (avoiding multi-agent fan-out)
 -- -----------------------------------------------------------------------------
 CREATE OR REPLACE VIEW `agent_eval.v_unified_multicloud_cpvo` AS
-WITH gcp_outcomes AS (
+WITH gcp_spend AS (
   SELECT
-    'gcp' AS cloud_provider,
     apphub_application_id,
-    SUM(total_traces) AS total_traces,
-    SUM(verified_outcomes) AS verified_outcomes,
     SUM(total_cost_with_infra_usd) AS total_spend_usd
   FROM `agent_eval.v_enterprise_cost_per_verified_outcome`
   GROUP BY apphub_application_id
+),
+gcp_latest_evals AS (
+  SELECT
+    COALESCE(e.outcome_id, t.outcome_id) AS outcome_id,
+    e.binary_pass
+  FROM `agent_eval.eval_results` AS e
+  LEFT JOIN `agent_eval.v_trace_sql_evaluation` AS t
+    ON e.trace_id = t.trace_id
+  WHERE COALESCE(e.outcome_id, t.outcome_id) IS NOT NULL
+    AND e.binary_pass IS NOT NULL
+    AND (e.ordinal_score IS NULL OR e.ordinal_score BETWEEN 1 AND 4)
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY e.trace_id, e.rubric_id
+    ORDER BY e.evaluated_at DESC
+  ) = 1
+),
+gcp_step2_by_outcome AS (
+  SELECT
+    outcome_id,
+    LOGICAL_AND(binary_pass) AS step2_all_pass
+  FROM gcp_latest_evals
+  GROUP BY outcome_id
+),
+gcp_distinct_outcomes AS (
+  SELECT
+    COALESCE(o.outcome_owner, w.outcome_owner, w.apphub_application_id, 'unregistered_app') AS apphub_application_id,
+    COUNT(DISTINCT w.trace_id) AS total_traces,
+    COUNT(
+      DISTINCT IF(
+        COALESCE(o.outcome_status, 'open') = 'succeeded'
+          AND COALESCE(o.is_verified, FALSE)
+          AND COALESCE(j.step2_all_pass, TRUE),
+        w.outcome_id,
+        NULL
+      )
+    ) AS verified_outcomes
+  FROM `agent_eval.v_trace_waterfall` AS w
+  LEFT JOIN `agent_eval.v_outcomes` AS o
+    ON w.outcome_id = o.outcome_id
+  LEFT JOIN gcp_step2_by_outcome AS j
+    ON w.outcome_id = j.outcome_id
+  LEFT JOIN `agent_eval.app_registry` AS r
+    ON COALESCE(o.outcome_owner, w.outcome_owner, w.apphub_application_id, 'unregistered_app') = r.apphub_application_id
+  WHERE w.outcome_id IS NOT NULL
+    AND NOT COALESCE(r.is_external_counterparty, FALSE)
+    AND LOWER(COALESCE(JSON_VALUE(w.attributes, '$."apphub.external"'), 'false')) != 'true'
+  GROUP BY 1
+),
+gcp_outcomes AS (
+  SELECT
+    'gcp' AS cloud_provider,
+    c.apphub_application_id,
+    c.total_traces,
+    c.verified_outcomes,
+    s.total_spend_usd
+  FROM gcp_distinct_outcomes AS c
+  LEFT JOIN gcp_spend AS s
+    ON c.apphub_application_id = s.apphub_application_id
 ),
 remote_outcomes AS (
   SELECT

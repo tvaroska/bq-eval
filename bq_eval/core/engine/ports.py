@@ -1,10 +1,8 @@
-"""Evaluation Backend Ports & Adapters (`EvalBackend` `Protocol`, SQLite local + BigQuery cloud)."""
+"""Evaluation Backend Ports & Adapters (local `EvalBackend` and warehouse `WarehouseEvalBackend`)."""
 
 from __future__ import annotations
 
-import json
-import shutil
-import subprocess
+import math
 from collections.abc import Callable, Mapping, Sequence
 from typing import Protocol, runtime_checkable
 
@@ -21,7 +19,7 @@ QueryRunner = Callable[[str], Sequence[Mapping[str, object]]]
 
 @runtime_checkable
 class EvalBackend(Protocol):
-    """Minimal evaluation execution port implemented by local SQLite and cloud BigQuery adapters."""
+    """Local in-memory span evaluation port implemented by `SQLiteEvalBackend`."""
 
     def evaluate_traces(  # noqa: PLR0913
         self,
@@ -41,7 +39,7 @@ class EvalBackend(Protocol):
         sampling_strata: Mapping[str, str] | None = None,
         sla_latency_ms: float = 5000.0,
     ) -> dict[str, SQLTraceEvalSummary]:
-        """Evaluate traces and return per-application quality and FinOps summaries."""
+        """Evaluate traces locally and return per-application quality and FinOps summaries."""
         ...
 
     def build_judge_sql(  # noqa: PLR0913
@@ -56,6 +54,40 @@ class EvalBackend(Protocol):
         include_rule0_failures: bool = False,
     ) -> str:
         """Build the stratified Tier-2 judge SQL statement for this backend."""
+        ...
+
+
+@runtime_checkable
+class WarehouseEvalBackend(Protocol):
+    """Warehouse summary & read-only query port implemented by `BigQueryEvalBackend`."""
+
+    project_id: str
+    dataset_id: str
+
+    def run_query(self, sql: str) -> Sequence[Mapping[str, object]]:
+        """Execute a read-only SQL query and return row mappings."""
+        ...
+
+    def read_summaries(
+        self,
+        *,
+        rubric_id: str = "groundedness_4pt_v1",
+    ) -> dict[str, SQLTraceEvalSummary]:
+        """Read per-application evaluation & FinOps summaries from warehouse views."""
+        ...
+
+    def build_judge_sql(  # noqa: PLR0913
+        self,
+        *,
+        project_id: str | None = None,
+        dataset_id: str | None = None,
+        rubric_id: str = "groundedness_4pt_v1",
+        canary_sample_pct: int = 5,
+        run_id: str | None = None,
+        judge_model: str | None = None,
+        include_rule0_failures: bool = False,
+    ) -> str:
+        """Build the stratified Tier-2 judge SQL statement targeting this warehouse."""
         ...
 
 
@@ -116,9 +148,12 @@ class SQLiteEvalBackend:
 def _optional_float(val: object) -> float | None:
     if val is None or val == "":
         return None
-    if isinstance(val, (int, float)):
-        return float(val)
-    return float(str(val))
+    if isinstance(val, bool):
+        raise ValueError(f"Expected numeric float value, got bool {val!r}.")
+    parsed = float(val) if isinstance(val, (int, float)) else float(str(val))
+    if not math.isfinite(parsed):
+        raise ValueError(f"Expected finite float value, got {val!r}.")
+    return parsed
 
 
 def _optional_bool(val: object) -> bool | None:
@@ -136,17 +171,28 @@ def _optional_bool(val: object) -> bool | None:
     return None
 
 
-def _req_int(val: object, default: int = 0) -> int:
+def parse_required_int(val: object, default: int = 0) -> int:
+    """Parse an integer column with an explicit fallback when optional columns are omitted."""
     if val is None or val == "":
         return default
+    if isinstance(val, bool):
+        raise ValueError(f"Expected integer value, got bool {val!r}.")
     if isinstance(val, int):
         return val
     return int(float(str(val)))
 
 
-def _req_float(val: object, default: float = 0.0) -> float:
+def parse_required_float(val: object, default: float = 0.0) -> float:
+    """Parse a finite float column with an explicit fallback for optional columns."""
     parsed = _optional_float(val)
     return default if parsed is None else parsed
+
+
+def _strict_float(row: Mapping[str, object], key: str) -> float:
+    parsed = _optional_float(row.get(key))
+    if parsed is None:
+        raise ValueError(f"Required numeric column {key!r} is NULL or missing.")
+    return parsed
 
 
 def _mapping_to_summary(row: Mapping[str, object]) -> SQLTraceEvalSummary:
@@ -157,14 +203,14 @@ def _mapping_to_summary(row: Mapping[str, object]) -> SQLTraceEvalSummary:
         {
             "apphub_application_id": str(row["apphub_application_id"]),
             "rubric_id": str(row["rubric_id"]),
-            "total_traces": _req_int(row["total_traces"]),
-            "production_traces": _req_int(row["production_traces"]),
-            "rule0_pass_rate": _req_float(row["rule0_pass_rate"]),
-            "tool_success_rate": _req_float(row["tool_success_rate"]),
-            "p95_latency_ms": _req_float(row["p95_latency_ms"]),
-            "avg_cache_hit_ratio": _req_float(row.get("avg_cache_hit_ratio"), 0.0),
-            "total_weighted_burndown_tokens": _req_float(row["total_weighted_burndown_tokens"]),
-            "judged_samples": _req_int(row["judged_samples"]),
+            "total_traces": parse_required_int(row["total_traces"]),
+            "production_traces": parse_required_int(row["production_traces"]),
+            "rule0_pass_rate": _strict_float(row, "rule0_pass_rate"),
+            "tool_success_rate": _strict_float(row, "tool_success_rate"),
+            "p95_latency_ms": _strict_float(row, "p95_latency_ms"),
+            "avg_cache_hit_ratio": parse_required_float(row.get("avg_cache_hit_ratio"), 0.0),
+            "total_weighted_burndown_tokens": _strict_float(row, "total_weighted_burndown_tokens"),
+            "judged_samples": parse_required_int(row["judged_samples"]),
             "calibration_status": status_raw,
             "raw_judge_pass_rate": _optional_float(row.get("raw_judge_pass_rate")),
             "calibrated_pass_rate": _optional_float(row.get("calibrated_pass_rate")),
@@ -172,17 +218,19 @@ def _mapping_to_summary(row: Mapping[str, object]) -> SQLTraceEvalSummary:
             "calibrated_ci_95_upper": _optional_float(row.get("calibrated_ci_95_upper")),
             "gwet_ac2": _optional_float(row.get("gwet_ac2")),
             "passes_irr_gate": _optional_bool(row.get("passes_irr_gate")),
-            "production_inference_usd": _req_float(row["production_inference_usd"]),
-            "conflict_escalation_usd": _req_float(row["conflict_escalation_usd"]),
-            "agent_gym_eval_usd": _req_float(row["agent_gym_eval_usd"]),
-            "autorater_judge_usd": _req_float(row["autorater_judge_usd"]),
-            "unclassified_usd": _req_float(row.get("unclassified_usd"), 0.0),
-            "total_spend_usd": _req_float(row["total_spend_usd"]),
+            "production_inference_usd": _strict_float(row, "production_inference_usd"),
+            "conflict_escalation_usd": _strict_float(row, "conflict_escalation_usd"),
+            "agent_gym_eval_usd": _strict_float(row, "agent_gym_eval_usd"),
+            "autorater_judge_usd": _strict_float(row, "autorater_judge_usd"),
+            "optimize_usd": parse_required_float(row.get("optimize_usd"), 0.0),
+            "bq_query_cost_usd": parse_required_float(row.get("bq_query_cost_usd"), 0.0),
+            "unclassified_usd": parse_required_float(row.get("unclassified_usd"), 0.0),
+            "total_spend_usd": _strict_float(row, "total_spend_usd"),
             "cost_per_verified_outcome_usd": _optional_float(
                 row.get("cost_per_verified_outcome_usd")
             ),
-            "outcome_total_count": _req_int(row.get("outcome_total_count"), 0),
-            "outcome_verified_count": _req_int(row.get("outcome_verified_count"), 0),
+            "outcome_total_count": parse_required_int(row.get("outcome_total_count"), 0),
+            "outcome_verified_count": parse_required_int(row.get("outcome_verified_count"), 0),
             "outcome_cost_per_verified_ai_usd": _optional_float(
                 row.get("outcome_cost_per_verified_ai_usd")
             ),
@@ -194,7 +242,7 @@ def _mapping_to_summary(row: Mapping[str, object]) -> SQLTraceEvalSummary:
 
 
 class BigQueryEvalBackend:
-    """Cloud BigQuery adapter implementing `EvalBackend` via injectable runner or `bq` CLI."""
+    """Cloud BigQuery adapter implementing `WarehouseEvalBackend` via an injectable `QueryRunner`."""
 
     def __init__(
         self,
@@ -205,74 +253,30 @@ class BigQueryEvalBackend:
     ) -> None:
         self.project_id = _validate_sql_identifier(project_id, "project_id", allow_hyphen=True)
         self.dataset_id = _validate_sql_identifier(dataset_id, "dataset_id")
-        self._query_runner = query_runner or self._run_bq_cli_query
+        self._query_runner = query_runner
 
     def run_query(self, sql: str) -> Sequence[Mapping[str, object]]:
-        """Run a read-only query through the configured runner."""
+        """Run a read-only query through the configured `QueryRunner`."""
+        if self._query_runner is None:
+            raise ValueError(
+                "BigQueryEvalBackend requires an explicit query_runner callable "
+                "(for CLI execution, pass `bq_cli_query_runner(project_id)` from `bq_eval.deploy.engine.bq_client`)."
+            )
         return self._query_runner(sql)
 
-    def _run_bq_cli_query(self, sql: str) -> Sequence[Mapping[str, object]]:
-        bq_bin = shutil.which("bq")
-        if bq_bin is None:
-            raise OSError("`bq` CLI not found on PATH; install Google Cloud SDK or pass a runner.")
-        proc = subprocess.run(  # noqa: S603
-            [
-                bq_bin,
-                "query",
-                f"--project_id={self.project_id}",
-                "--use_legacy_sql=false",
-                "--format=json",
-            ],
-            input=sql,
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-        if proc.returncode != 0:
-            raise OSError(f"BigQuery query failed: {(proc.stderr or proc.stdout).strip()}")
-        raw = proc.stdout.strip()
-        if not raw:
-            return []
-        parsed = json.loads(raw)
-        if not isinstance(parsed, list):
-            raise ValueError("Expected JSON list output from `bq query --format=json`.")
-        return parsed
-
-    def evaluate_traces(  # noqa: PLR0913
+    def read_summaries(
         self,
-        spans: Sequence[OTelGenAISpanRecord],
         *,
-        judge_outcomes: Mapping[str, bool] | None = None,
-        sme_confusion: ConfusionMatrix
-        | Mapping[str, ConfusionMatrix]
-        | Mapping[tuple[str, str], ConfusionMatrix]
-        | None = None,
         rubric_id: str = "groundedness_4pt_v1",
-        judge_cost_per_call_usd: float = 0.0025,
-        sme_ordinal_pairs: Sequence[tuple[int, int]]
-        | Mapping[str, Sequence[tuple[int, int]]]
-        | Mapping[tuple[str, str], Sequence[tuple[int, int]]]
-        | None = None,
-        sampling_strata: Mapping[str, str] | None = None,
-        sla_latency_ms: float = 5000.0,
     ) -> dict[str, SQLTraceEvalSummary]:
-        # Cloud views read live BigQuery tables; local kwargs stay unused by design in warehouse mode.
-        _ = (
-            spans,
-            judge_outcomes,
-            sme_confusion,
-            judge_cost_per_call_usd,
-            sme_ordinal_pairs,
-            sampling_strata,
-            sla_latency_ms,
-        )
+        """Read per-application evaluation & FinOps summaries from BigQuery views."""
         valid_rubric = _validate_sql_identifier(rubric_id, "rubric_id")
         sql = (
             f"SELECT * FROM `{self.project_id}.{self.dataset_id}.v_agent_eval_and_finops_summary` "  # noqa: S608
             f"WHERE rubric_id = '{valid_rubric}' OR calibration_status = 'UNJUDGED' "
             "ORDER BY apphub_application_id"
         )
-        rows = self._query_runner(sql)
+        rows = self.run_query(sql)
         selected: dict[str, SQLTraceEvalSummary] = {}
         for raw_row in rows:
             summary = _mapping_to_summary(raw_row)

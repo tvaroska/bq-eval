@@ -35,24 +35,38 @@ GROUP BY usage_hour_iso, apphub_application_id, model_name, finops_traffic_type,
 ORDER BY usage_hour_iso, apphub_application_id, model_name, finops_traffic_type, serving_traffic_type;
 
 CREATE VIEW v_interaction_session_lineage AS
-WITH session_spans AS (
+WITH session_traces AS (
     SELECT
         apphub_application_id,
         session_id,
-        COALESCE(
-            turn_index,
-            ROW_NUMBER() OVER (PARTITION BY apphub_application_id, session_id ORDER BY start_epoch_ms, span_id) - 1
-        ) AS resolved_turn_index,
         trace_id,
-        start_epoch_ms,
-        end_epoch_ms,
-        input_tokens,
-        output_tokens,
-        thinking_tokens,
-        span_cost_usd,
-        CASE WHEN rule0_pass = 1 AND status_code != 'ERROR' THEN 1 ELSE 0 END AS turn_ok
+        MIN(turn_index) AS explicit_turn_index,
+        MIN(start_epoch_ms) AS trace_start_epoch_ms,
+        MAX(end_epoch_ms) AS trace_end_epoch_ms,
+        SUM(input_tokens) AS trace_input_tokens,
+        SUM(output_tokens + thinking_tokens) AS trace_output_tokens,
+        SUM(span_cost_usd) AS trace_cost_usd,
+        MIN(CASE WHEN rule0_pass = 1 AND status_code != 'ERROR' THEN 1 ELSE 0 END) AS turn_ok
     FROM otel_spans
     WHERE session_id IS NOT NULL AND session_id != ''
+    GROUP BY apphub_application_id, session_id, trace_id
+),
+ranked_turns AS (
+    SELECT
+        apphub_application_id,
+        session_id,
+        trace_id,
+        COALESCE(
+            explicit_turn_index,
+            ROW_NUMBER() OVER (PARTITION BY apphub_application_id, session_id ORDER BY trace_start_epoch_ms, trace_id) - 1
+        ) AS resolved_turn_index,
+        trace_start_epoch_ms,
+        trace_end_epoch_ms,
+        trace_input_tokens,
+        trace_output_tokens,
+        trace_cost_usd,
+        turn_ok
+    FROM session_traces
 )
 SELECT
     apphub_application_id,
@@ -60,13 +74,13 @@ SELECT
     COUNT(DISTINCT resolved_turn_index) AS turn_count,
     MAX(resolved_turn_index) AS max_turn_index,
     COUNT(DISTINCT trace_id) AS trace_count,
-    MAX(end_epoch_ms) - MIN(start_epoch_ms) AS session_duration_ms,
-    SUM(input_tokens) AS cumulative_input_tokens,
-    SUM(output_tokens + thinking_tokens) AS cumulative_output_tokens,
-    SUM(span_cost_usd) AS cumulative_cost_usd,
+    MAX(trace_end_epoch_ms) - MIN(trace_start_epoch_ms) AS session_duration_ms,
+    SUM(trace_input_tokens) AS cumulative_input_tokens,
+    SUM(trace_output_tokens) AS cumulative_output_tokens,
+    SUM(trace_cost_usd) AS cumulative_cost_usd,
     MIN(turn_ok) AS session_rule0_pass,
     MIN(CASE WHEN turn_ok = 0 THEN resolved_turn_index ELSE NULL END) AS first_failure_turn_index
-FROM session_spans
+FROM ranked_turns
 GROUP BY apphub_application_id, session_id
 ORDER BY apphub_application_id, session_id;
 

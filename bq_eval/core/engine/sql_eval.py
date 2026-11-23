@@ -110,7 +110,7 @@ def build_ai_generate_table_judge_sql(  # noqa: PLR0913
     canary_sample_pct: int = 5,
     run_id: str | None = None,
     judge_model: str | None = None,
-    include_rule0_failures: bool = True,
+    include_rule0_failures: bool = False,
     policy_sha256: str | None = None,
     amended_clause_ids: Sequence[str] | None = None,
 ) -> str:
@@ -189,7 +189,26 @@ def build_ai_generate_table_judge_sql(  # noqa: PLR0913
         )
 
     return f"""-- Tier 2 Stratified AI.GENERATE_TABLE Judge Execution ({rubric.rubric_id})
-WITH candidate_traces AS (
+WITH deduped_payloads AS (
+  SELECT
+    trace_id,
+    user_prompt,
+    retrieved_context,
+    final_response
+  FROM `{valid_project}.{valid_dataset}.trace_payloads`
+  WHERE TRIM(
+    CONCAT(
+      COALESCE(user_prompt, ''),
+      COALESCE(retrieved_context, ''),
+      COALESCE(final_response, '')
+    )
+  ) != ''
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY trace_id
+    ORDER BY LENGTH(COALESCE(final_response, '')) DESC, LENGTH(COALESCE(user_prompt, '')) DESC
+  ) = 1
+),
+candidate_traces AS (
   SELECT
     t.trace_id,
     t.outcome_id,
@@ -207,7 +226,7 @@ WITH candidate_traces AS (
       'Agent Final Response:\\n<untrusted_text>\\n', {escaped_response}, '\\n</untrusted_text>'
     ) AS prompt
   FROM `{valid_project}.{valid_dataset}.v_trace_sql_evaluation` AS t
-  LEFT JOIN `{valid_project}.{valid_dataset}.trace_payloads` AS p
+  INNER JOIN deduped_payloads AS p
     ON t.trace_id = p.trace_id
 {where_clause}
 )
@@ -223,9 +242,18 @@ SELECT
   reasoning_trace,
   ordinal_score,
   (ordinal_score >= {rubric.passing_score}) AS binary_pass,
-  DIV(LENGTH(prompt), 4) AS judge_input_tokens,
-  DIV(LENGTH(COALESCE(reasoning_trace, '')), 4) + 12 AS judge_output_tokens,
-  0 AS judge_thinking_tokens,
+  COALESCE(
+    SAFE_CAST(JSON_VALUE(full_response, '$.usageMetadata.promptTokenCount') AS INT64),
+    DIV(LENGTH(prompt), 4)
+  ) AS judge_input_tokens,
+  COALESCE(
+    SAFE_CAST(JSON_VALUE(full_response, '$.usageMetadata.candidatesTokenCount') AS INT64),
+    DIV(LENGTH(COALESCE(reasoning_trace, '')), 4) + 12
+  ) AS judge_output_tokens,
+  COALESCE(
+    SAFE_CAST(JSON_VALUE(full_response, '$.usageMetadata.thoughtsTokenCount') AS INT64),
+    0
+  ) AS judge_thinking_tokens,
   {policy_sha_expr} AS policy_sha256,
   {amended_expr} AS amended_clause_ids,
   CURRENT_TIMESTAMP() AS evaluated_at
@@ -236,7 +264,9 @@ FROM AI.GENERATE_TABLE(
     'reasoning_trace STRING NOT NULL, ordinal_score INT64 NOT NULL' AS output_schema,
     '{{"generation_config": {{"temperature": 0.0, "max_output_tokens": 2048, "thinking_config": {{"thinking_level": "LOW"}}}}}}' AS model_params
   )
-);
+)
+WHERE COALESCE(status, '') = ''
+  AND ordinal_score BETWEEN 1 AND 4;
 """  # noqa: S608
 
 

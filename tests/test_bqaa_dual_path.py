@@ -19,6 +19,7 @@ from bq_eval.core.engine.bqaa import (
     bqaa_events_to_trace_payloads,
     deduplicate_bqaa_events,
 )
+from bq_eval.core.engine.cost import compute_span_burndown_tokens, is_span_long_context_cliff
 from bq_eval.core.engine.sql_eval import build_ai_evaluate_agent_sql, evaluate_traces_in_sqlite
 from tests.conftest import REQUIRED_OTEL_SPANS_VIEW_COLUMNS
 
@@ -515,8 +516,8 @@ def test_bqaa_python_twin_dedup_strict_fallback_and_sqlite_eval() -> None:
     assert tool_span.span_id == "fedcba9876543210"
 
     llm_span = next(s for s in spans if s.span_id == "span-llm-01")
-    assert llm_span.is_long_context_cliff is True
-    assert llm_span.weighted_burndown_tokens == pytest.approx(155_000.0)
+    assert is_span_long_context_cliff(llm_span) is True
+    assert compute_span_burndown_tokens(llm_span) == pytest.approx(155_000.0)
 
     close_span = next(s for s in spans if s.span_name == "outcome.closed")
     assert close_span.outcome_id == "out_deal_101"

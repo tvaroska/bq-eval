@@ -81,6 +81,22 @@ OPTIONS (
 );
 
 -- -----------------------------------------------------------------------------
+-- 2B. Per-Day Serialized Quota Counter (`agent_eval.eval_daily_quota_state`)
+--     * BigQuery multi-statement transactions only detect concurrency conflicts
+--       on mutating DML (UPDATE/MERGE/DELETE), not pure INSERT appends.
+--     * Updating this single per-day row inside BEGIN TRANSACTION serializes
+--       concurrent CALLs on the same UTC date via optimistic concurrency control.
+-- -----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `agent_eval.eval_daily_quota_state` (
+  quota_date_utc DATE NOT NULL OPTIONS (description = 'UTC calendar date of the serialized quota counter.'),
+  reserved_tokens INT64 NOT NULL OPTIONS (description = 'Cumulative pre-flight tokens reserved on this UTC date.'),
+  updated_at TIMESTAMP NOT NULL OPTIONS (description = 'UTC timestamp of the last serialized reservation.')
+)
+OPTIONS (
+  description = 'Per-day mutable counter row acquiring a BigQuery transaction write lock to serialize concurrent quota reservations.'
+);
+
+-- -----------------------------------------------------------------------------
 -- 3. Global Real-Time Daily Quota Status (`agent_eval.v_step2_daily_quota_status`)
 --    * Non-deduped burn accounting: retains every billed Engine A & Engine B
 --      retry row in `eval_results` plus active/failed-billed reservations.
@@ -231,6 +247,7 @@ BEGIN
   );
   DECLARE v_call_headroom_tokens INT64 DEFAULT GREATEST(0, COALESCE(p_max_output_tokens, 2048)) + v_thinking_headroom;
   DECLARE v_selected_count INT64 DEFAULT 0;
+  DECLARE v_batch_tokens INT64 DEFAULT 0;
 
   CREATE TEMP TABLE _quota_selected_candidates AS
   WITH global_quota AS (
@@ -291,16 +308,38 @@ BEGIN
     RETURN;
   END IF;
 
+  SET v_batch_tokens = (SELECT COALESCE(SUM(est_call_tokens), 0) FROM _quota_selected_candidates);
+
   BEGIN TRANSACTION;
-    IF (
-      SELECT SUM(est_call_tokens) FROM _quota_selected_candidates
-    ) > COALESCE(
+    -- Mutate the single per-day counter row so concurrent CALLs conflict and serialize
+    -- under BigQuery optimistic concurrency control (pure INSERTs do not conflict).
+    MERGE INTO `agent_eval.eval_daily_quota_state` AS target
+    USING (
+      SELECT
+        CURRENT_DATE('UTC') AS quota_date_utc,
+        0 AS reserved_tokens,
+        CURRENT_TIMESTAMP() AS updated_at
+    ) AS src
+    ON target.quota_date_utc = src.quota_date_utc
+    WHEN MATCHED THEN
+      UPDATE SET updated_at = src.updated_at
+    WHEN NOT MATCHED THEN
+      INSERT (quota_date_utc, reserved_tokens, updated_at)
+      VALUES (src.quota_date_utc, src.reserved_tokens, src.updated_at);
+
+    IF v_batch_tokens > COALESCE(
       (SELECT tokens_remaining_today FROM `agent_eval.v_step2_daily_quota_status`),
       0
     ) THEN
       ROLLBACK TRANSACTION;
       RETURN;
     END IF;
+
+    UPDATE `agent_eval.eval_daily_quota_state`
+    SET
+      reserved_tokens = reserved_tokens + v_batch_tokens,
+      updated_at = CURRENT_TIMESTAMP()
+    WHERE quota_date_utc = CURRENT_DATE('UTC');
 
     INSERT INTO `agent_eval.eval_daily_quota_reservations` (
       reservation_id,
@@ -357,9 +396,18 @@ BEGIN
       reasoning_trace,
       ordinal_score,
       (ordinal_score >= passing_score) AS binary_pass,
-      DIV(LENGTH(prompt), 4) AS judge_input_tokens,
-      DIV(LENGTH(COALESCE(reasoning_trace, '')), 4) + 12 AS judge_output_tokens,
-      v_thinking_headroom AS judge_thinking_tokens,
+      COALESCE(
+        SAFE_CAST(JSON_VALUE(full_response, '$.usageMetadata.promptTokenCount') AS INT64),
+        DIV(LENGTH(prompt), 4)
+      ) AS judge_input_tokens,
+      COALESCE(
+        SAFE_CAST(JSON_VALUE(full_response, '$.usageMetadata.candidatesTokenCount') AS INT64),
+        DIV(LENGTH(COALESCE(reasoning_trace, '')), 4) + 12
+      ) AS judge_output_tokens,
+      COALESCE(
+        SAFE_CAST(JSON_VALUE(full_response, '$.usageMetadata.thoughtsTokenCount') AS INT64),
+        v_thinking_headroom
+      ) AS judge_thinking_tokens,
       CURRENT_TIMESTAMP() AS evaluated_at
     FROM AI.GENERATE_TABLE(
       MODEL `agent_eval.gemini_3_8_flash_judge`,
@@ -374,7 +422,9 @@ BEGIN
           '"}}}'
         ) AS model_params
       )
-    );
+    )
+    WHERE COALESCE(status, '') = ''
+      AND ordinal_score BETWEEN 1 AND 4;
 
     UPDATE `agent_eval.eval_daily_quota_reservations`
     SET status = 'COMMITTED', updated_at = CURRENT_TIMESTAMP()

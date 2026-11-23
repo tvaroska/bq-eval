@@ -60,12 +60,9 @@ SKIP_DIRS = {
     "migrations",
     "node_modules",
     "site-packages",
-    "test",
-    "tests",
     "vendor",
     "venv",
 }
-TEST_FILE_RE = re.compile(r"^(test_.*\.py|conftest\.py|.*_test\.go|.*\.(test|spec)\.\w+)$")
 GENERATED_FILE_RE = re.compile(r"\.(min\.js|d\.ts)$")
 NARRATION_RE = re.compile(r"^\s*(?:#|//)\s*(?:[=\-─#*]{8,}|\d+[.)]\s|Step \d)", re.MULTILINE)
 REQUIRES_PYTHON_RE = re.compile(r">=\s*(\d+)\.(\d+)")
@@ -79,7 +76,7 @@ def _source_files() -> list[Path]:
             path = Path(root) / name
             if path.suffix not in SOURCE_SUFFIXES or path.is_symlink():
                 continue
-            if TEST_FILE_RE.match(name) or GENERATED_FILE_RE.search(name):
+            if GENERATED_FILE_RE.search(name):
                 continue
             found.append(path)
     return found

@@ -11,6 +11,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from bq_eval.core.contract.otel import OTelGenAISpanRecord, TracePayloadRecord
+from bq_eval.core.engine.cost import compute_span_burndown_tokens
 from bq_eval.core.engine.sql_eval import evaluate_step1_traces_in_sqlite
 from bq_eval.demo.contract.results import (
     GoldenSpanTemplate,
@@ -329,7 +330,7 @@ def export_time_shifted_jsonl(
                 "otel_status_code": s.status_code,
                 "cached_tokens": s.cached_input_tokens,
                 "thoughts_tokens": s.thinking_tokens,
-                "precomputed_weighted_burndown_tokens": s.weighted_burndown_tokens,
+                "precomputed_weighted_burndown_tokens": compute_span_burndown_tokens(s),
                 "trace_id": s.trace_id,
                 "span_id": s.span_id,
                 "parent_span_id": s.parent_span_id,

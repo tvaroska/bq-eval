@@ -167,9 +167,9 @@ def test_app_registry_worm_storage_parameterization_and_dark_loc_removals() -> N
     """`app_registry.storage_usd_per_outcome` parameterizes WORM storage; deleted dark artifacts stay gone."""
     assert not hasattr(finops_cost, "compute_default_span_cost_usd")
     assert not hasattr(finops_spend, "compute_default_span_cost_usd")
-    assert not (SQL_DIR / "demo_docubridge_extensions.sql").exists()
-    assert not (REPO_ROOT / "bq_eval" / "showcase" / "seeds_banking.py").exists()
-    assert not (REPO_ROOT / "bq_eval" / "showcase" / "seeds_claims.py").exists()
+    assert not list(SQL_DIR.rglob("demo_docubridge_extensions.sql"))
+    assert not list((REPO_ROOT / "bq_eval").rglob("seeds_banking.py"))
+    assert not list((REPO_ROOT / "bq_eval").rglob("seeds_claims.py"))
 
     # Single-source seed parity: every template in golden_seeds.py appears in demo_time_shift_loadgen.sql.
     loadgen_sql = (SQL_DIR / "demo" / "demo_time_shift_loadgen.sql").read_text(encoding="utf-8")

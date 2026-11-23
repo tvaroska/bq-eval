@@ -60,6 +60,9 @@ def test_stitch_design_contract_and_gm3_light_tokens() -> None:
     assert "flash-3.8-cached-prefix" in html_doc
     assert "unverified-draft-prompt" in html_doc
     assert "DISQUALIFIED" in html_doc
+    assert artifacts.finops_model_source == "illustrative_reference"
+    assert "Illustrative reference model options" in html_doc
+    assert run_showcase_pipeline(corpus="golden-4app").finops_model_source == "derived_from_corpus"
 
 
 def test_html_renderer_escapes_hostile_xss_payloads() -> None:
@@ -213,6 +216,7 @@ def test_m2_live_receipt_sha256_manifest_and_custom_scenario_replay(
     md_report = render_markdown_report(m2_artifacts)
     assert "## 5. Reconstructed Fleet Cohort Receipts" in md_report
     assert "reconstructed_from_bundle_spans" in md_report
+    assert "illustrative reference" in md_report.lower()
 
 
 def test_capacity_wire_contract_hourly_burndown_jsonl_and_hourly_focus_chargeback(

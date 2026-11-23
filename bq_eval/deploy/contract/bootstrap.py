@@ -10,7 +10,7 @@ BootstrapMode = Literal["light", "full", "hybrid"]
 
 
 class BootstrapValidationReport(BaseModel):
-    """Deterministic result of `bq-eval bootstrap --offline-schema` or `--dry-run`."""
+    """Deterministic result of `bq-eval bootstrap` offline validation and optional GCP `--dry-run`."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -25,7 +25,6 @@ class BootstrapValidationReport(BaseModel):
     schema_column_count: int = Field(..., ge=0)
     unresolved_placeholders: tuple[str, ...] = ()
     errors: tuple[str, ...] = ()
-    sqlglot_verified: bool = False
     live_dry_run_executed: bool = False
 
     @property

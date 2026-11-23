@@ -279,24 +279,38 @@ FROM hourly_totals;
 -- View 10: Stateful `/interactions` Session & Turn Lineage
 -- -----------------------------------------------------------------------------
 CREATE OR REPLACE VIEW `agent_eval.v_interaction_session_lineage` AS
-WITH session_spans AS (
+WITH session_traces AS (
   SELECT
     apphub_application_id,
     session_id,
-    COALESCE(
-      turn_index,
-      ROW_NUMBER() OVER (PARTITION BY apphub_application_id, session_id ORDER BY start_time, span_id) - 1
-    ) AS resolved_turn_index,
     trace_id,
-    start_time,
-    end_time,
-    input_tokens,
-    output_tokens,
-    thinking_tokens,
-    span_cost_usd,
-    (rule0_pass AND status_code != 'ERROR') AS turn_ok
+    MIN(turn_index) AS explicit_turn_index,
+    MIN(start_time) AS trace_start_time,
+    MAX(end_time) AS trace_end_time,
+    SUM(input_tokens) AS trace_input_tokens,
+    SUM(output_tokens + thinking_tokens) AS trace_output_tokens,
+    SUM(COALESCE(span_cost_usd, 0.0)) AS trace_cost_usd,
+    LOGICAL_AND(rule0_pass AND status_code != 'ERROR') AS turn_ok
   FROM `agent_eval.v_trace_waterfall`
   WHERE session_id IS NOT NULL AND session_id != ''
+  GROUP BY apphub_application_id, session_id, trace_id
+),
+ranked_turns AS (
+  SELECT
+    apphub_application_id,
+    session_id,
+    trace_id,
+    COALESCE(
+      explicit_turn_index,
+      ROW_NUMBER() OVER (PARTITION BY apphub_application_id, session_id ORDER BY trace_start_time, trace_id) - 1
+    ) AS resolved_turn_index,
+    trace_start_time,
+    trace_end_time,
+    trace_input_tokens,
+    trace_output_tokens,
+    trace_cost_usd,
+    turn_ok
+  FROM session_traces
 )
 SELECT
   apphub_application_id,
@@ -304,15 +318,15 @@ SELECT
   COUNT(DISTINCT resolved_turn_index) AS turn_count,
   MAX(resolved_turn_index) AS max_turn_index,
   COUNT(DISTINCT trace_id) AS trace_count,
-  MIN(start_time) AS session_start_time,
-  MAX(end_time) AS session_end_time,
-  TIMESTAMP_DIFF(MAX(end_time), MIN(start_time), MILLISECOND) AS session_duration_ms,
-  SUM(input_tokens) AS cumulative_input_tokens,
-  SUM(output_tokens + thinking_tokens) AS cumulative_output_tokens,
-  SUM(COALESCE(span_cost_usd, 0.0)) AS cumulative_cost_usd,
+  MIN(trace_start_time) AS session_start_time,
+  MAX(trace_end_time) AS session_end_time,
+  TIMESTAMP_DIFF(MAX(trace_end_time), MIN(trace_start_time), MILLISECOND) AS session_duration_ms,
+  SUM(trace_input_tokens) AS cumulative_input_tokens,
+  SUM(trace_output_tokens) AS cumulative_output_tokens,
+  SUM(trace_cost_usd) AS cumulative_cost_usd,
   LOGICAL_AND(turn_ok) AS session_rule0_pass,
   MIN(IF(NOT turn_ok, resolved_turn_index, NULL)) AS first_failure_turn_index
-FROM session_spans
+FROM ranked_turns
 GROUP BY apphub_application_id, session_id;
 
 -- -----------------------------------------------------------------------------

@@ -49,6 +49,20 @@ def resolve_span_sku(
     return resolved
 
 
+def is_span_long_context_cliff(
+    span: OTelGenAISpanRecord,
+    sku: ModelPricingSKU | None = None,
+) -> bool:
+    """Return True iff `span.input_tokens` exceeds its resolved SKU's long-context cliff."""
+    resolved = resolve_span_sku(span, sku)
+    if resolved is None:
+        return False
+    return (
+        resolved.long_context_threshold_tokens is not None
+        and span.input_tokens > resolved.long_context_threshold_tokens
+    )
+
+
 def compute_span_burndown_tokens(
     span: OTelGenAISpanRecord,
     sku: ModelPricingSKU | None = None,

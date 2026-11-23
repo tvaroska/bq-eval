@@ -639,7 +639,14 @@ def build_showcase_page_view(
         ),
         CardView(
             title="Zero-Fabrication (0.00%) Cost-vs-Quality Pareto Frontier",
-            subtitle="Disqualifies any model option with fabrication_rate > 0.0% or rule0_pass_rate < 98.0%.",
+            subtitle=(
+                (
+                    "Derived from corpus traces. "
+                    if artifacts.finops_model_source == "derived_from_corpus"
+                    else "Illustrative reference model options (not measured from this corpus). "
+                )
+                + "Disqualifies any model option with fabrication_rate > 0.0% or rule0_pass_rate < 98.0%."
+            ),
             table=_build_pareto_table(artifacts.pareto),
             banner=BannerView(
                 text=pareto_banner_text,

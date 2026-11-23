@@ -342,7 +342,11 @@ bqaa_step1_eval AS (
       'unregistered_app'
     ) AS apphub_application_id,
     MAX(w.outcome_id) AS outcome_id,
-    ANY_VALUE(w.business_unit) AS business_unit,
+    COALESCE(
+      MAX(IF(w.parent_span_id IS NULL, NULLIF(w.business_unit, 'unassigned_bu'), NULL)),
+      MAX(NULLIF(w.business_unit, 'unassigned_bu')),
+      'unassigned_bu'
+    ) AS business_unit,
     MIN(w.start_time) AS trace_start_time,
     TIMESTAMP_DIFF(MAX(w.end_time), MIN(w.start_time), MILLISECOND) AS trace_latency_ms,
     (

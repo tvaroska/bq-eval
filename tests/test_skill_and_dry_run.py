@@ -249,23 +249,154 @@ def test_bq_dry_run_backref_comment_stripping_and_receipt_manifest(tmp_path: Pat
     assert json.loads(full_manifest.read_text(encoding="utf-8")) == expected
     assert committed == expected
     assert committed["live_bq_dry_run_executed"] is False
-    assert committed["checked"] == 73
+    assert committed["checked"] == 75
     assert committed["skipped"] == 17
 
 
 def test_generate_table_judge_sql_rule0_failure_mode() -> None:
-    """`build_ai_generate_table_judge_sql(include_rule0_failures=False)` restricts to `t.rule0_pass`."""
+    """`build_ai_generate_table_judge_sql` defaults to routine Rule-0-passing traces; opt-in includes rejects."""
     default_sql = build_ai_generate_table_judge_sql(project_id="test-proj")
-    routine_sql = build_ai_generate_table_judge_sql(
+    debug_sql = build_ai_generate_table_judge_sql(
         project_id="test-proj",
-        include_rule0_failures=False,
+        include_rule0_failures=True,
     )
 
-    assert "NOT t.rule0_pass" in default_sql
-    assert "WHERE t.rule0_pass" in routine_sql
-    assert "NOT t.rule0_pass" not in routine_sql
+    assert "WHERE t.rule0_pass" in default_sql
+    assert "NOT t.rule0_pass" not in default_sql
+    assert "NOT t.rule0_pass" in debug_sql
 
-    parsed = sqlglot.parse(_normalize_ai_tvfs(routine_sql), read="bigquery")
+    parsed = sqlglot.parse(_normalize_ai_tvfs(default_sql), read="bigquery")
     assert len(parsed) == 1
     assert parsed[0] is not None
     assert not isinstance(parsed[0], exp.Command)
+
+
+def test_judge_sql_requires_payload_and_status() -> None:
+    """Judge SQL inner-joins deduped non-empty payloads, checks status/score 1..4, and views ignore NULL verdicts (A-5)."""
+    from datetime import UTC, datetime
+
+    from bq_eval.cli.app import main as cli_main
+    from tests.conftest import make_span
+    from tests.sql_helpers import (
+        ENTERPRISE_EVAL_RESULTS_BASE_INSERT,
+        _create_enterprise_sqlite_fixture,
+        _install_enterprise_views,
+        _new_sqlite_bq_conn,
+        _transpile_bq_view_to_sqlite,
+        insert_enterprise_sqlite_span,
+    )
+
+    sql = build_ai_generate_table_judge_sql(project_id="test-proj")
+    assert "INNER JOIN deduped_payloads" in sql
+    assert "LEFT JOIN" not in sql
+    assert "COALESCE(status, '') = ''" in sql
+    assert "ordinal_score BETWEEN 1 AND 4" in sql
+    assert "usageMetadata.thoughtsTokenCount" in sql
+
+    # CLI exposes --include-rule0-failures and defaults to routine mode
+    assert cli_main(["judge-sql", "--project-id", "test-proj"]) == 0
+    assert cli_main(["judge-sql", "--project-id", "test-proj", "--include-rule0-failures"]) == 0
+
+    # Execute candidate_traces CTE + outer status/score filter on transpiled SQLite
+    conn = _new_sqlite_bq_conn()
+    _create_enterprise_sqlite_fixture(conn)
+    _install_enterprise_views(conn)
+    conn.execute(
+        "CREATE TABLE trace_payloads (trace_id TEXT, user_prompt TEXT, retrieved_context TEXT, final_response TEXT)"
+    )
+    base = datetime(2026, 11, 21, 12, 0, 0, tzinfo=UTC)
+    for idx, (tid, r0) in enumerate(
+        [("tr-ok-dup", True), ("tr-empty", True), ("tr-missing", True), ("tr-r0-fail", False)]
+    ):
+        insert_enterprise_sqlite_span(
+            conn,
+            make_span(
+                tid,
+                f"sp-a5-{idx}",
+                app_id="a5-app",
+                status_code="OK" if r0 else "ERROR",
+                rule0_pass=r0,
+                offset_s=idx,
+                base_time=base,
+            ),
+        )
+    conn.executemany(
+        "INSERT INTO trace_payloads VALUES (?,?,?,?)",
+        [
+            ("tr-ok-dup", "hello", "ctx", "short"),
+            ("tr-ok-dup", "hello", "ctx", "longer duplicate payload"),
+            ("tr-empty", "   ", "", None),
+            ("tr-r0-fail", "bad", "ctx", "resp"),
+        ],
+    )
+    cand_sql = build_ai_generate_table_judge_sql(
+        project_id="test-proj", canary_sample_pct=100
+    ).split("SELECT\n  GENERATE_UUID()")[0]
+    cand_query = "\n".join(
+        (
+            cand_sql.replace("`test-proj.agent_eval.", "`"),
+            "SELECT trace_id, prompt FROM candidate_traces",
+        )
+    )
+    cand_rows = conn.execute(_transpile_bq_view_to_sqlite(cand_query)).fetchall()
+    assert [str(r["trace_id"]) for r in cand_rows] == ["tr-ok-dup"]
+    assert "longer duplicate payload" in str(cand_rows[0]["prompt"])
+
+    # Verify outer filter drops failed status and out-of-range ordinal_score (9, 0, NULL)
+    conn.execute(
+        "CREATE TABLE mock_ai_out (trace_id TEXT, status TEXT, ordinal_score INTEGER, "
+        "full_response TEXT, prompt TEXT, reasoning_trace TEXT)"
+    )
+    conn.executemany(
+        "INSERT INTO mock_ai_out VALUES (?,?,?,?,?,?)",
+        [
+            ("tr-good", "", 4, '{"usageMetadata":{"thoughtsTokenCount":128}}', "abcd", "ok"),
+            ("tr-err", "RESOURCE_EXHAUSTED", 4, "{}", "abcd", "err"),
+            ("tr-hi", "", 9, "{}", "abcd", "bad range"),
+            ("tr-null", "", None, "{}", "abcd", "null score"),
+        ],
+    )
+    filtered = conn.execute(
+        _transpile_bq_view_to_sqlite(
+            "SELECT trace_id, COALESCE(SAFE_CAST(JSON_VALUE(full_response, '$.usageMetadata.thoughtsTokenCount') AS INT64), 0) AS tk "
+            "FROM mock_ai_out WHERE COALESCE(status, '') = '' AND ordinal_score BETWEEN 1 AND 4"
+        )
+    ).fetchall()
+    assert [(str(r["trace_id"]), int(r["tk"])) for r in filtered] == [("tr-good", 128)]
+
+    # NULL verdicts in eval_results must NOT count as judged failures in v_agent_eval_and_finops_summary
+    for i in range(10):
+        insert_enterprise_sqlite_span(
+            conn,
+            make_span(
+                f"tr-nv-{i:02d}", f"sp-nv-{i:02d}", app_id="nv-app", offset_s=20 + i, base_time=base
+            ),
+        )
+        conn.execute(
+            ENTERPRISE_EVAL_RESULTS_BASE_INSERT,
+            (
+                f"ev-nv-{i:02d}",
+                "run-nv",
+                f"tr-nv-{i:02d}",
+                None,
+                "nv-app",
+                "groundedness_4pt_v1",
+                "gemini-3.8-flash",
+                "CANARY_5PCT",
+                1,
+                "ok" if i < 4 else "failed",
+                4 if i < 4 else None,
+                1 if i < 4 else None,
+                100,
+                20,
+                0,
+                "2026-11-21T12:10:00+00:00",
+            ),
+        )
+    nv_row = conn.execute(
+        "SELECT judged_samples, raw_judge_pass_rate FROM v_agent_eval_and_finops_summary "
+        "WHERE apphub_application_id = 'nv-app'"
+    ).fetchone()
+    conn.close()
+    assert int(nv_row["judged_samples"]) == 4
+    assert float(nv_row["raw_judge_pass_rate"]) == 1.0

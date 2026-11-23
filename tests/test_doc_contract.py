@@ -260,10 +260,11 @@ def _assert_results_match_kpis(
 
     _assert_results_twin_and_kyc(results_md, parsed, lr)
 
+    assert "`100%` pass" not in results_md
     rfp = kpi["live_rfp_cliff_35_cases"]
     rfp_total = sum(int(m.verified_outcomes) for m in lr.rfp_modalities)
     assert f"**RFP (`{rfp_total}`)**" in results_md
-    assert f"`{rfp_total}/{rfp_total}`" in results_md
+    assert f"`100%` rules (`{rfp_total}/{rfp_total}`, unjudged)" in results_md
     assert (
         f"`A2A_PATH_A` (`{rfp['A2A_PATH_A']['verified_outcomes']}`) `${rfp['A2A_PATH_A']['ai_cost_per_verified_outcome_usd']:.4f}` AI"
         in results_md
@@ -285,7 +286,7 @@ def _assert_results_match_kpis(
     )
     shadow_n = int(shadow_cohort.total_traces)
     assert f"**Skill (`{skill_total}`) & shadow (`{shadow_n}`)**" in results_md
-    assert f"`{skill_total}/{skill_total}`" in results_md
+    assert f"`100%` rules (`{skill_total}/{skill_total}`, unjudged)" in results_md
     assert (
         f"`{lr.skill_lineage.day1_version}` (`{day1_cases}`) `${skill['day1_cpvo_usd']:.5f}` AI/outcome"
         in results_md
@@ -403,7 +404,7 @@ def test_results_doc_kpis_match_demo_json_and_offline_twin() -> None:
     )
     manifest = bq_dry_run.collect_dry_run_manifest(project_id="showcase-project")
     assert dry_run_receipt == manifest
-    assert manifest["checked"] == 73
+    assert manifest["checked"] == 75
     assert manifest["skipped"] == 17
 
     _assert_results_match_kpis(

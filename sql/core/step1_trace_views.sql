@@ -172,8 +172,16 @@ SELECT
   MAX(w.skill_id) AS skill_id,
   MAX(w.skill_version) AS skill_version,
   MAX(w.entity_id) AS entity_id,
-  ANY_VALUE(w.business_unit) AS business_unit,
-  ANY_VALUE(w.cost_center) AS cost_center,
+  COALESCE(
+    MAX(IF(w.parent_span_id IS NULL, NULLIF(w.business_unit, 'unassigned_bu'), NULL)),
+    MAX(NULLIF(w.business_unit, 'unassigned_bu')),
+    'unassigned_bu'
+  ) AS business_unit,
+  COALESCE(
+    MAX(IF(w.parent_span_id IS NULL, NULLIF(w.cost_center, 'UNASSIGNED'), NULL)),
+    MAX(NULLIF(w.cost_center, 'UNASSIGNED')),
+    'UNASSIGNED'
+  ) AS cost_center,
   MIN(w.start_time) AS trace_start_time,
   MAX(w.end_time) AS trace_end_time,
   MAX(w.receive_time) AS trace_receive_time,

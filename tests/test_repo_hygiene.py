@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import ast
 import re
-import shutil
 import subprocess
 from pathlib import Path
 
@@ -132,17 +131,13 @@ def test_declarative_ast_rules_and_positive_controls(tmp_path: Path) -> None:
     assert rules_path.is_file(), "Missing specs/ast.rules.yaml declarative AST contract"
     raw = rules_path.read_text(encoding="utf-8")
     blocks = [c for c in re.split(r"(?m)^---\s*$", raw) if re.search(r"(?m)^id:\s*\S+", c)]
-    assert len(blocks) >= 4, "Expected >= 4 rules in specs/ast.rules.yaml"
+    assert len(blocks) == 13, f"Expected 13 rules in specs/ast.rules.yaml, got {len(blocks)}"
 
     venv_ast_grep = REPO_ROOT / ".venv" / "bin" / "ast-grep"
-    ast_grep = (
-        str(venv_ast_grep)
-        if venv_ast_grep.is_file()
-        else (shutil.which("ast-grep") or str(Path.home() / ".local" / "bin" / "ast-grep"))
+    assert venv_ast_grep.is_file(), (
+        "ast-grep binary missing in .venv/bin/ast-grep (run uv sync --frozen --extra dev)"
     )
-    assert Path(ast_grep).is_file(), (
-        "ast-grep binary missing (checked .venv/bin/ast-grep, PATH, and ~/.local/bin/ast-grep)"
-    )
+    ast_grep = str(venv_ast_grep)
 
     live = subprocess.run(  # noqa: S603
         [ast_grep, "scan", "--rule", str(rules_path)],

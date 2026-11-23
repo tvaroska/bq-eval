@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -227,5 +227,8 @@ class ShowcaseRunArtifacts(BaseModel):
     pareto: ParetoEvalResult
     focus_chargeback: tuple[FocusChargebackRow, ...]
     off_peak_plan: OffPeakSchedulePlan
+    finops_model_source: Literal["illustrative_reference", "derived_from_corpus"] = (
+        "illustrative_reference"
+    )
     live_receipt: LiveFleetReceipt | None = None
     offline_twin_summaries: dict[str, SQLTraceEvalSummary] | None = None

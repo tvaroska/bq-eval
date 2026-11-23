@@ -12,7 +12,7 @@ from bq_eval.core.contract.otel import LONG_CONTEXT_THRESHOLD_TOKENS, OTelGenAIS
 from bq_eval.core.contract.pricing import normalize_model_name
 from bq_eval.core.contract.results import BqQueryCostRow, ConfusionMatrix
 from bq_eval.core.engine.calibration import compute_gwet_ac2
-from bq_eval.core.engine.cost import compute_span_cost_usd
+from bq_eval.core.engine.cost import compute_span_burndown_tokens, compute_span_cost_usd
 from bq_eval.labs.contract.proof import WageSensitivityPoint
 
 BYTES_PER_TIB: float = float(1024**4)
@@ -265,8 +265,12 @@ def analyze_unconfounded_context_cliff_arms(
 
     short_mean_cost = sum(compute_span_cost_usd(s) for s in short_arm_spans) / len(short_arm_spans)
     long_mean_cost = sum(compute_span_cost_usd(s) for s in long_arm_spans) / len(long_arm_spans)
-    short_mean_bd = sum(s.weighted_burndown_tokens for s in short_arm_spans) / len(short_arm_spans)
-    long_mean_bd = sum(s.weighted_burndown_tokens for s in long_arm_spans) / len(long_arm_spans)
+    short_mean_bd = sum(compute_span_burndown_tokens(s) for s in short_arm_spans) / len(
+        short_arm_spans
+    )
+    long_mean_bd = sum(compute_span_burndown_tokens(s) for s in long_arm_spans) / len(
+        long_arm_spans
+    )
 
     return ContextCliffArmReport(
         model_name=next(iter(models)),

@@ -357,6 +357,7 @@ stratum_judge AS (
     FROM eval_results AS e
     INNER JOIN v_trace_sql_evaluation AS t ON e.trace_id = t.trace_id
     WHERE t.rule0_pass = 1
+        AND e.binary_pass IS NOT NULL
     GROUP BY t.apphub_application_id, e.rubric_id, stratum_bucket
 ),
 app_rubrics AS (

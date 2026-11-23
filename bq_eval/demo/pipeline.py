@@ -14,6 +14,7 @@ from bq_eval.core.contract.results import ConfusionMatrix, SQLTraceEvalSummary
 from bq_eval.core.engine.calibration import compute_gwet_ac2
 from bq_eval.core.engine.cost import compute_span_cost_usd
 from bq_eval.core.engine.ports import EvalBackend, SQLiteEvalBackend
+from bq_eval.core.engine.resources import resolve_packaged_data
 from bq_eval.demo.contract.results import (
     LiveFleetReceipt,
     ScenarioCorpusBundle,
@@ -45,9 +46,8 @@ from bq_eval.finops.engine.spend import (
 
 CorpusChoice = Literal["m2-live", "golden-4app", "retail-2app"]
 
-_REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_M2_RECEIPT_PATH = _REPO_ROOT / "benchmarks" / "results" / "m2_live_receipt.json"
-DEFAULT_M2_SHA256_PATH = _REPO_ROOT / "benchmarks" / "results" / "SHA256SUMS"
+DEFAULT_M2_RECEIPT_PATH = resolve_packaged_data("benchmarks/results/m2_live_receipt.json")
+DEFAULT_M2_SHA256_PATH = resolve_packaged_data("benchmarks/results/SHA256SUMS")
 
 
 def build_showcase_dataset() -> tuple[
@@ -524,6 +524,7 @@ def _evaluate_bundle(
         pareto=pareto,
         focus_chargeback=tuple(focus_rows),
         off_peak_plan=off_peak_plan,
+        finops_model_source=("derived_from_corpus" if dynamic_finops else "illustrative_reference"),
         live_receipt=bundle.live_receipt,
         offline_twin_summaries=offline_twin_summaries,
     )
@@ -765,6 +766,11 @@ def render_markdown_report(artifacts: ShowcaseRunArtifacts) -> str:
         else ""
     )
 
+    model_source_tag = (
+        "derived from corpus traces"
+        if artifacts.finops_model_source == "derived_from_corpus"
+        else "illustrative reference model"
+    )
     return f"""# BQ Eval & FinOps Executive Scorecard (`bq-eval`, Corpus `{artifacts.corpus_id}`)
 
 ## 1. Tier 1-3 Application Quality & Cost per Verified Outcome (`CPVO`)
@@ -775,13 +781,13 @@ def render_markdown_report(artifacts: ShowcaseRunArtifacts) -> str:
 
 - **Inter-Rater Reliability (`Gwet's AC2`):** `{irr_val}` ({irr_caption})
 
-## 2. 3-Tier Evaluation Funnel FinOps ROI (`{roi.total_production_traces:,}` Production Traces)
+## 2. 3-Tier Evaluation Funnel FinOps ROI (`{roi.total_production_traces:,}` Production Traces — {model_source_tag})
 
 - **Baseline (`100%` LLM-as-a-Judge):** `${roi.baseline_100pct_judge_usd:,.2f}` (`{roi.total_production_traces:,}` judge calls)
 - **3-Tier Stratified Funnel (`5%` Canary + `100%` Error/SLA-Tail):** `${roi.stratified_3tier_judge_usd:,.2f}` (`{roi.tier2_total_judged_traces:,}` judge calls)
 - **Net Evaluation Cost Savings:** **`${roi.net_savings_usd:,.2f}` (`{roi.savings_pct:.1f}%` reduction)**
 
-## 3. Prefix-Cache `1/N` Dilution & Zero-Fabrication Pareto Frontier
+## 3. Prefix-Cache `1/N` Dilution & Zero-Fabrication Pareto Frontier ({model_source_tag})
 
 - **Observed Prefix-Cache Hit Ratio (`{dil.apphub_application_id}`):** `{dil.observed_cache_hit_ratio * 100:.1f}%` across `{dil.distinct_prompt_variants}` prompt variants (`1/N` ceiling `{dil.theoretical_dilution_ceiling * 100:.1f}%`)
 - **Action:** {dil.recommendation}

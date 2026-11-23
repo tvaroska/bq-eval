@@ -17,7 +17,7 @@ Break one of these and the numbers this repo reports stop being trustworthy.
 
 4. **Cost is per finished outcome, not per trace.**
    - Every span belongs to one of four spend buckets: production, escalation, eval runs, judge.
-   - Price each span before adding it up. Spans above 200K input tokens cost more per token (input 2.0x instead of 1.0x, cached 0.2x instead of 0.1x, output 7.5x instead of 4.0x); see `compute_weighted_burndown_tokens()`.
+   - Price each span before adding it up. Spans above 200K input tokens on 1P Gemini models cost more per token (input 2.0x instead of 1.0x, cached 0.2x instead of 0.1x, output 7.5x instead of 4.0x), while 3P models apply SKU-specific weights (`compute_span_burndown_tokens()` and `is_span_long_context_cliff()` in `bq_eval/core/engine/cost.py`).
    - Switch to a cheaper model only if it never turns a correct answer into a wrong one on the paired test set (`compute_pareto_frontier()`).
 
 5. **Package boundaries hold.**

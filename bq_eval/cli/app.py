@@ -174,6 +174,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional fleet run_id filter against fleet_case_outcomes.",
     )
+    sql_p.add_argument(
+        "--include-rule0-failures",
+        action="store_true",
+        help="Include traces failing Rule 0 / Step-1 checks in judge-sql (default: routine mode skips them).",
+    )
 
     bqaa_p = sub.add_parser(
         "bqaa",
@@ -301,6 +306,7 @@ def _run_judge_sql(args: argparse.Namespace) -> int:
             canary_sample_pct=canary_pct,
             run_id=args.run_id,
             judge_model=args.judge_model,
+            include_rule0_failures=bool(args.include_rule0_failures),
         )
     print(sql)
     return 0

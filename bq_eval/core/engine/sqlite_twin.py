@@ -9,7 +9,11 @@ from datetime import UTC
 
 from bq_eval.core.contract.otel import OTelGenAISpanRecord
 from bq_eval.core.contract.results import BqQueryCostRow
-from bq_eval.core.engine.cost import compute_span_burndown_tokens, compute_span_cost_usd
+from bq_eval.core.engine.cost import (
+    compute_span_burndown_tokens,
+    compute_span_cost_usd,
+    is_span_long_context_cliff,
+)
 
 
 def open_sqlite_twin() -> sqlite3.Connection:
@@ -126,7 +130,7 @@ def insert_sqlite_spans(
                 s.uncached_input_tokens,
                 s.output_tokens,
                 s.thinking_tokens,
-                1 if s.is_long_context_cliff else 0,
+                1 if is_span_long_context_cliff(s) else 0,
                 burndown,
                 cost_usd,
             ),

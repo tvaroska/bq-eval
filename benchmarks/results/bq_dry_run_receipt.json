@@ -1,5 +1,5 @@
 {
-  "checked": 73,
+  "checked": 75,
   "generated_statements": [
     "build_ai_generate_table_judge_sql",
     "build_ai_evaluate_agent_sql"
@@ -23,14 +23,14 @@
       "total": 11
     },
     "core/step2_stateless_eval.sql": {
-      "checked": 7,
+      "checked": 8,
       "skipped": 2,
-      "total": 9
+      "total": 10
     },
     "core/step3_daily_quota_guard.sql": {
-      "checked": 5,
+      "checked": 6,
       "skipped": 1,
-      "total": 6
+      "total": 7
     },
     "core/step3_saved_results.sql": {
       "checked": 4,

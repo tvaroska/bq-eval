@@ -9,7 +9,7 @@ Agents don't fail loudly on monitoring dashboards: a looping tool or 200K-token 
 Agent traces already land in BigQuery, through BigQuery Agent Analytics or OpenTelemetry. I evaluate them there instead of copying them into a separate eval tool.
 
 1. **Rule checks on every trace.** SQL views flag tool errors, loops, slow runs and broken outputs. No new tables and no AI cost, only BigQuery scan bytes.
-2. **An AI judge on a sample.** A judge model scores the failing tail plus a small random sample against a 4-point rubric. Failing traces are oversampled, so the raw pass rate is biased; the views correct it and report a confidence interval. An app with no judged traces gets an empty result, never a fake zero.
+2. **An AI judge on a sample.** A judge model scores the failing tail plus a small random sample against a 4-point rubric. Failing traces are oversampled, so the raw pass rate is biased; the views correct it and report a confidence interval. An app with no judged traces gets an empty result, never a fake 100%.
 3. **Saved runs and cost per outcome.** Scores are saved per run, so two agent versions can be compared. Agent spend and judge spend are divided by finished business outcomes, not by traces.
 
 The same SQL runs on a local SQLite copy, so the demo and the tests need no cloud account.

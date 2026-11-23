@@ -22,7 +22,6 @@ No file may import LLM SDKs, `examples/`, `benchmarks/`, or use dynamic imports.
 from __future__ import annotations
 
 import ast
-import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -63,6 +62,7 @@ class FolderRule:
     allowed_bq_eval_prefixes: tuple[str, ...]
     allowed_third_party_roots: frozenset[str] = frozenset()
     forbidden_bq_eval_prefixes: tuple[str, ...] = ()
+    forbidden_stdlib_roots: frozenset[str] = frozenset()
 
 
 def _layer_prefixes(pkg: str, layers: tuple[str, ...]) -> tuple[str, ...]:
@@ -97,6 +97,9 @@ def _build_folder_rules() -> dict[str, FolderRule]:
             rules[f"{pkg}_engine"] = FolderRule(
                 name=f"{pkg}_engine",
                 allowed_bq_eval_prefixes=_layer_prefixes(pkg, ("contract", "engine")),
+                forbidden_stdlib_roots=(
+                    frozenset({"subprocess"}) if pkg in {"core", "finops"} else frozenset()
+                ),
             )
     return rules
 
@@ -191,6 +194,8 @@ def _is_target_allowed(target: str, rule: FolderRule) -> bool:
         return False
     if top == "bq_eval":
         return _is_bq_eval_target_allowed(target, rule)
+    if top in rule.forbidden_stdlib_roots:
+        return False
     return top in STDLIB_ROOTS or top in rule.allowed_third_party_roots
 
 
@@ -382,13 +387,8 @@ def test_folder_guard_allows_declared_dependencies(
 
 
 def test_subfolder_probes_fail_both_python_and_ast_grep_guards(tmp_path: Path) -> None:
-    venv_ast_grep = REPO_ROOT / ".venv" / "bin" / "ast-grep"
-    ast_grep = (
-        venv_ast_grep
-        if venv_ast_grep.is_file()
-        else Path(shutil.which("ast-grep") or str(Path.home() / ".local" / "bin" / "ast-grep"))
-    )
-    assert ast_grep.is_file(), "ast-grep binary required"
+    ast_grep = REPO_ROOT / ".venv" / "bin" / "ast-grep"
+    assert ast_grep.is_file(), "ast-grep binary required in .venv/bin/ast-grep"
 
     cases = (
         ("bq_eval/core/contract/probe.py", "from ..engine import cost\n"),
@@ -448,8 +448,9 @@ def test_importing_core_loads_no_other_package() -> None:
 
 
 def test_all_production_modules_and_seed_files_respect_loc_ceilings() -> None:
-    """All `bq_eval/**/*.py` stay <= 800 LOC and split `seeds_*.py` stay < 500 LOC."""
+    """All `bq_eval/**/*.py` stay <= 800 LOC and seed files (`*_seeds.py`) stay < 500 LOC."""
     oversized: list[str] = []
+    seed_files_checked = 0
     for py_path in _all_package_modules():
         loc = sum(
             1
@@ -459,6 +460,9 @@ def test_all_production_modules_and_seed_files_respect_loc_ceilings() -> None:
         rel = py_path.relative_to(PACKAGE_DIR).as_posix()
         if loc > 800:
             oversized.append(f"{rel}: {loc} non-blank/non-comment lines (> 800 ceiling)")
-        if py_path.name.startswith("seeds_") and loc >= 500:
-            oversized.append(f"{rel}: {loc} non-blank/non-comment lines (>= 500 seed ceiling)")
+        if py_path.name.endswith("_seeds.py"):
+            seed_files_checked += 1
+            if loc >= 500:
+                oversized.append(f"{rel}: {loc} non-blank/non-comment lines (>= 500 seed ceiling)")
+    assert seed_files_checked >= 1, "Expected at least one *_seeds.py module to guard"
     assert not oversized, "Structural LOC ceiling exceeded:\n" + "\n".join(oversized)

@@ -4,6 +4,11 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
+import subprocess
+import sys
+import sysconfig
+import zipfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -47,7 +52,17 @@ def test_bootstrap_offline_schema_all_modes_and_cli(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """`bq-eval bootstrap --mode light|full|hybrid --offline-schema` renders clean SQL with zero placeholders."""
+    """`bq-eval bootstrap --mode light|full|hybrid` validates SQL, fails closed on missing Omni targets, and requires --project-id on --dry-run (S-10)."""
+    # --include-omni without explicit Omni targets MUST fail closed with unresolved placeholders
+    missing_omni_report, _ = validate_bootstrap_offline(
+        mode="full",
+        project_id="cold-proj-01",
+        include_omni=True,
+    )
+    assert not missing_omni_report.passed
+    assert "${AWS_S3_BUCKET}" in missing_omni_report.unresolved_placeholders
+    assert "${AZURE_STORAGE_ACCOUNT}" in missing_omni_report.unresolved_placeholders
+
     for mode in ("light", "full", "hybrid"):
         report, stmts = validate_bootstrap_offline(
             mode=mode,
@@ -57,6 +72,11 @@ def test_bootstrap_offline_schema_all_modes_and_cli(
             payload_bucket="cold-proj-01",
             payload_prefix="bq-eval",
             include_omni=True,
+            aws_omni_connection_id="aws-us-east-1.test_omni",
+            aws_s3_bucket="cold-proj-01-aws-otel",
+            azure_omni_connection_id="azure-eastus2.test_omni",
+            azure_storage_account="coldprojazureotel",
+            azure_container="otel-spans",
         )
         assert report.passed, f"{mode} validation errors: {report.errors}"
         assert report.unresolved_placeholders == ()
@@ -67,6 +87,8 @@ def test_bootstrap_offline_schema_all_modes_and_cli(
         joined = "\n;\n".join(stmt for _, stmt in stmts)
         assert "YOUR_GENAI_PAYLOAD_BUCKET" not in joined
         assert "${" not in joined
+        assert "CREATE OR REPLACE TABLE `cold-proj-01.agent_eval.rubrics`" not in joined
+        assert "MERGE INTO `cold-proj-01.agent_eval.rubrics`" in joined
         if mode == "light":
             assert "_AllSpans" not in joined
             assert "_AllLogs" not in joined
@@ -77,6 +99,10 @@ def test_bootstrap_offline_schema_all_modes_and_cli(
         else:
             assert "v_mode_c_hybrid_otel_spans" in joined
             assert "v_mode_c_hybrid_trace_payloads" in joined
+
+    # --dry-run without --project-id exits 2
+    assert cli_main(["bootstrap", "--mode", "full", "--dry-run"]) == 2
+    capsys.readouterr()
 
     sql_out = tmp_path / "rendered_hybrid.sql"
     rc = cli_main(
@@ -90,8 +116,17 @@ def test_bootstrap_offline_schema_all_modes_and_cli(
             "cold-proj-01",
             "--payload-prefix",
             "bq-eval/",
-            "--offline-schema",
             "--include-omni",
+            "--aws-omni-connection-id",
+            "aws-us-east-1.test_omni",
+            "--aws-s3-bucket",
+            "cold-proj-01-aws-otel",
+            "--azure-omni-connection-id",
+            "azure-eastus2.test_omni",
+            "--azure-storage-account",
+            "coldprojazureotel",
+            "--azure-container",
+            "otel-spans",
             "--sql-out",
             str(sql_out),
             "--format",
@@ -103,6 +138,7 @@ def test_bootstrap_offline_schema_all_modes_and_cli(
     assert payload["passed"] is True
     assert payload["mode"] == "hybrid"
     assert payload["schema_column_count"] == 39
+    assert "sqlglot_verified" not in payload
     assert sql_out.is_file()
     rendered_text = sql_out.read_text(encoding="utf-8")
     assert "gs://cold-proj-01/bq-eval/*.jsonl" in rendered_text
@@ -231,14 +267,105 @@ def test_terraform_dockerfile_and_cloudbuild_security_contracts() -> None:
     assert "--allow-non-loopback" in dockerfile
 
     cb_text = (REPO_ROOT / "cloudbuild.yaml").read_text(encoding="utf-8")
-    assert "bootstrap --mode light --offline-schema" in cb_text
-    assert "bootstrap --mode full --offline-schema" in cb_text
-    assert "bootstrap --mode hybrid --offline-schema" in cb_text
+    agents_text = (REPO_ROOT / "AGENTS.md").read_text(encoding="utf-8")
+    gate_text = (REPO_ROOT / "scripts" / "gate.sh").read_text(encoding="utf-8")
+    assert "scripts/gate.sh" in cb_text
+    assert "scripts/gate.sh" in agents_text
+    assert "--offline-schema" not in cb_text
+    assert "--offline-schema" not in gate_text
+    assert "uv sync --frozen --extra dev" in gate_text
+    assert ".venv/bin/ast-grep scan --rule specs/ast.rules.yaml" in gate_text
+    assert "pytest -p no:cacheprovider -v -rs" in gate_text
+    assert "bootstrap --mode light --project-id demo-proj" in gate_text
+    assert "bootstrap --mode full --project-id demo-proj" in gate_text
+    assert "bootstrap --mode hybrid --project-id demo-proj" in gate_text
     assert "hashicorp/terraform:" in cb_text
     assert "aquasec/trivy:" in cb_text
     assert "--pkg-types" in cb_text
     assert "os,library" in cb_text
     assert re.search(r"--exit-code\s+1|--exit-code\",\s*\"1\"", cb_text)
+
+
+def test_wheel_contains_sql_and_receipt(tmp_path: Path) -> None:
+    """Built wheel ships bundled SQL + receipt data and runs `demo` and `bootstrap` outside the repo checkout (T-7)."""
+    uv_bin = shutil.which("uv") or str(Path.home() / ".local" / "bin" / "uv")
+    assert Path(uv_bin).is_file(), "uv binary required to build wheel offline"
+
+    wheel_dir = tmp_path / "dist"
+    wheel_dir.mkdir()
+    build = subprocess.run(  # noqa: S603
+        [
+            uv_bin,
+            "build",
+            "--wheel",
+            "--offline",
+            "--no-config",
+            "--out-dir",
+            str(wheel_dir),
+            str(REPO_ROOT),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert build.returncode == 0, f"Offline wheel build failed:\n{build.stdout}\n{build.stderr}"
+
+    wheels = list(wheel_dir.glob("*.whl"))
+    assert len(wheels) == 1, f"Expected 1 wheel in {wheel_dir}, got {wheels}"
+    wheel_path = wheels[0]
+
+    unpacked = tmp_path / "unpacked"
+    with zipfile.ZipFile(wheel_path) as zf:
+        names = set(zf.namelist())
+        for required in (
+            "bq_eval/_bundled/sql/core/ddl.sql",
+            "bq_eval/_bundled/sql/core/views.sql",
+            "bq_eval/_bundled/sql/core/step1_trace_views.sql",
+            "bq_eval/_bundled/sql/core/step2_stateless_eval.sql",
+            "bq_eval/_bundled/sql/finops/capacity_views.sql",
+            "bq_eval/_bundled/sql/finops/omni_spoke_views.sql",
+            "bq_eval/_bundled/benchmarks/results/m2_live_receipt.json",
+            "bq_eval/_bundled/benchmarks/results/SHA256SUMS",
+            "bq_eval/_bundled/benchmarks/results/bq_dry_run_receipt.json",
+        ):
+            assert required in names, f"Missing {required} inside {wheel_path.name}"
+        zf.extractall(unpacked)
+
+    purelib = sysconfig.get_path("purelib")
+    platlib = sysconfig.get_path("platlib")
+    assert purelib is not None and platlib is not None
+    # Isolate with -I -S so editable .pth files in .venv cannot shadow the unpacked wheel.
+    probe = (
+        "import io, json, pathlib, sys\n"
+        "from contextlib import redirect_stdout\n"
+        f"unpacked = pathlib.Path({str(unpacked.resolve())!r})\n"
+        f"sys.path[:0] = [str(unpacked), {purelib!r}, {platlib!r}]\n"
+        "import bq_eval\n"
+        "assert pathlib.Path(bq_eval.__file__).resolve().is_relative_to(unpacked), bq_eval.__file__\n"
+        "from bq_eval.cli.app import main\n"
+        "buf_demo = io.StringIO()\n"
+        "with redirect_stdout(buf_demo):\n"
+        "    rc_demo = main(['demo', '--format', 'json'])\n"
+        "assert rc_demo == 0, rc_demo\n"
+        "demo_payload = json.loads(buf_demo.getvalue())\n"
+        "assert 'kpi_table' in demo_payload\n"
+        "buf_boot = io.StringIO()\n"
+        "with redirect_stdout(buf_boot):\n"
+        "    rc_boot = main(['bootstrap', '--mode', 'full', '--format', 'json'])\n"
+        "assert rc_boot == 0, rc_boot\n"
+        "boot_payload = json.loads(buf_boot.getvalue())\n"
+        "assert boot_payload['passed'] is True and boot_payload['statement_count'] > 0\n"
+        "print('WHEEL_OK')\n"
+    )
+    run = subprocess.run(  # noqa: S603
+        [sys.executable, "-I", "-S", "-c", probe],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert run.returncode == 0, f"Unpacked wheel CLI failed:\n{run.stdout}\n{run.stderr}"
+    assert run.stdout.strip() == "WHEEL_OK"
 
 
 def test_bq_query_cost_folded_into_cpvo_sql_sqlite_parity() -> None:

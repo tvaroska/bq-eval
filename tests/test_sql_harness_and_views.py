@@ -14,10 +14,10 @@ from tests.sql_helpers import (
     _extract_view_sql_text,
     _install_enterprise_views,
     _new_sqlite_bq_conn,
-    _sqlite_farm_fingerprint,
     _transpile_bq_view_to_sqlite,
     insert_enterprise_sqlite_span,
 )
+from tests.sqlite_bq_transpiler import _sqlite_farm_fingerprint
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SQL_DIR = REPO_ROOT / "sql"
@@ -539,3 +539,52 @@ def test_bqaa_eval_turn_filtered_and_omni_views_execute() -> None:
     assert int(unified["multi-app"]["active_clouds"]) == 2
     assert int(unified["multi-app"]["verified_outcomes"]) == 2
     assert float(unified["multi-app"]["unified_cost_per_verified_outcome_usd"]) > 0.0
+
+
+def test_mixed_business_unit_trace_is_deterministic() -> None:
+    """`v_step1_trace_eval` resolves mixed-unit traces deterministically to the root/non-default BU & CC (S-9)."""
+    step1_path = SQL_DIR / "core" / "step1_trace_views.sql"
+    conn = _new_sqlite_bq_conn()
+    _create_enterprise_sqlite_fixture(conn)
+    for view_name in (
+        "agent_eval.v_default_model_pricing",
+        "agent_eval.v_step1_trace_waterfall",
+        "agent_eval.v_step1_trace_eval",
+    ):
+        short = view_name.split(".", maxsplit=1)[1]
+        conn.execute(
+            f"CREATE VIEW {short} AS "
+            f"{_transpile_bq_view_to_sqlite(_extract_view_sql_text(step1_path, view_name))}"
+        )
+    base = datetime(2026, 11, 21, 12, 0, 0, tzinfo=UTC)
+    # Child span without BU/CC inserted first; root span with explicit BU/CC inserted second
+    insert_enterprise_sqlite_span(
+        conn,
+        make_span(
+            "trace-bu-mix",
+            "sp-bu-child",
+            parent_span_id="sp-bu-root",
+            app_id="bu-app",
+            attributes={},
+            offset_s=1,
+            base_time=base,
+        ),
+    )
+    insert_enterprise_sqlite_span(
+        conn,
+        make_span(
+            "trace-bu-mix",
+            "sp-bu-root",
+            parent_span_id=None,
+            app_id="bu-app",
+            attributes={"business_unit": "retail_bu", "cost_center": "CC-RETAIL"},
+            offset_s=0,
+            base_time=base,
+        ),
+    )
+    row = conn.execute(
+        "SELECT business_unit, cost_center FROM v_step1_trace_eval WHERE trace_id = 'trace-bu-mix'"
+    ).fetchone()
+    conn.close()
+    assert row["business_unit"] == "retail_bu"
+    assert row["cost_center"] == "CC-RETAIL"

@@ -107,6 +107,8 @@ class DailyQuotaGuard:
         if daily_judge_token_cap <= 0 or per_app_default_token_cap <= 0:
             raise ValueError("Daily token caps must be positive integers.")
         thinking_budget = thinking_level_headroom_tokens(thinking_level)
+        self._max_output_tokens = max_output_tokens
+        self._thinking_level = thinking_level
         self._lock = threading.Lock()
         self._conn = sqlite3.connect(":memory:", check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
@@ -238,10 +240,12 @@ class DailyQuotaGuard:
         *,
         rubric_id: str,
         quota_date_utc: str = "2026-11-21",
-        max_output_tokens: int = 2048,
-        thinking_level: str = "LOW",
+        max_output_tokens: int | None = None,
+        thinking_level: str | None = None,
     ) -> QuotaReservationResult:
         """Atomically select and reserve candidates within per-app sub-caps and global budget."""
+        eff_max_output = self._max_output_tokens if max_output_tokens is None else max_output_tokens
+        eff_thinking = self._thinking_level if thinking_level is None else thinking_level
         with self._lock:
             global_rem, default_app_cap, app_rem = self._remaining_unlocked(quota_date_utc)
             already_scored = {
@@ -267,8 +271,8 @@ class DailyQuotaGuard:
                     continue
                 est_tokens = estimate_judge_call_tokens(
                     cand.prompt_text,
-                    max_output_tokens=max_output_tokens,
-                    thinking_level=thinking_level,
+                    max_output_tokens=eff_max_output,
+                    thinking_level=eff_thinking,
                 )
                 rem_for_app = app_rem.get(cand.apphub_application_id, default_app_cap)
                 used_in_batch = reserved_by_app.get(cand.apphub_application_id, 0)

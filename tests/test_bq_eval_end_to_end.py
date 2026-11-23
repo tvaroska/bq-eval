@@ -94,7 +94,7 @@ def test_ddl_and_views_table_parity() -> None:
     }
     created_views = set(re.findall(r"CREATE OR REPLACE VIEW `(agent_eval\.[a-z0-9_]+)`", views_sql))
     assert created_views == expected_views
-    assert not (REPO_ROOT / "sql" / "demo_docubridge_extensions.sql").exists()
+    assert not list((REPO_ROOT / "sql").rglob("demo_docubridge_extensions.sql"))
 
 
 def test_weighted_burndown_standard_and_long_context_cliff() -> None:
@@ -525,7 +525,10 @@ def test_progressive_step1_step2_step25_step3_pack() -> None:
         assert f"'{r['rubric_prompt']}'" in step2_sql
 
     assert "CREATE OR REPLACE EXTERNAL TABLE `agent_eval.rubrics`" in step2_sql
-    assert "CREATE OR REPLACE TABLE `agent_eval.rubrics`" in step2_sql
+    assert (
+        "CREATE TABLE IF NOT EXISTS `agent_eval.rubrics`" in step2_sql
+        and "MERGE INTO `agent_eval.rubrics`" in step2_sql
+    )
     assert "CREATE OR REPLACE VIEW `agent_eval.v_step2_trace_rubric_prompts`" in step2_sql
     assert "MOD(ABS(FARM_FINGERPRINT(trace_id)), 100) < 10" in step2_sql
     assert "AI.GENERATE_TABLE(" in step2_sql

@@ -1,11 +1,10 @@
-"""Day-2 Quota Guard Procedure, EvalBackend Ports, and `bq-eval bqaa` CLI."""
+"""EvalBackend / WarehouseEvalBackend Ports and `bq-eval bqaa` CLI tests."""
 
 from __future__ import annotations
 
 import json
 import sqlite3
 from collections.abc import Mapping, Sequence
-from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -19,30 +18,24 @@ from bq_eval.core.contract.otel import (
     OTelGenAISpanRecord,
 )
 from bq_eval.core.contract.results import ConfusionMatrix
+from bq_eval.core.engine.cost import compute_span_burndown_tokens, is_span_long_context_cliff
 from bq_eval.core.engine.ports import (
     BigQueryEvalBackend,
     EvalBackend,
     QueryRunner,
     SQLiteEvalBackend,
+    WarehouseEvalBackend,
 )
-from bq_eval.core.engine.quota import (
-    DailyQuotaGuard,
-    QuotaCandidateTrace,
-    estimate_judge_call_tokens,
-    thinking_level_headroom_tokens,
-)
+from bq_eval.core.engine.quota import DailyQuotaGuard, QuotaCandidateTrace
 from bq_eval.demo.pipeline import run_showcase_pipeline
 from bq_eval.finops.engine.capacity_export import hourly_burndown_rows
-from scripts.bq_dry_run import split_sql_statements
+from bq_eval.finops.engine.sqlite_capacity import evaluate_hourly_burndown_in_sqlite
 from tests.sql_helpers import (
     ENTERPRISE_EVAL_RESULTS_BASE_INSERT,
     ENTERPRISE_OTEL_SPANS_BASE_INSERT,
-    SQL_DIR,
     _create_enterprise_sqlite_fixture,
-    _extract_view_sql_text,
     _install_enterprise_views,
     _new_sqlite_bq_conn,
-    _transpile_bq_view_to_sqlite,
 )
 
 
@@ -53,328 +46,6 @@ def _sqlite_bq_query_runner(conn: sqlite3.Connection) -> QueryRunner:
         return [dict(r) for r in rows]
 
     return _run
-
-
-def test_quota_guard_headroom_per_app_subcaps_non_deduped_and_retry_storm() -> None:
-    """Output/thinking headroom, per-app sub-caps, non-deduped burn, and FAILED_BILLED lock."""
-    assert thinking_level_headroom_tokens("NONE") == 0
-    assert thinking_level_headroom_tokens("HIGH") == 8192
-    with pytest.raises(ValueError, match="Unsupported thinking_level"):
-        thinking_level_headroom_tokens("ULTRA")
-
-    # 1,000 prompt tokens + 2,048 max_output + 8,192 HIGH thinking = 11,240 per call.
-    prompt_1k = "x" * 4000
-    est = estimate_judge_call_tokens(prompt_1k, max_output_tokens=2048, thinking_level="HIGH")
-    assert est == 11_240
-
-    # Without headroom (prompt only), 20k budget would wrongly allow 20 calls; with headroom, only 1!
-    guard = DailyQuotaGuard(
-        daily_judge_token_cap=25_000,
-        per_app_default_token_cap=12_000,
-        per_app_caps={"noisy-app": 12_000, "quiet-app": 12_000},
-        max_output_tokens=2048,
-        thinking_level="HIGH",
-    )
-    candidates = [
-        QuotaCandidateTrace(
-            trace_id=f"tr-noisy-{i:02d}",
-            apphub_application_id="noisy-app",
-            rubric_id="hallucination_4pt_v1",
-            prompt_text=prompt_1k,
-            trace_start_iso=f"2026-11-21T08:0{i}:00+00:00",
-        )
-        for i in range(4)
-    ] + [
-        QuotaCandidateTrace(
-            trace_id="tr-quiet-00",
-            apphub_application_id="quiet-app",
-            rubric_id="hallucination_4pt_v1",
-            prompt_text=prompt_1k,
-            trace_start_iso="2026-11-21T08:09:00+00:00",
-        ),
-        QuotaCandidateTrace(
-            trace_id="tr-other-rubric",
-            apphub_application_id="quiet-app",
-            rubric_id="groundedness_4pt_v1",
-            prompt_text=prompt_1k,
-            trace_start_iso="2026-11-21T08:00:00+00:00",
-        ),
-    ]
-
-    res = guard.reserve_batch(
-        candidates,
-        rubric_id="hallucination_4pt_v1",
-        max_output_tokens=2048,
-        thinking_level="HIGH",
-    )
-    assert res.reservation_id is not None
-    # Per-app sub-cap stops noisy-app at 1 trace so quiet-app still gets its 1 trace!
-    assert res.selected_trace_ids == ("tr-noisy-00", "tr-quiet-00")
-    assert res.reserved_tokens_by_app == {"noisy-app": 11_240, "quiet-app": 11_240}
-    assert res.total_reserved_tokens == 22_480
-    assert res.global_remaining_after == 2_520
-
-    # Mark failed batch FAILED_BILLED -> tokens stay consumed so retry storms cannot bypass cap.
-    guard.finalize_reservation(res.reservation_id, status="FAILED_BILLED")
-    retry_res = guard.reserve_batch(
-        candidates,
-        rubric_id="hallucination_4pt_v1",
-        max_output_tokens=2048,
-        thinking_level="HIGH",
-    )
-    assert retry_res.reservation_id is None
-    assert retry_res.selected_trace_ids == ()
-
-    # Non-deduped burn accounting: two billed retries for the same trace_id both subtract budget.
-    guard2 = DailyQuotaGuard(
-        daily_judge_token_cap=5_000,
-        per_app_default_token_cap=5_000,
-        max_output_tokens=500,
-        thinking_level="NONE",
-    )
-    guard2.record_billed_eval(
-        eval_id="ev-1",
-        trace_id="tr-dup",
-        apphub_application_id="app-a",
-        rubric_id="groundedness_4pt_v1",
-        judge_input_tokens=2_000,
-        judge_output_tokens=500,
-    )
-    guard2.record_billed_eval(
-        eval_id="ev-1-retry",
-        trace_id="tr-dup",
-        apphub_application_id="app-a",
-        rubric_id="groundedness_4pt_v1",
-        judge_input_tokens=2_000,
-        judge_output_tokens=500,
-    )
-    after_retries = guard2.reserve_batch(
-        [
-            QuotaCandidateTrace(
-                trace_id="tr-new",
-                apphub_application_id="app-a",
-                rubric_id="groundedness_4pt_v1",
-                prompt_text="x" * 400,
-                trace_start_iso="2026-11-21T09:00:00+00:00",
-            )
-        ],
-        rubric_id="groundedness_4pt_v1",
-        max_output_tokens=500,
-        thinking_level="NONE",
-    )
-    assert after_retries.selected_trace_ids == ()
-    assert after_retries.global_remaining_after == 0
-
-    # Verify FAILED_BILLED continues to count against global & per-app remaining budget,
-    # whereas RELEASED frees its reserved tokens.
-    guard3 = DailyQuotaGuard(
-        daily_judge_token_cap=10_000,
-        per_app_default_token_cap=4_000,
-        max_output_tokens=500,
-        thinking_level="NONE",
-    )
-    cand = QuotaCandidateTrace(
-        trace_id="tr-fb-1",
-        apphub_application_id="app-fb",
-        rubric_id="groundedness_4pt_v1",
-        prompt_text="x" * 6_000,  # 1,500 prompt + 500 output = 2,000 tokens
-        trace_start_iso="2026-11-21T09:00:00+00:00",
-    )
-    r_fb = guard3.reserve_batch(
-        [cand],
-        rubric_id="groundedness_4pt_v1",
-        max_output_tokens=500,
-        thinking_level="NONE",
-    )
-    assert r_fb.reservation_id is not None
-    assert r_fb.total_reserved_tokens == 2_000
-    guard3.finalize_reservation(r_fb.reservation_id, status="FAILED_BILLED")
-    r_after_fb = guard3.reserve_batch(
-        [
-            QuotaCandidateTrace(
-                trace_id="tr-fb-2",
-                apphub_application_id="app-fb",
-                rubric_id="groundedness_4pt_v1",
-                prompt_text="x" * 6_000,
-                trace_start_iso="2026-11-21T09:05:00+00:00",
-            ),
-            QuotaCandidateTrace(
-                trace_id="tr-fb-3-over-app-cap",
-                apphub_application_id="app-fb",
-                rubric_id="groundedness_4pt_v1",
-                prompt_text="x" * 6_000,
-                trace_start_iso="2026-11-21T09:06:00+00:00",
-            ),
-        ],
-        rubric_id="groundedness_4pt_v1",
-        max_output_tokens=500,
-        thinking_level="NONE",
-    )
-    # 2,000 FAILED_BILLED + 2,000 RESERVED hits app-fb's 4,000 cap -> tr-fb-3 skipped; global=6,000
-    assert r_after_fb.reservation_id is not None
-    assert r_after_fb.selected_trace_ids == ("tr-fb-2",)
-    assert r_after_fb.skipped_trace_ids == ("tr-fb-3-over-app-cap",)
-    assert r_after_fb.global_remaining_after == 6_000
-    guard3.finalize_reservation(r_after_fb.reservation_id, status="RELEASED")
-    r_after_release = guard3.reserve_batch(
-        [],
-        rubric_id="groundedness_4pt_v1",
-        max_output_tokens=500,
-        thinking_level="NONE",
-    )
-    assert r_after_release.global_remaining_after == 8_000
-
-    guard.close()
-    guard2.close()
-    guard3.close()
-
-
-def test_quota_guard_concurrent_reservations_prevent_toctou_and_sql_app_view_parity() -> None:
-    """Atomic reservation stops concurrent TOCTOU overspend; SQL app view & splitter match."""
-    guard = DailyQuotaGuard(
-        daily_judge_token_cap=10_000,
-        per_app_default_token_cap=10_000,
-        max_output_tokens=1000,
-        thinking_level="NONE",
-    )
-    batch_a = [
-        QuotaCandidateTrace(
-            trace_id=f"tr-a-{i}",
-            apphub_application_id="app-a",
-            rubric_id="groundedness_4pt_v1",
-            prompt_text="x" * 16_000,  # 4,000 prompt + 1,000 output = 5,000 tokens
-            trace_start_iso=f"2026-11-21T08:0{i}:00+00:00",
-        )
-        for i in range(3)
-    ]
-    batch_b = [
-        QuotaCandidateTrace(
-            trace_id=f"tr-b-{i}",
-            apphub_application_id="app-b",
-            rubric_id="groundedness_4pt_v1",
-            prompt_text="x" * 16_000,
-            trace_start_iso=f"2026-11-21T08:1{i}:00+00:00",
-        )
-        for i in range(3)
-    ]
-
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        fut_a = pool.submit(
-            guard.reserve_batch,
-            batch_a,
-            rubric_id="groundedness_4pt_v1",
-            max_output_tokens=1000,
-            thinking_level="NONE",
-        )
-        fut_b = pool.submit(
-            guard.reserve_batch,
-            batch_b,
-            rubric_id="groundedness_4pt_v1",
-            max_output_tokens=1000,
-            thinking_level="NONE",
-        )
-        res_a, res_b = fut_a.result(), fut_b.result()
-
-    assert res_a.total_reserved_tokens + res_b.total_reserved_tokens <= 10_000
-    assert len(res_a.selected_trace_ids) + len(res_b.selected_trace_ids) == 2
-    guard.close()
-
-    # Verify `v_step2_app_daily_quota_status` executes cleanly in transpiled SQLite and
-    # `split_sql_statements` keeps `CREATE OR REPLACE PROCEDURE` as a single atomic statement.
-    quota_path = SQL_DIR / "core" / "step3_daily_quota_guard.sql"
-    quota_text = quota_path.read_text(encoding="utf-8")
-    assert "DATE(evaluated_at) >= DATE_SUB(CURRENT_DATE('UTC'), INTERVAL 7 DAY)" in quota_text
-    stmts = split_sql_statements(quota_text)
-    proc_stmts = [s for s in stmts if s.upper().startswith("CREATE OR REPLACE PROCEDURE")]
-    assert len(proc_stmts) == 1
-    assert "EXCEPTION WHEN ERROR THEN" in proc_stmts[0]
-    assert proc_stmts[0].rstrip().endswith("END")
-
-    conn = _new_sqlite_bq_conn(current_date_utc="2026-11-21")
-    conn.executescript(
-        """
-        CREATE TABLE eval_daily_quota_config (
-            quota_name TEXT, apphub_application_id TEXT, daily_judge_token_cap INTEGER,
-            per_app_default_token_cap INTEGER, max_output_tokens INTEGER,
-            thinking_budget_tokens INTEGER, updated_at TEXT
-        );
-        CREATE TABLE eval_daily_quota_reservations (
-            reservation_id TEXT, quota_date_utc TEXT, apphub_application_id TEXT,
-            rubric_id TEXT, reserved_tokens INTEGER, status TEXT,
-            created_at TEXT, updated_at TEXT
-        );
-        CREATE TABLE eval_results (
-            eval_id TEXT, eval_run_id TEXT, trace_id TEXT, apphub_application_id TEXT,
-            rubric_id TEXT, judge_model TEXT, judge_input_tokens INTEGER,
-            judge_output_tokens INTEGER, judge_thinking_tokens INTEGER, evaluated_at TEXT
-        );
-        """
-    )
-    conn.executemany(
-        "INSERT INTO eval_daily_quota_config VALUES (?,?,?,?,?,?,?)",
-        [
-            (
-                "default_step2_daily_cap",
-                "*",
-                2_000_000,
-                500_000,
-                2048,
-                1024,
-                "2026-11-21T00:00:00+00:00",
-            ),
-            (
-                "noisy_override",
-                "noisy-app",
-                300_000,
-                500_000,
-                2048,
-                1024,
-                "2026-11-21T00:00:00+00:00",
-            ),
-        ],
-    )
-    conn.execute(
-        "INSERT INTO eval_results VALUES (?,?,?,?,?,?,?,?,?,?)",
-        (
-            "e1",
-            "r1",
-            "t1",
-            "noisy-app",
-            "groundedness_4pt_v1",
-            "gemini-3.8-flash",
-            250_000,
-            50_000,
-            0,
-            "2026-11-21T08:00:00+00:00",
-        ),
-    )
-    conn.execute(
-        "INSERT INTO eval_daily_quota_reservations VALUES (?,?,?,?,?,?,?,?)",
-        (
-            "res-q",
-            "2026-11-21",
-            "quiet-app",
-            "groundedness_4pt_v1",
-            100_000,
-            "RESERVED",
-            "2026-11-21T08:00:00+00:00",
-            "2026-11-21T08:00:00+00:00",
-        ),
-    )
-    app_view_sql = _transpile_bq_view_to_sqlite(
-        _extract_view_sql_text(quota_path, "agent_eval.v_step2_app_daily_quota_status")
-    )
-    conn.execute(f"CREATE VIEW v_step2_app_daily_quota_status AS {app_view_sql}")
-    by_app = {
-        str(r["apphub_application_id"]): dict(r)
-        for r in conn.execute("SELECT * FROM v_step2_app_daily_quota_status").fetchall()
-    }
-    assert int(by_app["noisy-app"]["app_tokens_remaining_today"]) == 0
-    assert bool(by_app["noisy-app"]["app_quota_available"]) is False
-    assert int(by_app["quiet-app"]["app_daily_token_cap"]) == 500_000
-    assert int(by_app["quiet-app"]["app_tokens_remaining_today"]) == 400_000
-    assert bool(by_app["quiet-app"]["app_quota_available"]) is True
-    conn.close()
 
 
 def _seed_port_parity_fixture(
@@ -550,7 +221,8 @@ def test_eval_backend_port_local_sqlite_vs_cloud_bigquery_parity() -> None:
         query_runner=_sqlite_bq_query_runner(conn),
     )
     assert isinstance(local_backend, EvalBackend)
-    assert isinstance(cloud_backend, EvalBackend)
+    assert isinstance(cloud_backend, WarehouseEvalBackend)
+    assert not isinstance(cloud_backend, EvalBackend)
 
     spans, outcomes, cm = _seed_port_parity_fixture(conn)
     judge_cost = (1_000 / 1e6) * 0.15 + (100 / 1e6) * 0.60
@@ -560,7 +232,7 @@ def test_eval_backend_port_local_sqlite_vs_cloud_bigquery_parity() -> None:
         sme_confusion={"port-app": cm},
         judge_cost_per_call_usd=judge_cost,
     )
-    cloud_res = cloud_backend.evaluate_traces(spans=spans)
+    cloud_res = cloud_backend.read_summaries(rubric_id="groundedness_4pt_v1")
 
     assert sorted(local_res) == sorted(cloud_res) == ["port-app", "unjudged-app"]
     for app_id in ("port-app", "unjudged-app"):
@@ -747,3 +419,149 @@ def test_pipeline_accepts_injected_eval_backend_and_bqaa_cli_end_to_end(
 
     rc_missing = cli_main(["bqaa", "--events-file", str(tmp_path / "missing.jsonl")])
     assert rc_missing == 2
+
+
+def test_bigquery_adapter_maps_all_spend_buckets() -> None:
+    """`BigQueryEvalBackend` maps all spend buckets, rejects NULL rates, and `hourly_burndown_rows` maps all 27 fields (A-7, A-8)."""
+    summary_row: dict[str, object] = {
+        "apphub_application_id": "spend-app",
+        "rubric_id": "groundedness_4pt_v1",
+        "total_traces": 10,
+        "production_traces": 8,
+        "rule0_pass_rate": 0.9,
+        "tool_success_rate": 1.0,
+        "p95_latency_ms": 400.0,
+        "avg_cache_hit_ratio": 0.2,
+        "total_weighted_burndown_tokens": 50_000.0,
+        "judged_samples": 0,
+        "calibration_status": "UNJUDGED",
+        "production_inference_usd": 4.0,
+        "conflict_escalation_usd": 2.0,
+        "agent_gym_eval_usd": 1.0,
+        "autorater_judge_usd": 3.0,
+        "optimize_usd": 5.0,
+        "bq_query_cost_usd": 2.0,
+        "unclassified_usd": 0.5,
+        "total_spend_usd": 17.5,
+    }
+    hourly_row: dict[str, object] = {
+        "usage_hour": "2026-11-22T12:00:00Z",
+        "timestamp": "2026-11-22T12:00:00Z",
+        "apphub_application_id": "spend-app",
+        "tenant": "spend-app",
+        "model_name": "claude-sonnet-4-6",
+        "model": "claude-sonnet-4-6",
+        "finops_traffic_type": "production_inference",
+        "serving_traffic_type": "PRIORITY",
+        "distinct_traces": 4,
+        "span_count": 6,
+        "ok_span_count": 5,
+        "error_span_count": 1,
+        "http_429_count": 2,
+        "spillover_span_count": 3,
+        "input_tokens": 10_000,
+        "cached_input_tokens": 1_000,
+        "cached_tokens": 1_000,
+        "cache_write_5m_tokens": 2_000,
+        "cache_write_1h_tokens": 500,
+        "uncached_input_tokens": 6_500,
+        "output_tokens": 400,
+        "thinking_tokens": 100,
+        "thoughts_tokens": 100,
+        "long_context_cliff_spans": 0,
+        "weighted_burndown_tokens": 12_500.0,
+        "precomputed_weighted_burndown_tokens": 12_500.0,
+        "total_cost_usd": 0.42,
+    }
+
+    backend = BigQueryEvalBackend(
+        project_id="demo-proj",
+        query_runner=lambda sql: [hourly_row] if "burndown" in sql else [summary_row],
+    )
+    summary = backend.read_summaries()["spend-app"]
+    bucket_sum = (
+        summary.production_inference_usd
+        + summary.conflict_escalation_usd
+        + summary.agent_gym_eval_usd
+        + summary.autorater_judge_usd
+        + summary.optimize_usd
+        + summary.bq_query_cost_usd
+        + summary.unclassified_usd
+    )
+    assert summary.optimize_usd == pytest.approx(5.0)
+    assert summary.bq_query_cost_usd == pytest.approx(2.0)
+    assert bucket_sum == pytest.approx(summary.total_spend_usd, abs=1e-12)
+
+    # NULL rule0_pass_rate fails closed instead of silently becoming 0.0
+    bad_row = {**summary_row, "rule0_pass_rate": None}
+    bad_backend = BigQueryEvalBackend(project_id="demo-proj", query_runner=lambda _: [bad_row])
+    with pytest.raises(ValueError, match="rule0_pass_rate"):
+        bad_backend.read_summaries()
+
+    # Custom protocol adapter (not BigQueryEvalBackend subclass) works via WarehouseEvalBackend
+    class _CustomWarehouse:
+        project_id = "demo-proj"
+        dataset_id = "agent_eval"
+
+        def run_query(self, sql: str) -> Sequence[Mapping[str, object]]:
+            assert "v_capacity_hourly_burndown_export" in sql
+            return [hourly_row]
+
+        def read_summaries(self, *, rubric_id: str = "groundedness_4pt_v1") -> dict[str, object]:
+            _ = rubric_id
+            return {}
+
+        def build_judge_sql(self, **kwargs: object) -> str:
+            _ = kwargs
+            return ""
+
+    rows = hourly_burndown_rows(_CustomWarehouse())  # type: ignore[arg-type]
+    assert len(rows) == 1
+    assert rows[0].serving_traffic_type == "PRIORITY"
+    assert rows[0].ok_span_count == 5
+    assert rows[0].error_span_count == 1
+    assert rows[0].http_429_count == 2
+    assert rows[0].spillover_span_count == 3
+    assert rows[0].cache_write_5m_tokens == 2_000
+    assert rows[0].cache_write_1h_tokens == 500
+
+    # A-8: 250K Claude span uses single SKU-aware burndown & cliff check (255,000, not 507,500)
+    t0 = datetime(2026, 11, 22, 12, 0, 0, tzinfo=UTC)
+    claude_span = OTelGenAISpanRecord(
+        trace_id="trace-claude-250k",
+        span_id="sp-claude-250k",
+        start_time=t0,
+        end_time=t0 + timedelta(seconds=1),
+        latency_ms=1000.0,
+        model_name="claude-sonnet-4-6",
+        gcp_apphub_application_id="claude-app",
+        input_tokens=250_000,
+        output_tokens=1_000,
+    )
+    assert is_span_long_context_cliff(claude_span) is False
+    assert compute_span_burndown_tokens(claude_span) == pytest.approx(255_000.0, abs=1e-12)
+    sq_hourly = evaluate_hourly_burndown_in_sqlite([claude_span])
+    assert sq_hourly[0].long_context_cliff_spans == 0
+    assert sq_hourly[0].weighted_burndown_tokens == pytest.approx(255_000.0, abs=1e-12)
+
+    # S-5: DailyQuotaGuard.reserve_batch honors instance max_output_tokens / thinking_level defaults
+    guard_hi = DailyQuotaGuard(
+        daily_judge_token_cap=20_000,
+        per_app_default_token_cap=20_000,
+        max_output_tokens=1000,
+        thinking_level="HIGH",
+    )
+    res_hi = guard_hi.reserve_batch(
+        [
+            QuotaCandidateTrace(
+                trace_id="tr-def-1",
+                apphub_application_id="app-hi",
+                rubric_id="groundedness_4pt_v1",
+                prompt_text="x" * 400,
+                trace_start_iso="2026-11-21T09:00:00+00:00",
+            )
+        ],
+        rubric_id="groundedness_4pt_v1",
+    )
+    assert res_hi.total_reserved_tokens == 100 + 1000 + 8192
+    guard_hi.close()

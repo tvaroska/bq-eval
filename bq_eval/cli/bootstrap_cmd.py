@@ -1,4 +1,4 @@
-"""CLI handler for `bq-eval bootstrap --mode light|full|hybrid [--dry-run|--offline-schema]`."""
+"""CLI handler for `bq-eval bootstrap --mode light|full|hybrid [--dry-run]`."""
 
 from __future__ import annotations
 
@@ -31,8 +31,8 @@ def register_bootstrap_subparser(sub: argparse._SubParsersAction[argparse.Argume
     )
     boot_p.add_argument(
         "--project-id",
-        default="showcase-project",
-        help="Target GCP project ID (default: showcase-project for --offline-schema).",
+        default=None,
+        help="Target GCP project ID (required for --dry-run; defaults to showcase-project offline).",
     )
     boot_p.add_argument(
         "--dataset-id",
@@ -57,17 +57,37 @@ def register_bootstrap_subparser(sub: argparse._SubParsersAction[argparse.Argume
     boot_p.add_argument(
         "--include-omni",
         action="store_true",
-        help="Include BigQuery Omni multi-cloud zero-egress spoke views in the rendered pack.",
+        help="Include BigQuery Omni multi-cloud zero-egress spoke views (requires Omni target flags).",
     )
     boot_p.add_argument(
-        "--offline-schema",
-        action="store_true",
-        help="Run zero-credential offline schema, placeholder, DAG, and AST validation.",
+        "--aws-omni-connection-id",
+        default=None,
+        help="AWS BigQuery Omni connection ID (required with --include-omni).",
+    )
+    boot_p.add_argument(
+        "--aws-s3-bucket",
+        default=None,
+        help="AWS S3 bucket holding spoke OTel Parquet/Iceberg files (required with --include-omni).",
+    )
+    boot_p.add_argument(
+        "--azure-omni-connection-id",
+        default=None,
+        help="Azure BigQuery Omni connection ID (required with --include-omni).",
+    )
+    boot_p.add_argument(
+        "--azure-storage-account",
+        default=None,
+        help="Azure ADLS storage account name (required with --include-omni).",
+    )
+    boot_p.add_argument(
+        "--azure-container",
+        default=None,
+        help="Azure Blob/ADLS container name (required with --include-omni).",
     )
     boot_p.add_argument(
         "--dry-run",
         action="store_true",
-        help="Validate checkable statements against live GCP via `bq query --dry_run`.",
+        help="Validate checkable statements against live GCP via `bq query --dry_run` (requires --project-id).",
     )
     boot_p.add_argument(
         "--sql-out",
@@ -88,7 +108,7 @@ def _run_gcp_dry_run(project_id: str, stmts: list[tuple[str, str]]) -> list[str]
     bq_bin = shutil.which("bq")
     if bq_bin is None:
         raise ValueError(
-            "`bq` CLI not found on PATH; use --offline-schema for credential-free checks."
+            "`bq` CLI not found on PATH; omit --dry-run for credential-free offline validation."
         )
     errors: list[str] = []
     for label, stmt in stmts:
@@ -117,7 +137,6 @@ def _format_bootstrap_markdown(report: BootstrapValidationReport) -> str:
         f"- **Payload URI Pattern:** `{report.payload_uri_pattern}`",
         f"- **Statements:** `{report.statement_count}` total (`{report.checked_count}` checkable, `{report.skipped_count}` DDL/proc skipped)",
         f"- **Span Schema Columns Verified:** `{report.schema_column_count}`",
-        f"- **AST (`sqlglot`) Verified:** `{report.sqlglot_verified}`",
         f"- **Live GCP `--dry_run` Executed:** `{report.live_dry_run_executed}`",
     ]
     if report.unresolved_placeholders:
@@ -134,22 +153,30 @@ def _format_bootstrap_markdown(report: BootstrapValidationReport) -> str:
 
 def run_bootstrap_command(args: argparse.Namespace) -> int:
     """Execute `bq-eval bootstrap` across offline schema validation, SQL rendering, and GCP `--dry_run`."""
+    if args.dry_run and not args.project_id:
+        raise ValueError("--dry-run requires an explicit --project-id.")
+    effective_project = args.project_id or "showcase-project"
     mode = cast(BootstrapMode, args.mode)
     report, stmts = validate_bootstrap_offline(
         mode=mode,
-        project_id=args.project_id,
+        project_id=effective_project,
         dataset_id=args.dataset_id,
         connection_id=args.connection_id,
         payload_bucket=args.payload_bucket,
         payload_prefix=args.payload_prefix,
         include_omni=bool(args.include_omni),
+        aws_omni_connection_id=args.aws_omni_connection_id,
+        aws_s3_bucket=args.aws_s3_bucket,
+        azure_omni_connection_id=args.azure_omni_connection_id,
+        azure_storage_account=args.azure_storage_account,
+        azure_container=args.azure_container,
     )
 
     extra_errors: list[str] = list(report.errors)
     live_executed = False
     if args.dry_run:
         live_executed = True
-        extra_errors.extend(_run_gcp_dry_run(args.project_id, stmts))
+        extra_errors.extend(_run_gcp_dry_run(effective_project, stmts))
 
     final_report = report.model_copy(
         update={

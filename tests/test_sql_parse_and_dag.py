@@ -67,9 +67,11 @@ def test_generated_judge_sql_valid_googlesql_and_contract() -> None:
             "'reasoning_trace STRING NOT NULL, ordinal_score INT64 NOT NULL' AS output_schema"
             in gen_sql
         ), "output_schema must match SKILL.md contract (no redundant binary_pass in output_schema)"
-        assert "LEFT JOIN `demo-proj.agent_eval.trace_payloads`" in gen_sql, (
-            "trace_payloads join must be LEFT JOIN so 0-token Path-A traces are preserved"
+        assert "INNER JOIN deduped_payloads" in gen_sql, (
+            "trace_payloads join must be INNER JOIN on deduplicated non-empty payloads"
         )
+        assert "COALESCE(status, '') = ''" in gen_sql
+        assert "ordinal_score BETWEEN 1 AND 4" in gen_sql
         for token_col in ("judge_input_tokens", "judge_output_tokens", "judge_thinking_tokens"):
             assert token_col in gen_sql, f"Missing eval_results column {token_col} in judge SQL"
 
