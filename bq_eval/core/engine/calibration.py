@@ -8,6 +8,9 @@ from typing import Literal
 
 from bq_eval.core.contract.results import CalibrationResult, ConfusionMatrix, RoganGladenResult
 
+MIN_CALIBRATED_JUDGED_SAMPLES: int = 10
+MIN_CALIBRATED_REF_PER_CLASS: int = 5
+
 
 def compute_confusion_matrix(
     human_labels: Sequence[bool],
@@ -32,20 +35,23 @@ def _validate_rg_inputs(observed_pass_rate: float, sample_size: int, z_value: fl
         raise ValueError("z_value must be finite and positive.")
 
 
-def rogan_gladen_wilson_ci(
+def rogan_gladen_wilson_ci(  # noqa: PLR0913
     observed_pass_rate: float,
     sample_size: int,
     confusion: ConfusionMatrix,
     z_value: float = 1.959963984540054,
     *,
     stratified_var_p_obs: float | None = None,
+    kish_eff_n: float | None = None,
 ) -> tuple[float, float]:
-    """Compute Lang & Reiczigel (2014) Wilson plug-in Rogan-Gladen CI (boundary-safe)."""
+    """Compute Lang & Reiczigel (2014) Eq. (6), (7), (16), (17) Rogan-Gladen CI (boundary-safe)."""
     _validate_rg_inputs(observed_pass_rate, sample_size, z_value)
     if stratified_var_p_obs is not None and (
         not math.isfinite(stratified_var_p_obs) or stratified_var_p_obs < 0.0
     ):
         raise ValueError("stratified_var_p_obs must be finite and non-negative.")
+    if kish_eff_n is not None and (not math.isfinite(kish_eff_n) or kish_eff_n <= 0.0):
+        raise ValueError("kish_eff_n must be finite and positive.")
     n_pos = confusion.tp + confusion.fn
     n_neg = confusion.tn + confusion.fp
     if n_pos == 0 or n_neg == 0:
@@ -57,6 +63,8 @@ def rogan_gladen_wilson_ci(
         and 0.0 < observed_pass_rate < 1.0
     ):
         eff_n = max(1.0, (observed_pass_rate * (1.0 - observed_pass_rate)) / stratified_var_p_obs)
+    elif kish_eff_n is not None:
+        eff_n = max(1.0, kish_eff_n)
     else:
         eff_n = float(sample_size)
 
@@ -79,12 +87,14 @@ def rogan_gladen_wilson_ci(
     var_se_adj = (se_adj * (1.0 - se_adj)) / n_se_adj
     var_sp_adj = (sp_adj * (1.0 - sp_adj)) / n_sp_adj
 
+    # Lang & Reiczigel (2014) Eq. (17) center shift matching CRAN asht::prevSeSp.
+    dp_shift = 2.0 * z2 * (theta_adj * var_se_adj - (1.0 - theta_adj) * var_sp_adj)
     se_theta = (
         math.sqrt(var_p_adj + (theta_adj**2) * var_se_adj + ((1.0 - theta_adj) ** 2) * var_sp_adj)
         / j_adj
     )
-    ci_lower = min(1.0, max(0.0, theta_adj - z_value * se_theta))
-    ci_upper = min(1.0, max(0.0, theta_adj + z_value * se_theta))
+    ci_lower = min(1.0, max(0.0, theta_adj + dp_shift - z_value * se_theta))
+    ci_upper = min(1.0, max(0.0, theta_adj + dp_shift + z_value * se_theta))
     return ci_lower, ci_upper
 
 
@@ -94,10 +104,11 @@ def rogan_gladen_calibrate(  # noqa: PLR0913
     confusion: ConfusionMatrix,
     z_value: float = 1.959963984540054,
     *,
-    ci_method: Literal["delta", "wilson_plugin"] = "delta",
+    ci_method: Literal["delta", "wilson_plugin"] = "wilson_plugin",
     stratified_var_p_obs: float | None = None,
+    kish_eff_n: float | None = None,
 ) -> RoganGladenResult:
-    """Apply Rogan-Gladen prevalence adjustment with Delta-method or Wilson plug-in 95% CI."""
+    """Apply Rogan-Gladen prevalence adjustment with Lang & Reiczigel (2014) or Delta 95% CI."""
     _validate_rg_inputs(observed_pass_rate, sample_size, z_value)
 
     tpr = confusion.sensitivity_tpr
@@ -118,6 +129,7 @@ def rogan_gladen_calibrate(  # noqa: PLR0913
             confusion=confusion,
             z_value=z_value,
             stratified_var_p_obs=stratified_var_p_obs,
+            kish_eff_n=kish_eff_n,
         )
     else:
         if stratified_var_p_obs is not None:
@@ -154,34 +166,44 @@ def stratified_rogan_gladen_calibrate(
     confusion: ConfusionMatrix,
     z_value: float = 1.959963984540054,
     *,
-    ci_method: Literal["delta", "wilson_plugin"] = "delta",
+    ci_method: Literal["delta", "wilson_plugin"] = "wilson_plugin",
 ) -> RoganGladenResult:
     """Apply StratPPI post-stratified Rogan-Gladen calibration across `(pop_n, judged_n, passed_n)` strata."""
     if not strata:
         raise ValueError("strata must be non-empty.")
 
-    active = [(pop_n, judged_n, passed_n) for pop_n, judged_n, passed_n in strata if judged_n > 0]
+    active: list[tuple[int, int, int]] = []
+    for pop_n, judged_n, passed_n in strata:
+        if pop_n < 0 or judged_n < 0:
+            raise ValueError("Stratum population_count and judged_n must be non-negative.")
+        if pop_n > 0 and judged_n == 0:
+            raise ValueError(
+                "Unjudged population stratum: every stratum with pop_n > 0 must have judged_n > 0."
+            )
+        if judged_n > 0 and pop_n == 0:
+            raise ValueError("Each judged stratum must have population_count > 0.")
+        if judged_n > 0:
+            if not (0 <= passed_n <= judged_n):
+                raise ValueError("Each stratum must satisfy 0 <= passed_n <= judged_n.")
+            active.append((pop_n, judged_n, passed_n))
+
     if not active:
         raise ValueError("At least one stratum must have judged_n > 0.")
 
-    total_pop = 0
-    total_judged = 0
-    for pop_n, judged_n, passed_n in active:
-        if pop_n <= 0:
-            raise ValueError("Each judged stratum must have population_count > 0.")
-        if not (0 <= passed_n <= judged_n):
-            raise ValueError("Each stratum must satisfy 0 <= passed_n <= judged_n.")
-        total_pop += pop_n
-        total_judged += judged_n
+    total_pop = sum(pop_n for pop_n, _, _ in active)
+    total_judged = sum(judged_n for _, judged_n, _ in active)
 
     weighted_p_obs = 0.0
     var_p_obs = 0.0
+    kish_denom = 0.0
     for pop_n, judged_n, passed_n in active:
         w_s = pop_n / total_pop
         p_s = passed_n / judged_n
         weighted_p_obs += w_s * p_s
         var_p_obs += (w_s**2) * (p_s * (1.0 - p_s)) / judged_n
+        kish_denom += (w_s**2) / judged_n
 
+    kish_eff_n = 1.0 / kish_denom
     return rogan_gladen_calibrate(
         observed_pass_rate=weighted_p_obs,
         sample_size=total_judged,
@@ -189,6 +211,7 @@ def stratified_rogan_gladen_calibrate(
         z_value=z_value,
         ci_method=ci_method,
         stratified_var_p_obs=var_p_obs,
+        kish_eff_n=kish_eff_n,
     )
 
 

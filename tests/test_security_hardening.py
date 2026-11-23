@@ -161,6 +161,11 @@ def test_workbench_http_port_routes_headers_and_caching(
 
         assert calls == 1, f"Expected cached default-corpus pipeline run, got {calls} calls"
 
+        with pytest.raises(urllib.error.HTTPError) as bad_api_exc:
+            opener.open(f"{base_url}/api/v1/demo?corpus=nonexistent", timeout=5)
+        assert bad_api_exc.value.code == 400
+        _assert_security_headers(bad_api_exc.value.headers, expected_csp)
+
         with pytest.raises(urllib.error.HTTPError) as not_found_exc:
             opener.open(f"{base_url}/does-not-exist", timeout=5)
         assert not_found_exc.value.code == 404

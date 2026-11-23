@@ -653,3 +653,84 @@ def test_value_parity_step1_step2_xml_escaping_step3_runs_and_ddl_views() -> Non
     assert int(s3_row["evaluated_traces"]) == 1
     assert float(s3_row["rubric_pass_rate"]) == pytest.approx(1.0, abs=1e-12)
     assert float(s3_row["verified_outcome_rate"]) == pytest.approx(1.0, abs=1e-12)
+
+
+def test_outcome_verified_attribute_parity() -> None:
+    """Transpiled `v_outcomes` and `v_enterprise_cost_per_verified_outcome` match SQLite copy on `outcome.verified` strings."""
+    base = datetime(2026, 11, 21, 12, 0, 0, tzinfo=UTC)
+    cases: tuple[tuple[str, dict[str, str], int], ...] = (
+        ("out-true", {"outcome.status": "succeeded", "outcome.verified": "true"}, 1),
+        ("out-upper-true", {"outcome.status": "succeeded", "outcome.verified": "TRUE"}, 1),
+        ("out-false", {"outcome.status": "succeeded", "outcome.verified": "false"}, 0),
+        ("out-space-false", {"outcome.status": "succeeded", "outcome.verified": " false "}, 0),
+        ("out-zero", {"outcome.status": "succeeded", "outcome.verified": "0"}, 0),
+        ("out-no", {"outcome.status": "succeeded", "outcome.verified": "no"}, 0),
+        ("out-absent", {"outcome.status": "succeeded"}, 1),
+    )
+    spans: list[OTelGenAISpanRecord] = []
+    for idx, (outcome_id, attrs, _) in enumerate(cases):
+        trace_id = f"tr-ov-{idx:02d}"
+        spans.append(
+            make_span(
+                trace_id,
+                f"sp-ov-root-{idx:02d}",
+                app_id="ov-app",
+                outcome_id=outcome_id,
+                outcome_owner="ov-app",
+                input_tokens=10_000,
+                cached_input_tokens=0,
+                output_tokens=1_000,
+                thinking_tokens=0,
+                latency_ms=500.0,
+                offset_s=idx * 5,
+                base_time=base,
+            )
+        )
+        spans.append(
+            make_span(
+                trace_id,
+                f"sp-ov-close-{idx:02d}",
+                parent_span_id=f"sp-ov-root-{idx:02d}",
+                span_name="outcome.closed",
+                app_id="ov-app",
+                outcome_id=outcome_id,
+                outcome_owner="ov-app",
+                model_name="none",
+                input_tokens=0,
+                cached_input_tokens=0,
+                output_tokens=0,
+                thinking_tokens=0,
+                latency_ms=0.0,
+                offset_s=idx * 5 + 1,
+                attributes=attrs,
+                base_time=base,
+            )
+        )
+
+    conn = _new_sqlite_bq_conn()
+    _create_enterprise_sqlite_fixture(conn)
+    _install_enterprise_views(conn)
+    for sp in spans:
+        _insert_bq_span(conn, sp)
+
+    bq_outcomes = {
+        str(r["outcome_id"]): int(r["is_verified"])
+        for r in conn.execute("SELECT outcome_id, is_verified FROM v_outcomes").fetchall()
+    }
+    bq_cpvo = conn.execute(
+        "SELECT total_outcomes, verified_outcomes, cost_per_verified_outcome_usd "
+        "FROM v_enterprise_cost_per_verified_outcome WHERE apphub_application_id = 'ov-app'"
+    ).fetchone()
+    conn.close()
+
+    twin = evaluate_traces_in_sqlite(spans=spans)["ov-app"]
+
+    for outcome_id, _, expected in cases:
+        assert bq_outcomes[outcome_id] == expected
+
+    assert int(bq_cpvo["total_outcomes"]) == twin.outcome_total_count == 7
+    assert int(bq_cpvo["verified_outcomes"]) == twin.outcome_verified_count == 3
+    assert float(bq_cpvo["cost_per_verified_outcome_usd"]) == pytest.approx(
+        twin.outcome_cost_per_verified_usd or 0.0,
+        rel=1e-9,
+    )

@@ -129,9 +129,9 @@ def build_ai_generate_table_judge_sql(  # noqa: PLR0913
     if (
         isinstance(canary_sample_pct, bool)
         or not isinstance(canary_sample_pct, int)
-        or not (0 <= canary_sample_pct <= 100)
+        or not (1 <= canary_sample_pct <= 100)
     ):
-        raise ValueError("canary_sample_pct must be an integer between 0 and 100 (not bool).")
+        raise ValueError("canary_sample_pct must be an integer between 1 and 100 (not bool).")
     valid_run_id = _validate_run_id(run_id)
 
     rubric = CANONICAL_RUBRICS[rubric_id]
@@ -266,9 +266,9 @@ def build_ai_evaluate_agent_sql(  # noqa: PLR0913
     if (
         isinstance(canary_sample_pct, bool)
         or not isinstance(canary_sample_pct, int)
-        or not (0 <= canary_sample_pct <= 100)
+        or not (1 <= canary_sample_pct <= 100)
     ):
-        raise ValueError("canary_sample_pct must be an integer between 0 and 100 (not bool).")
+        raise ValueError("canary_sample_pct must be an integer between 1 and 100 (not bool).")
     valid_run_id = _validate_run_id(run_id)
     valid_persist_run_id = _validate_run_id(persist_run_id)
 

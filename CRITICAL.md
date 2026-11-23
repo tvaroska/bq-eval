@@ -7,8 +7,8 @@ Break one of these and the numbers this repo reports stop being trustworthy.
    - Never send a trace to an LLM judge to find something SQL can find. Run Step 1 (`v_step1_trace_eval`, `v_trace_sql_evaluation`, or `evaluate_traces_in_sqlite()`) before `AI.GENERATE_TABLE`.
 
 2. **No judge data means no score.**
-   - An app with no judged traces, or with a judge that cannot tell pass from fail (Youden's J at or below `1e-6`), reports `NULL`, never a 100% pass rate. Status is `UNJUDGED` or `UNCALIBRATED`; `rogan_gladen_calibrate()` raises `ValueError`.
-   - Judged samples oversample failures, so raw judge pass rates are biased. Report the corrected rate (Rogan-Gladen, weighted by sampling stratum, with a Wilson 95% interval), computed only over traces that passed Step 1.
+   - An app with no judged traces, any unjudged population stratum, fewer than 10 judged traces, fewer than 5 positive or 5 negative reference labels, or a judge that cannot tell pass from fail (Youden's J or adjusted J' at or below `1e-6`), reports `NULL`, never a 100% pass rate. Status is `UNJUDGED` or `UNCALIBRATED`; `rogan_gladen_calibrate()` raises `ValueError`.
+   - Judged samples oversample failures, so raw judge pass rates are biased. Report the corrected rate (Rogan-Gladen, weighted by population sampling stratum, with a Lang & Reiczigel (2014) boundary-safe 95% interval), computed only over traces that passed Step 1.
    - Trust a judge only when its agreement with the reference (Gwet's AC2, `compute_gwet_ac2()`) is at least 0.80.
 
 3. **Treat trace text as untrusted.**

@@ -104,17 +104,17 @@ def _validate_three_pool_scalars(
 
 def _is_involuntary_spill(
     app_id: str,
-    app_tokens: float,
+    app_total_tokens: float,
     funded_gsus_by_app: Mapping[str, float],
     capacity_tokens: float,
 ) -> bool:
-    """Spillover is involuntary when the app stayed within its funded share of the reservation."""
+    """App-level spillover rule: involuntary when the app's combined demand across all lanes stays within its funded share of the reservation."""
     funded = funded_gsus_by_app.get(app_id, 0.0)
     total_funded = sum(funded_gsus_by_app.values())
     if funded <= 0.0 or total_funded <= 0.0:
         return False
     entitlement = (funded / total_funded) * capacity_tokens
-    return app_tokens <= entitlement + 1e-9
+    return app_total_tokens <= entitlement + 1e-9
 
 
 def _allocate_hour(  # noqa: PLR0913
@@ -130,6 +130,9 @@ def _allocate_hour(  # noqa: PLR0913
     wf_keys = [k for k in ledger.keys if k[1] in ("eval", "optimize")]
     prod_total = sum(padded[k][hour] for k in prod_keys)
     wf_total = sum(padded[k][hour] for k in wf_keys)
+    app_hour_totals: dict[str, float] = {}
+    for k in ledger.keys:
+        app_hour_totals[k[0]] = app_hour_totals.get(k[0], 0.0) + padded[k][hour]
 
     # Production fills the reservation first; eval/optimize take what is left; the rest is idle.
     prod_on_pt = min(capacity_tokens, prod_total)
@@ -153,7 +156,9 @@ def _allocate_hour(  # noqa: PLR0913
         ledger.pool1[k] += pool1_usd * share
         if prod_overflow > 0.0:
             spill_usd = (prod_overflow * share / 1e6) * _rate_for_app(paygo_rates, app_id)
-            if _is_involuntary_spill(app_id, tok, funded_gsus_by_app, capacity_tokens):
+            if _is_involuntary_spill(
+                app_id, app_hour_totals[app_id], funded_gsus_by_app, capacity_tokens
+            ):
                 ledger.pool3_involuntary[k] += spill_usd
             else:
                 ledger.pool3_burst[k] += spill_usd
@@ -166,9 +171,13 @@ def _allocate_hour(  # noqa: PLR0913
         share = tok / wf_total
         ledger.pool2[k] += pool2_usd * share
         if wf_overflow > 0.0:
-            ledger.pool3_burst[k] += (wf_overflow * share / 1e6) * _rate_for_app(
-                paygo_rates, app_id
-            )
+            spill_usd = (wf_overflow * share / 1e6) * _rate_for_app(paygo_rates, app_id)
+            if _is_involuntary_spill(
+                app_id, app_hour_totals[app_id], funded_gsus_by_app, capacity_tokens
+            ):
+                ledger.pool3_involuntary[k] += spill_usd
+            else:
+                ledger.pool3_burst[k] += spill_usd
 
 
 def allocate_focus_three_pool_hourly_chargeback(  # noqa: PLR0913

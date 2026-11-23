@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 import re
-import sqlite3
 
 import pytest
 
 from tests.sql_helpers import (
     SQL_DIR,
     _extract_view_sql_text,
-    _sqlite_json_value,
+    _new_sqlite_bq_conn,
     _transpile_bq_view_to_sqlite,
 )
 
@@ -35,8 +34,7 @@ def test_multi_key_outcome_fanout_exact_1x_infra_and_judge_cost() -> None:
         "v_skill_lineage_roi must proportionally allocate outcome infra cost across skill slices"
     )
 
-    conn = sqlite3.connect(":memory:")
-    conn.create_function("JSON_VALUE", 2, _sqlite_json_value)
+    conn = _new_sqlite_bq_conn()
     cur = conn.cursor()
 
     cur.execute(

@@ -116,7 +116,11 @@ SELECT
       + (COALESCE(p.burndown_output_weight, 4.0) * (s.output_tokens + s.thinking_tokens))
   END AS weighted_burndown_tokens,
   CASE
-    WHEN s.model_name IS NULL OR s.model_name = 'none' OR (s.input_tokens = 0 AND s.output_tokens = 0 AND s.thinking_tokens = 0) THEN
+    WHEN s.input_tokens = 0
+      AND s.output_tokens = 0
+      AND s.thinking_tokens = 0
+      AND COALESCE(s.cache_write_5m_tokens, 0) = 0
+      AND COALESCE(s.cache_write_1h_tokens, 0) = 0 THEN
       0.0
     ELSE
       (
@@ -199,7 +203,8 @@ SELECT
   SUM(w.thinking_tokens) AS total_thinking_tokens,
   SAFE_DIVIDE(SUM(w.cached_input_tokens), NULLIF(SUM(w.input_tokens), 0)) AS cache_hit_ratio,
   SUM(w.weighted_burndown_tokens) AS weighted_burndown_tokens,
-  SUM(w.span_cost_usd) AS trace_cost_usd
+  COUNTIF(w.span_cost_usd IS NULL) AS unpriced_spans,
+  IF(COUNTIF(w.span_cost_usd IS NULL) > 0, CAST(NULL AS FLOAT64), SUM(w.span_cost_usd)) AS trace_cost_usd
 FROM `agent_eval.v_step1_trace_waterfall` AS w
 GROUP BY w.trace_id;
 
@@ -217,64 +222,95 @@ SELECT
   AVG(IF(tool_error_count = 0, 1.0, 0.0)) AS tool_success_rate,
   APPROX_QUANTILES(trace_latency_ms, 100)[OFFSET(95)] AS p95_latency_ms,
   COALESCE(AVG(cache_hit_ratio), 0.0) AS avg_cache_hit_ratio,
-  SUM(trace_cost_usd) AS total_cost_usd,
-  SAFE_DIVIDE(SUM(trace_cost_usd), COUNT(*)) AS cost_per_trace_usd,
-  SAFE_DIVIDE(SUM(trace_cost_usd), NULLIF(COUNTIF(step1_pass), 0)) AS step1_cost_per_outcome_usd
+  SUM(unpriced_spans) AS unpriced_spans,
+  IF(SUM(unpriced_spans) > 0, CAST(NULL AS FLOAT64), SUM(trace_cost_usd)) AS total_cost_usd,
+  IF(SUM(unpriced_spans) > 0, CAST(NULL AS FLOAT64), SAFE_DIVIDE(SUM(trace_cost_usd), COUNT(*))) AS cost_per_trace_usd,
+  IF(SUM(unpriced_spans) > 0, CAST(NULL AS FLOAT64), SAFE_DIVIDE(SUM(trace_cost_usd), NULLIF(COUNTIF(step1_pass), 0))) AS step1_cost_per_outcome_usd
 FROM `agent_eval.v_step1_trace_eval`
 GROUP BY apphub_application_id, business_unit, cost_center;
 
 -- -----------------------------------------------------------------------------
 -- View 1D: Business Outcomes Closed (`v_outcomes`)
 --   * Reads zero-duration spans where span_name = 'outcome.closed'
---   * Domain-agnostic: verified when outcome.status = 'succeeded' and explicit
---     outcome.verified (or Rule 0 pass when absent) is TRUE
+--   * Domain-agnostic: verified ONLY when explicit outcome.status = 'succeeded',
+--     every participating trace passes Step 1 (v_step1_trace_eval.step1_pass),
+--     and explicit outcome.verified is 'true' (case-insensitive) or absent.
+--     Missing outcome.status defaults to 'unknown' (unverified); any non-'true'
+--     non-empty outcome.verified value ('false', '0', 'no', etc.) fails closed.
 -- -----------------------------------------------------------------------------
 CREATE OR REPLACE VIEW `agent_eval.v_outcomes` AS
-SELECT
-  COALESCE(s.outcome_id, JSON_VALUE(s.attributes, '$."outcome.id"')) AS outcome_id,
-  ARRAY_AGG(
-    COALESCE(JSON_VALUE(s.attributes, '$."outcome.status"'), 'succeeded')
-    ORDER BY s.end_time DESC LIMIT 1
-  )[SAFE_OFFSET(0)] AS outcome_status,
-  ARRAY_AGG(
-    COALESCE(
-      JSON_VALUE(s.attributes, '$."outcome.subject"'),
-      s.entity_id,
-      JSON_VALUE(s.attributes, '$."entity_id"')
-    )
-    IGNORE NULLS ORDER BY s.end_time DESC LIMIT 1
-  )[SAFE_OFFSET(0)] AS outcome_subject,
-  ARRAY_AGG(
-    JSON_VALUE(s.attributes, '$."outcome.parent_id"')
-    IGNORE NULLS ORDER BY s.end_time DESC LIMIT 1
-  )[SAFE_OFFSET(0)] AS outcome_parent_id,
-  ARRAY_AGG(
-    COALESCE(
-      s.outcome_owner,
-      JSON_VALUE(s.attributes, '$."outcome.owner"'),
-      s.gcp_apphub_application_id,
-      'unregistered_app'
-    )
-    ORDER BY s.end_time DESC LIMIT 1
-  )[SAFE_OFFSET(0)] AS outcome_owner,
-  MAX(s.end_time) AS closed_at,
-  ARRAY_AGG(s.trace_id ORDER BY s.end_time DESC LIMIT 1)[SAFE_OFFSET(0)] AS closing_trace_id,
-  ARRAY_AGG(s.source_mode IGNORE NULLS ORDER BY s.end_time DESC LIMIT 1)[SAFE_OFFSET(0)] AS source_mode,
-  ARRAY_AGG(s.skill_id IGNORE NULLS ORDER BY s.end_time DESC LIMIT 1)[SAFE_OFFSET(0)] AS skill_id,
-  ARRAY_AGG(s.skill_version IGNORE NULLS ORDER BY s.end_time DESC LIMIT 1)[SAFE_OFFSET(0)] AS skill_version,
-  LOGICAL_AND(
-    CASE
-      WHEN COALESCE(JSON_VALUE(s.attributes, '$."outcome.status"'), 'succeeded') != 'succeeded' THEN FALSE
-      ELSE COALESCE(
-        SAFE_CAST(JSON_VALUE(s.attributes, '$."outcome.verified"') AS BOOL),
-        s.rule0_pass
+WITH outcome_step1 AS (
+  SELECT
+    outcome_id,
+    LOGICAL_AND(step1_pass) AS outcome_step1_pass
+  FROM `agent_eval.v_step1_trace_eval`
+  WHERE outcome_id IS NOT NULL
+  GROUP BY outcome_id
+),
+closed_agg AS (
+  SELECT
+    COALESCE(s.outcome_id, JSON_VALUE(s.attributes, '$."outcome.id"')) AS outcome_id,
+    ARRAY_AGG(
+      COALESCE(NULLIF(TRIM(JSON_VALUE(s.attributes, '$."outcome.status"')), ''), 'unknown')
+      ORDER BY s.end_time DESC LIMIT 1
+    )[SAFE_OFFSET(0)] AS outcome_status,
+    ARRAY_AGG(
+      COALESCE(
+        JSON_VALUE(s.attributes, '$."outcome.subject"'),
+        s.entity_id,
+        JSON_VALUE(s.attributes, '$."entity_id"')
       )
-    END
-  ) AS is_verified
-FROM `agent_eval.otel_spans` AS s
-WHERE s.span_name = 'outcome.closed'
-  AND COALESCE(s.outcome_id, JSON_VALUE(s.attributes, '$."outcome.id"')) IS NOT NULL
-GROUP BY outcome_id;
+      IGNORE NULLS ORDER BY s.end_time DESC LIMIT 1
+    )[SAFE_OFFSET(0)] AS outcome_subject,
+    ARRAY_AGG(
+      JSON_VALUE(s.attributes, '$."outcome.parent_id"')
+      IGNORE NULLS ORDER BY s.end_time DESC LIMIT 1
+    )[SAFE_OFFSET(0)] AS outcome_parent_id,
+    ARRAY_AGG(
+      COALESCE(
+        s.outcome_owner,
+        JSON_VALUE(s.attributes, '$."outcome.owner"'),
+        s.gcp_apphub_application_id,
+        'unregistered_app'
+      )
+      ORDER BY s.end_time DESC LIMIT 1
+    )[SAFE_OFFSET(0)] AS outcome_owner,
+    MAX(s.end_time) AS closed_at,
+    ARRAY_AGG(s.trace_id ORDER BY s.end_time DESC LIMIT 1)[SAFE_OFFSET(0)] AS closing_trace_id,
+    ARRAY_AGG(s.source_mode IGNORE NULLS ORDER BY s.end_time DESC LIMIT 1)[SAFE_OFFSET(0)] AS source_mode,
+    ARRAY_AGG(s.skill_id IGNORE NULLS ORDER BY s.end_time DESC LIMIT 1)[SAFE_OFFSET(0)] AS skill_id,
+    ARRAY_AGG(s.skill_version IGNORE NULLS ORDER BY s.end_time DESC LIMIT 1)[SAFE_OFFSET(0)] AS skill_version,
+    LOGICAL_AND(
+      CASE
+        WHEN COALESCE(NULLIF(TRIM(JSON_VALUE(s.attributes, '$."outcome.status"')), ''), 'unknown') != 'succeeded'
+          THEN FALSE
+        WHEN NULLIF(TRIM(JSON_VALUE(s.attributes, '$."outcome.verified"')), '') IS NULL
+          THEN s.rule0_pass
+        WHEN LOWER(TRIM(JSON_VALUE(s.attributes, '$."outcome.verified"'))) = 'true'
+          THEN TRUE
+        ELSE FALSE
+      END
+    ) AS close_verified
+  FROM `agent_eval.otel_spans` AS s
+  WHERE s.span_name = 'outcome.closed'
+    AND COALESCE(s.outcome_id, JSON_VALUE(s.attributes, '$."outcome.id"')) IS NOT NULL
+  GROUP BY outcome_id
+)
+SELECT
+  c.outcome_id,
+  c.outcome_status,
+  c.outcome_subject,
+  c.outcome_parent_id,
+  c.outcome_owner,
+  c.closed_at,
+  c.closing_trace_id,
+  c.source_mode,
+  c.skill_id,
+  c.skill_version,
+  (c.close_verified AND COALESCE(os1.outcome_step1_pass, FALSE)) AS is_verified
+FROM closed_agg AS c
+LEFT JOIN outcome_step1 AS os1
+  ON c.outcome_id = os1.outcome_id;
 
 -- -----------------------------------------------------------------------------
 -- View 1E: Estimated Compute & Storage Infra Cost per Outcome (`v_infra_cost_estimate`)
@@ -337,8 +373,17 @@ WITH outcome_spans AS (
     SUM(w.cached_input_tokens) AS cached_input_tokens,
     SUM(w.output_tokens) AS output_tokens,
     SUM(w.thinking_tokens) AS thinking_tokens,
-    SUM(CASE WHEN w.finops_traffic_type != 'autorater_judge' THEN w.span_cost_usd ELSE 0.0 END) AS measured_model_cost_usd,
-    SUM(CASE WHEN w.finops_traffic_type = 'autorater_judge' THEN w.span_cost_usd ELSE 0.0 END) AS measured_judge_cost_usd
+    COUNTIF(w.span_cost_usd IS NULL) AS unpriced_spans,
+    IF(
+      COUNTIF(w.finops_traffic_type != 'autorater_judge' AND w.span_cost_usd IS NULL) > 0,
+      CAST(NULL AS FLOAT64),
+      SUM(CASE WHEN w.finops_traffic_type != 'autorater_judge' THEN w.span_cost_usd ELSE 0.0 END)
+    ) AS measured_model_cost_usd,
+    IF(
+      COUNTIF(w.finops_traffic_type = 'autorater_judge' AND w.span_cost_usd IS NULL) > 0,
+      CAST(NULL AS FLOAT64),
+      SUM(CASE WHEN w.finops_traffic_type = 'autorater_judge' THEN w.span_cost_usd ELSE 0.0 END)
+    ) AS measured_judge_cost_usd
   FROM `agent_eval.v_step1_trace_waterfall` AS w
   LEFT JOIN `agent_eval.v_outcomes` AS o
     ON w.outcome_id = o.outcome_id
@@ -363,26 +408,39 @@ SELECT
   SUM(os.input_tokens) AS total_input_tokens,
   SUM(os.output_tokens) AS total_output_tokens,
   SUM(os.thinking_tokens) AS total_thinking_tokens,
-  SUM(os.measured_model_cost_usd) AS measured_model_cost_usd,
-  SUM(os.measured_judge_cost_usd) AS measured_judge_cost_usd,
+  SUM(os.unpriced_spans) AS unpriced_spans,
+  IF(SUM(os.unpriced_spans) > 0, CAST(NULL AS FLOAT64), SUM(os.measured_model_cost_usd)) AS measured_model_cost_usd,
+  IF(SUM(os.unpriced_spans) > 0, CAST(NULL AS FLOAT64), SUM(os.measured_judge_cost_usd)) AS measured_judge_cost_usd,
   SUM(COALESCE(inf.estimated_infra_cost_usd, 0.0) * COALESCE(SAFE_DIVIDE(os.span_count, os.outcome_total_spans), 0.0)) AS estimated_infra_cost_usd,
-  SUM(os.measured_model_cost_usd + os.measured_judge_cost_usd) AS total_ai_cost_usd,
-  SUM(
-    os.measured_model_cost_usd
-    + os.measured_judge_cost_usd
-    + COALESCE(inf.estimated_infra_cost_usd, 0.0) * COALESCE(SAFE_DIVIDE(os.span_count, os.outcome_total_spans), 0.0)
-  ) AS total_cost_with_infra_usd,
-  SAFE_DIVIDE(
-    SUM(os.measured_model_cost_usd + os.measured_judge_cost_usd),
-    NULLIF(COUNT(DISTINCT IF(os.is_verified, os.outcome_id, NULL)), 0)
-  ) AS cost_per_verified_outcome_ai_usd,
-  SAFE_DIVIDE(
+  IF(SUM(os.unpriced_spans) > 0, CAST(NULL AS FLOAT64), SUM(os.measured_model_cost_usd + os.measured_judge_cost_usd)) AS total_ai_cost_usd,
+  IF(
+    SUM(os.unpriced_spans) > 0,
+    CAST(NULL AS FLOAT64),
     SUM(
       os.measured_model_cost_usd
       + os.measured_judge_cost_usd
       + COALESCE(inf.estimated_infra_cost_usd, 0.0) * COALESCE(SAFE_DIVIDE(os.span_count, os.outcome_total_spans), 0.0)
-    ),
-    NULLIF(COUNT(DISTINCT IF(os.is_verified, os.outcome_id, NULL)), 0)
+    )
+  ) AS total_cost_with_infra_usd,
+  IF(
+    SUM(os.unpriced_spans) > 0,
+    CAST(NULL AS FLOAT64),
+    SAFE_DIVIDE(
+      SUM(os.measured_model_cost_usd + os.measured_judge_cost_usd),
+      NULLIF(COUNT(DISTINCT IF(os.is_verified, os.outcome_id, NULL)), 0)
+    )
+  ) AS cost_per_verified_outcome_ai_usd,
+  IF(
+    SUM(os.unpriced_spans) > 0,
+    CAST(NULL AS FLOAT64),
+    SAFE_DIVIDE(
+      SUM(
+        os.measured_model_cost_usd
+        + os.measured_judge_cost_usd
+        + COALESCE(inf.estimated_infra_cost_usd, 0.0) * COALESCE(SAFE_DIVIDE(os.span_count, os.outcome_total_spans), 0.0)
+      ),
+      NULLIF(COUNT(DISTINCT IF(os.is_verified, os.outcome_id, NULL)), 0)
+    )
   ) AS cost_per_verified_outcome_usd
 FROM weighted_outcome_spans AS os
 LEFT JOIN `agent_eval.v_infra_cost_estimate` AS inf

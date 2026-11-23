@@ -164,8 +164,69 @@ def test_quota_guard_headroom_per_app_subcaps_non_deduped_and_retry_storm() -> N
     )
     assert after_retries.selected_trace_ids == ()
     assert after_retries.global_remaining_after == 0
+
+    # Verify FAILED_BILLED continues to count against global & per-app remaining budget,
+    # whereas RELEASED frees its reserved tokens.
+    guard3 = DailyQuotaGuard(
+        daily_judge_token_cap=10_000,
+        per_app_default_token_cap=4_000,
+        max_output_tokens=500,
+        thinking_level="NONE",
+    )
+    cand = QuotaCandidateTrace(
+        trace_id="tr-fb-1",
+        apphub_application_id="app-fb",
+        rubric_id="groundedness_4pt_v1",
+        prompt_text="x" * 6_000,  # 1,500 prompt + 500 output = 2,000 tokens
+        trace_start_iso="2026-11-21T09:00:00+00:00",
+    )
+    r_fb = guard3.reserve_batch(
+        [cand],
+        rubric_id="groundedness_4pt_v1",
+        max_output_tokens=500,
+        thinking_level="NONE",
+    )
+    assert r_fb.reservation_id is not None
+    assert r_fb.total_reserved_tokens == 2_000
+    guard3.finalize_reservation(r_fb.reservation_id, status="FAILED_BILLED")
+    r_after_fb = guard3.reserve_batch(
+        [
+            QuotaCandidateTrace(
+                trace_id="tr-fb-2",
+                apphub_application_id="app-fb",
+                rubric_id="groundedness_4pt_v1",
+                prompt_text="x" * 6_000,
+                trace_start_iso="2026-11-21T09:05:00+00:00",
+            ),
+            QuotaCandidateTrace(
+                trace_id="tr-fb-3-over-app-cap",
+                apphub_application_id="app-fb",
+                rubric_id="groundedness_4pt_v1",
+                prompt_text="x" * 6_000,
+                trace_start_iso="2026-11-21T09:06:00+00:00",
+            ),
+        ],
+        rubric_id="groundedness_4pt_v1",
+        max_output_tokens=500,
+        thinking_level="NONE",
+    )
+    # 2,000 FAILED_BILLED + 2,000 RESERVED hits app-fb's 4,000 cap -> tr-fb-3 skipped; global=6,000
+    assert r_after_fb.reservation_id is not None
+    assert r_after_fb.selected_trace_ids == ("tr-fb-2",)
+    assert r_after_fb.skipped_trace_ids == ("tr-fb-3-over-app-cap",)
+    assert r_after_fb.global_remaining_after == 6_000
+    guard3.finalize_reservation(r_after_fb.reservation_id, status="RELEASED")
+    r_after_release = guard3.reserve_batch(
+        [],
+        rubric_id="groundedness_4pt_v1",
+        max_output_tokens=500,
+        thinking_level="NONE",
+    )
+    assert r_after_release.global_remaining_after == 8_000
+
     guard.close()
     guard2.close()
+    guard3.close()
 
 
 def test_quota_guard_concurrent_reservations_prevent_toctou_and_sql_app_view_parity() -> None:

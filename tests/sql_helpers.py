@@ -3,6 +3,7 @@ BigQuery-to-SQLite transpiler with fixtures for the enterprise views."""
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import re
@@ -333,6 +334,72 @@ def _sqlite_starts_with(value: str | None, prefix: str | None) -> int:
     return 1 if str(value).startswith(str(prefix)) else 0
 
 
+def _sqlite_safe_cast_bool(value: object) -> int | None:
+    """Mirror BigQuery `SAFE_CAST(x AS BOOL)` (case-insensitive exact 'true'/'false', no whitespace trim)."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return 1 if value else 0
+    if isinstance(value, int):
+        return 0 if value == 0 else 1
+    if isinstance(value, str):
+        lowered = value.lower()
+        if lowered == "true":
+            return 1
+        if lowered == "false":
+            return 0
+    return None
+
+
+def _sqlite_safe_cast_float64(value: object) -> float | None:
+    """Mirror BigQuery `SAFE_CAST(x AS FLOAT64)` (invalid strings return NULL, never 0.0)."""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        parsed = float(value)
+        return parsed if math.isfinite(parsed) else None
+    try:
+        parsed = float(str(value).strip())
+    except ValueError:
+        return None
+    return parsed if math.isfinite(parsed) else None
+
+
+def _sqlite_safe_cast_int64(value: object) -> int | None:
+    """Mirror BigQuery `SAFE_CAST(x AS INT64)` (invalid or decimal strings return NULL)."""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return round(value) if math.isfinite(value) else None
+    try:
+        return int(str(value).strip())
+    except ValueError:
+        return None
+
+
+def _sqlite_farm_fingerprint(value: object) -> int | None:
+    """Deterministic 64-bit signed fingerprint emulating BigQuery `FARM_FINGERPRINT`."""
+    if value is None:
+        return None
+    digest = hashlib.sha256(str(value).encode("utf-8")).digest()
+    return int.from_bytes(digest[:8], byteorder="big", signed=True)
+
+
+def _sqlite_mod(num: int | float | None, den: int | float | None) -> int | None:
+    if num is None or den is None or den == 0:
+        return None
+    return int(num) % int(den)
+
+
+def _sqlite_date_sub_days(date_str: str | None, days: int | float | None) -> str | None:
+    if date_str is None:
+        return None
+    dt = datetime.fromisoformat(str(date_str)[:10])
+    return (dt - timedelta(days=int(days or 0))).strftime("%Y-%m-%d")
+
+
 def _sqlite_json_set(raw_doc: str | None, *args: object) -> str:
     doc: dict[str, object]
     try:
@@ -433,15 +500,25 @@ class _SQLiteStringAggAsc:
         return self.sep.join(item[2] for item in self.items)
 
 
-def _new_sqlite_bq_conn(current_date_utc: str = "2026-11-21") -> sqlite3.Connection:
+def _new_sqlite_bq_conn(
+    current_date_utc: str = "2026-11-21",
+    current_timestamp_utc: str | None = None,
+) -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
+    ts_now = current_timestamp_utc or f"{current_date_utc}T12:00:00+00:00"
     conn.create_function("JSON_VALUE", 2, _sqlite_json_value)
     conn.create_function("REGEXP_REPLACE", 3, _sqlite_regexp_replace)
     conn.create_function("BQ_REGEXP_CONTAINS", 2, _sqlite_regexp_contains)
     conn.create_function("BQ_REGEXP_EXTRACT", 2, _sqlite_regexp_extract)
     conn.create_function("BQ_STARTS_WITH", 2, _sqlite_starts_with)
     conn.create_function("BQ_JSON_SET", -1, _sqlite_json_set)
+    conn.create_function("BQ_SAFE_CAST_BOOL", 1, _sqlite_safe_cast_bool)
+    conn.create_function("BQ_SAFE_CAST_FLOAT64", 1, _sqlite_safe_cast_float64)
+    conn.create_function("BQ_SAFE_CAST_INT64", 1, _sqlite_safe_cast_int64)
+    conn.create_function("BQ_FARM_FINGERPRINT", 1, _sqlite_farm_fingerprint)
+    conn.create_function("BQ_MOD", 2, _sqlite_mod)
+    conn.create_function("BQ_DATE_SUB_DAYS", 2, _sqlite_date_sub_days)
     conn.create_function("SQRT", 1, math.sqrt)
     conn.create_function("POW", 2, math.pow)
     conn.create_function("CEIL", 1, math.ceil)
@@ -453,6 +530,7 @@ def _new_sqlite_bq_conn(current_date_utc: str = "2026-11-21") -> sqlite3.Connect
     conn.create_function("FORMAT_TIMESTAMP", 2, _sqlite_format_timestamp)
     conn.create_function("BQ_TIMESTAMP_TRUNC_HOUR", 1, _sqlite_timestamp_trunc_hour)
     conn.create_function("BQ_CURRENT_DATE", 0, lambda: current_date_utc)
+    conn.create_function("BQ_CURRENT_TIMESTAMP", 0, lambda: ts_now)
     conn.create_function("BQ_DATE", 1, lambda ts: str(ts)[:10] if ts is not None else None)
     conn.create_function("JSON_FORMAT", 1, lambda v: None if v is None else str(v))
     conn.create_function("TO_JSON_STRING", 1, lambda v: None if v is None else str(v))
@@ -543,39 +621,99 @@ def _rewrite_bq_qualify(node: exp.Select) -> exp.Expr:
     )
 
 
+def _rewrite_bq_try_cast(node: exp.TryCast) -> exp.Expr:
+    if isinstance(node.to, exp.DataType):
+        if node.to.is_type(exp.DataType.Type.BOOLEAN):
+            return exp.Anonymous(this="BQ_SAFE_CAST_BOOL", expressions=[node.this.copy()])
+        if node.to.is_type(exp.DataType.Type.FLOAT, exp.DataType.Type.DOUBLE):
+            return exp.Anonymous(this="BQ_SAFE_CAST_FLOAT64", expressions=[node.this.copy()])
+        if node.to.is_type(
+            exp.DataType.Type.INT,
+            exp.DataType.Type.BIGINT,
+            exp.DataType.Type.SMALLINT,
+            exp.DataType.Type.TINYINT,
+        ):
+            return exp.Anonymous(this="BQ_SAFE_CAST_INT64", expressions=[node.this.copy()])
+    return exp.Cast(this=node.this, to=node.to)
+
+
+_TIMESTAMP_UNIT_TO_MS: dict[str, int] = {
+    "MILLISECOND": 1,
+    "SECOND": 1_000,
+    "MINUTE": 60_000,
+    "HOUR": 3_600_000,
+    "DAY": 86_400_000,
+}
+
+_ANONYMOUS_SQLITE_FN_MAP: dict[str, str] = {
+    "JSON_SET": "BQ_JSON_SET",
+    "STARTS_WITH": "BQ_STARTS_WITH",
+    "UNIX_SECONDS": "BQ_UNIX_SECONDS",
+    "TIMESTAMP_SECONDS": "BQ_TIMESTAMP_SECONDS",
+    "DIV": "BQ_INT_DIV",
+    "FARM_FINGERPRINT": "BQ_FARM_FINGERPRINT",
+}
+
+_TEMPORAL_SINGLE_ARG_MAP: tuple[tuple[type[exp.Expr], str], ...] = (
+    (exp.TimestampTrunc, "BQ_TIMESTAMP_TRUNC_HOUR"),
+    (exp.Date, "BQ_DATE"),
+    (exp.UnixToTime, "BQ_TIMESTAMP_SECONDS"),
+    (exp.TimeToUnix, "BQ_UNIX_SECONDS"),
+    (exp.UnixSeconds, "BQ_UNIX_SECONDS"),
+)
+
+
+def _rewrite_bq_timestamp_sub(node: exp.TimestampSub) -> exp.Expr:
+    unit_node = node.args.get("unit")
+    unit_name = unit_node.name.upper() if isinstance(unit_node, exp.Expr) else "MILLISECOND"
+    factor = _TIMESTAMP_UNIT_TO_MS.get(unit_name, 1)
+    delta_expr: exp.Expr = (
+        node.expression.copy()
+        if factor == 1
+        else exp.Mul(this=node.expression.copy(), expression=exp.Literal.number(factor))
+    )
+    return exp.Anonymous(
+        this="BQ_TIMESTAMP_SUB_MS",
+        expressions=[node.this.copy(), delta_expr],
+    )
+
+
+_TEMPORAL_TWO_ARG_MAP: tuple[tuple[type[exp.Expr], str], ...] = (
+    (exp.TimestampDiff, "TIMESTAMP_DIFF_MS"),
+    (exp.DateSub, "BQ_DATE_SUB_DAYS"),
+    (exp.IntDiv, "BQ_INT_DIV"),
+)
+
+
 def _rewrite_bq_temporal(node: exp.Expr) -> exp.Expr | None:
-    rewritten: exp.Expr | None = None
-    if isinstance(node, exp.TimestampTrunc):
-        rewritten = exp.Anonymous(this="BQ_TIMESTAMP_TRUNC_HOUR", expressions=[node.this.copy()])
-    elif isinstance(node, exp.TimestampDiff):
-        rewritten = exp.Anonymous(
-            this="TIMESTAMP_DIFF_MS",
-            expressions=[node.this.copy(), node.expression.copy()],
-        )
-    elif isinstance(node, exp.TimestampSub):
-        rewritten = exp.Anonymous(
-            this="BQ_TIMESTAMP_SUB_MS",
-            expressions=[node.this.copy(), node.expression.copy()],
-        )
-    elif isinstance(node, exp.CurrentDate):
-        rewritten = exp.Anonymous(this="BQ_CURRENT_DATE", expressions=[])
-    elif isinstance(node, exp.Date):
-        rewritten = exp.Anonymous(this="BQ_DATE", expressions=[node.this.copy()])
-    elif isinstance(node, exp.TimeToStr):
-        rewritten = exp.Anonymous(
+    single = dict(_TEMPORAL_SINGLE_ARG_MAP).get(type(node))
+    if single is not None:
+        return exp.Anonymous(this=single, expressions=[node.this.copy()])
+    two = dict(_TEMPORAL_TWO_ARG_MAP).get(type(node))
+    if two is not None:
+        return exp.Anonymous(this=two, expressions=[node.this.copy(), node.expression.copy()])
+    if isinstance(node, exp.TimestampSub):
+        return _rewrite_bq_timestamp_sub(node)
+    if isinstance(node, (exp.CurrentDate, exp.CurrentTimestamp)):
+        fn = "BQ_CURRENT_DATE" if isinstance(node, exp.CurrentDate) else "BQ_CURRENT_TIMESTAMP"
+        return exp.Anonymous(this=fn, expressions=[])
+    if isinstance(node, exp.TimeToStr):
+        return exp.Anonymous(
             this="FORMAT_TIMESTAMP",
             expressions=[node.args["format"].copy(), node.this.copy()],
         )
-    elif isinstance(node, exp.UnixToTime):
-        rewritten = exp.Anonymous(this="BQ_TIMESTAMP_SECONDS", expressions=[node.this.copy()])
-    elif isinstance(node, (exp.TimeToUnix, exp.UnixSeconds)):
-        rewritten = exp.Anonymous(this="BQ_UNIX_SECONDS", expressions=[node.this.copy()])
-    elif isinstance(node, exp.IntDiv):
-        rewritten = exp.Anonymous(
-            this="BQ_INT_DIV",
-            expressions=[node.this.copy(), node.expression.copy()],
-        )
-    return rewritten
+    return None
+
+
+def _rewrite_bq_anonymous(node: exp.Anonymous) -> exp.Expr:
+    upper_name = node.name.upper()
+    mapped = _ANONYMOUS_SQLITE_FN_MAP.get(upper_name)
+    if mapped is not None:
+        return exp.Anonymous(this=mapped, expressions=[e.copy() for e in node.expressions])
+    cls = _SQLITE_AGG_MAP.get(upper_name)
+    if cls is not None:
+        return cls(this=node.expressions[0])
+    return node
 
 
 def _rewrite_bq_node_for_sqlite(node: exp.Expr) -> exp.Expr:  # noqa: C901, PLR0912
@@ -588,7 +726,12 @@ def _rewrite_bq_node_for_sqlite(node: exp.Expr) -> exp.Expr:  # noqa: C901, PLR0
             read="sqlite",
         )
     elif isinstance(node, exp.TryCast):
-        result = exp.Cast(this=node.this, to=node.to)
+        result = _rewrite_bq_try_cast(node)
+    elif isinstance(node, exp.Mod):
+        result = exp.Anonymous(
+            this="BQ_MOD",
+            expressions=[node.this.copy(), node.expression.copy()],
+        )
     elif (
         isinstance(node, exp.Cast)
         and isinstance(node.to, exp.DataType)
@@ -630,36 +773,14 @@ def _rewrite_bq_node_for_sqlite(node: exp.Expr) -> exp.Expr:  # noqa: C901, PLR0
     elif (temporal := _rewrite_bq_temporal(node)) is not None:
         result = temporal
     elif isinstance(node, exp.Anonymous) and node.expressions:
-        upper_name = node.name.upper()
-        if upper_name == "JSON_SET":
-            result = exp.Anonymous(
-                this="BQ_JSON_SET",
-                expressions=[e.copy() for e in node.expressions],
-            )
-        elif upper_name == "STARTS_WITH":
-            result = exp.Anonymous(
-                this="BQ_STARTS_WITH",
-                expressions=[e.copy() for e in node.expressions],
-            )
-        elif upper_name == "UNIX_SECONDS":
-            result = exp.Anonymous(
-                this="BQ_UNIX_SECONDS",
-                expressions=[e.copy() for e in node.expressions],
-            )
-        elif upper_name == "TIMESTAMP_SECONDS":
-            result = exp.Anonymous(
-                this="BQ_TIMESTAMP_SECONDS",
-                expressions=[e.copy() for e in node.expressions],
-            )
-        elif upper_name == "DIV":
-            result = exp.Anonymous(
-                this="BQ_INT_DIV",
-                expressions=[e.copy() for e in node.expressions],
-            )
-        else:
-            cls = _SQLITE_AGG_MAP.get(upper_name)
-            if cls is not None:
-                result = cls(this=node.expressions[0])
+        result = _rewrite_bq_anonymous(node)
+    elif isinstance(node, exp.FarmFingerprint):
+        fp_args = (
+            [e.copy() for e in node.expressions]
+            if node.expressions
+            else ([node.this.copy()] if node.this is not None else [])
+        )
+        result = exp.Anonymous(this="BQ_FARM_FINGERPRINT", expressions=fp_args)
     return result
 
 
@@ -913,6 +1034,7 @@ def _install_enterprise_views(conn: sqlite3.Connection) -> None:
     for path, name in (
         (step1_path, "agent_eval.v_default_model_pricing"),
         (step1_path, "agent_eval.v_step1_trace_waterfall"),
+        (step1_path, "agent_eval.v_step1_trace_eval"),
         (step1_path, "agent_eval.v_outcomes"),
         (step1_path, "agent_eval.v_infra_cost_estimate"),
         (step1_path, "agent_eval.v_attribution_coverage"),

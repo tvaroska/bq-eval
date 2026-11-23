@@ -273,19 +273,23 @@ def test_bq_query_cost_folded_into_cpvo_sql_sqlite_parity() -> None:
     assert cost_by_app["query-cost-app"] == pytest.approx(6.29, abs=1e-12)
 
     base = datetime(2026, 11, 22, 12, 0, 0, tzinfo=UTC)
-    root_span = make_span(
-        "trace-qc-01",
-        "sp-qc-01",
-        app_id="query-cost-app",
-        outcome_id="out-qc-1",
-        outcome_owner="query-cost-app",
-        input_tokens=10_000,
-        cached_input_tokens=0,
-        output_tokens=1_000,
-        thinking_tokens=0,
-        latency_ms=1000.0,
-        base_time=base,
-    )
+    spans = [
+        make_span(
+            f"trace-qc-{i:02d}",
+            f"sp-qc-{i:02d}",
+            app_id="query-cost-app",
+            outcome_id="out-qc-1" if i == 1 else f"out-qc-{i:02d}",
+            outcome_owner="query-cost-app",
+            input_tokens=10_000,
+            cached_input_tokens=0,
+            output_tokens=1_000,
+            thinking_tokens=0,
+            latency_ms=1000.0,
+            offset_s=i * 2,
+            base_time=base,
+        )
+        for i in range(1, 11)
+    ]
     close_span = make_span(
         "trace-qc-01",
         "sp-qc-close",
@@ -300,36 +304,40 @@ def test_bq_query_cost_folded_into_cpvo_sql_sqlite_parity() -> None:
         output_tokens=0,
         thinking_tokens=0,
         latency_ms=0.0,
-        offset_s=1,
+        offset_s=3,
         attributes={"outcome.status": "succeeded", "outcome.verified": "true"},
         base_time=base,
     )
+    all_spans = [*spans, close_span]
 
     conn = _new_sqlite_bq_conn()
     _create_enterprise_sqlite_fixture(conn)
     _install_enterprise_views(conn)
-    insert_enterprise_sqlite_span(conn, root_span)
-    insert_enterprise_sqlite_span(conn, close_span)
-    conn.execute(
+    for sp in all_spans:
+        insert_enterprise_sqlite_span(conn, sp)
+    conn.executemany(
         ENTERPRISE_EVAL_RESULTS_BASE_INSERT,
-        (
-            "ev-qc-1",
-            "run-qc",
-            "trace-qc-01",
-            "out-qc-1",
-            "query-cost-app",
-            "groundedness_4pt_v1",
-            "gemini-3.8-flash",
-            "CANARY_5PCT",
-            1,
-            "ok",
-            4,
-            1,
-            1_000,
-            100,
-            0,
-            (base + timedelta(seconds=5)).isoformat(),
-        ),
+        [
+            (
+                f"ev-qc-{i:02d}",
+                "run-qc",
+                f"trace-qc-{i:02d}",
+                "out-qc-1" if i == 1 else f"out-qc-{i:02d}",
+                "query-cost-app",
+                "groundedness_4pt_v1",
+                "gemini-3.8-flash",
+                "CANARY_5PCT",
+                1,
+                "ok",
+                4,
+                1,
+                1_000,
+                100,
+                0,
+                (base + timedelta(seconds=30 + i)).isoformat(),
+            )
+            for i in range(1, 11)
+        ],
     )
     sme_rows = (
         [("query-cost-app", "groundedness_4pt_v1", 1, 4, 1, 4, 1)] * 87
@@ -375,8 +383,8 @@ def test_bq_query_cost_folded_into_cpvo_sql_sqlite_parity() -> None:
     conn.close()
 
     twin = evaluate_traces_in_sqlite(
-        spans=[root_span, close_span],
-        judge_outcomes={"trace-qc-01": True},
+        spans=all_spans,
+        judge_outcomes={f"trace-qc-{i:02d}": True for i in range(1, 11)},
         sme_confusion=ConfusionMatrix(tp=87, fn=2, tn=7, fp=4),
         bq_query_jobs=[on_demand_row, slot_row],
     )["query-cost-app"]
@@ -385,8 +393,11 @@ def test_bq_query_cost_folded_into_cpvo_sql_sqlite_parity() -> None:
     assert float(bq_cpvo["bq_query_cost_usd"]) == pytest.approx(6.29, abs=1e-12)
     assert twin.bq_query_cost_usd == pytest.approx(6.29, abs=1e-12)
     assert float(bq_cpvo["cost_per_verified_outcome_usd"]) > 6.29
+    assert float(bq_sum["cost_per_verified_outcome_usd"]) > 0.629
     assert twin.cost_per_verified_outcome_usd is not None
-    assert twin.cost_per_verified_outcome_usd > 6.29
+    assert twin.cost_per_verified_outcome_usd > 0.629
+    assert twin.outcome_cost_per_verified_usd is not None
+    assert twin.outcome_cost_per_verified_usd > 6.29
 
 
 def test_dual_human_validation_unconfounded_cliff_and_wage_sensitivity() -> None:

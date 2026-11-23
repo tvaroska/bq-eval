@@ -136,6 +136,12 @@ def test_workbench_http_server_loopback_endpoints_via_proxy_bypass() -> None:
         with pytest.raises(urllib.error.HTTPError) as exc_info:
             opener.open(f"{base_url}/?corpus=nonexistent", timeout=5)
         assert exc_info.value.code == 400
+
+        with pytest.raises(urllib.error.HTTPError) as api_exc:
+            opener.open(f"{base_url}/api/v1/demo?corpus=nonexistent", timeout=5)
+        assert api_exc.value.code == 400
+        api_err = json.loads(api_exc.value.read().decode("utf-8"))
+        assert "error" in api_err
     finally:
         server.shutdown()
         server.server_close()

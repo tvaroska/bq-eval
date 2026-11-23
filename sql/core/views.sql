@@ -6,6 +6,77 @@
 
 -- View 1: Span-Level Waterfall with Effective-Dated 1P/3P Pricing, Burndown Weights & PayGo Multipliers
 CREATE OR REPLACE VIEW `agent_eval.v_trace_waterfall` AS
+WITH priced_spans AS (
+  SELECT
+    s.trace_id,
+    s.span_id,
+    s.parent_span_id,
+    s.span_name,
+    s.gcp_apphub_application_id,
+    s.service_name,
+    s.agent_name,
+    s.otel_span_kind,
+    s.span_kind,
+    s.model_name,
+    s.tool_name,
+    s.tool_call_status,
+    s.status_code,
+    s.rule0_pass,
+    s.finops_traffic_type,
+    s.serving_traffic_type,
+    s.request_type_header,
+    s.http_status_code,
+    s.outcome_id,
+    s.outcome_owner,
+    s.source_mode,
+    s.skill_id,
+    s.skill_version,
+    s.entity_id,
+    s.session_id,
+    s.turn_index,
+    s.start_time,
+    s.end_time,
+    s.receive_time,
+    s.latency_ms,
+    s.input_tokens,
+    s.cached_input_tokens,
+    s.cache_write_5m_tokens,
+    s.cache_write_1h_tokens,
+    s.output_tokens,
+    s.thinking_tokens,
+    s.attributes,
+    m.model_name AS m_model_name,
+    m.provider AS m_provider,
+    m.lifecycle_track AS m_lifecycle_track,
+    m.input_usd_per_1m AS m_input_usd_per_1m,
+    m.cached_input_usd_per_1m AS m_cached_input_usd_per_1m,
+    m.cache_write_5m_usd_per_1m AS m_cache_write_5m_usd_per_1m,
+    m.cache_write_1h_usd_per_1m AS m_cache_write_1h_usd_per_1m,
+    m.output_usd_per_1m AS m_output_usd_per_1m,
+    m.long_context_threshold_tokens AS m_long_context_threshold_tokens,
+    m.long_context_input_usd_per_1m AS m_long_context_input_usd_per_1m,
+    m.long_context_cached_usd_per_1m AS m_long_context_cached_usd_per_1m,
+    m.long_context_output_usd_per_1m AS m_long_context_output_usd_per_1m,
+    m.burndown_uncached_weight AS m_burndown_uncached_weight,
+    m.burndown_cached_weight AS m_burndown_cached_weight,
+    m.burndown_cache_write_5m_weight AS m_burndown_cache_write_5m_weight,
+    m.burndown_cache_write_1h_weight AS m_burndown_cache_write_1h_weight,
+    m.burndown_output_weight AS m_burndown_output_weight,
+    m.burndown_long_uncached_weight AS m_burndown_long_uncached_weight,
+    m.burndown_long_cached_weight AS m_burndown_long_cached_weight,
+    m.burndown_long_output_weight AS m_burndown_long_output_weight,
+    m.priority_paygo_multiplier AS m_priority_paygo_multiplier,
+    m.flex_paygo_multiplier AS m_flex_paygo_multiplier
+  FROM `agent_eval.otel_spans` AS s
+  LEFT JOIN `agent_eval.model_pricing_catalog` AS m
+    ON REGEXP_REPLACE(REGEXP_REPLACE(s.model_name, r'^.*/', ''), r'-(?:\d{3}|ga|rc|qcd|preview)$', '') = m.model_name
+    AND s.start_time >= m.effective_start
+    AND s.start_time < m.effective_end
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY s.trace_id, s.span_id
+    ORDER BY m.effective_start DESC, m.effective_end ASC
+  ) = 1
+)
 SELECT
   s.trace_id,
   s.span_id,
@@ -22,8 +93,8 @@ SELECT
   s.otel_span_kind,
   s.span_kind,
   s.model_name,
-  COALESCE(m.provider, d.provider, 'google') AS provider,
-  COALESCE(m.lifecycle_track, d.lifecycle_track, 'long_term_ga') AS lifecycle_track,
+  COALESCE(s.m_provider, d.provider, 'google') AS provider,
+  COALESCE(s.m_lifecycle_track, d.lifecycle_track, 'long_term_ga') AS lifecycle_track,
   s.tool_name,
   s.tool_call_status,
   s.status_code,
@@ -59,66 +130,66 @@ SELECT
   s.output_tokens,
   s.thinking_tokens,
   CASE
-    WHEN m.model_name IS NOT NULL THEN (m.long_context_threshold_tokens IS NOT NULL AND s.input_tokens > m.long_context_threshold_tokens)
+    WHEN s.m_model_name IS NOT NULL THEN (s.m_long_context_threshold_tokens IS NOT NULL AND s.input_tokens > s.m_long_context_threshold_tokens)
     ELSE (d.long_context_threshold_tokens IS NOT NULL AND s.input_tokens > d.long_context_threshold_tokens)
   END AS is_long_context_cliff,
   CASE
     WHEN (
       CASE
-        WHEN m.model_name IS NOT NULL THEN (m.long_context_threshold_tokens IS NOT NULL AND s.input_tokens > m.long_context_threshold_tokens)
+        WHEN s.m_model_name IS NOT NULL THEN (s.m_long_context_threshold_tokens IS NOT NULL AND s.input_tokens > s.m_long_context_threshold_tokens)
         ELSE (d.long_context_threshold_tokens IS NOT NULL AND s.input_tokens > d.long_context_threshold_tokens)
       END
     ) THEN
-      (COALESCE(m.burndown_long_uncached_weight, d.burndown_long_uncached_weight, 2.0) * GREATEST(0, s.input_tokens - s.cached_input_tokens - COALESCE(s.cache_write_5m_tokens, 0) - COALESCE(s.cache_write_1h_tokens, 0)))
-      + (COALESCE(m.burndown_long_cached_weight, d.burndown_long_cached_weight, 0.2) * s.cached_input_tokens)
-      + (COALESCE(m.burndown_cache_write_5m_weight, d.burndown_cache_write_5m_weight, 1.0) * COALESCE(s.cache_write_5m_tokens, 0))
-      + (COALESCE(m.burndown_cache_write_1h_weight, d.burndown_cache_write_1h_weight, 1.0) * COALESCE(s.cache_write_1h_tokens, 0))
-      + (COALESCE(m.burndown_long_output_weight, d.burndown_long_output_weight, 7.5) * (s.output_tokens + s.thinking_tokens))
+      (COALESCE(s.m_burndown_long_uncached_weight, d.burndown_long_uncached_weight, 2.0) * GREATEST(0, s.input_tokens - s.cached_input_tokens - COALESCE(s.cache_write_5m_tokens, 0) - COALESCE(s.cache_write_1h_tokens, 0)))
+      + (COALESCE(s.m_burndown_long_cached_weight, d.burndown_long_cached_weight, 0.2) * s.cached_input_tokens)
+      + (COALESCE(s.m_burndown_cache_write_5m_weight, d.burndown_cache_write_5m_weight, 1.0) * COALESCE(s.cache_write_5m_tokens, 0))
+      + (COALESCE(s.m_burndown_cache_write_1h_weight, d.burndown_cache_write_1h_weight, 1.0) * COALESCE(s.cache_write_1h_tokens, 0))
+      + (COALESCE(s.m_burndown_long_output_weight, d.burndown_long_output_weight, 7.5) * (s.output_tokens + s.thinking_tokens))
     ELSE
-      (COALESCE(m.burndown_uncached_weight, d.burndown_uncached_weight, 1.0) * GREATEST(0, s.input_tokens - s.cached_input_tokens - COALESCE(s.cache_write_5m_tokens, 0) - COALESCE(s.cache_write_1h_tokens, 0)))
-      + (COALESCE(m.burndown_cached_weight, d.burndown_cached_weight, 0.1) * s.cached_input_tokens)
-      + (COALESCE(m.burndown_cache_write_5m_weight, d.burndown_cache_write_5m_weight, 1.0) * COALESCE(s.cache_write_5m_tokens, 0))
-      + (COALESCE(m.burndown_cache_write_1h_weight, d.burndown_cache_write_1h_weight, 1.0) * COALESCE(s.cache_write_1h_tokens, 0))
-      + (COALESCE(m.burndown_output_weight, d.burndown_output_weight, 4.0) * (s.output_tokens + s.thinking_tokens))
+      (COALESCE(s.m_burndown_uncached_weight, d.burndown_uncached_weight, 1.0) * GREATEST(0, s.input_tokens - s.cached_input_tokens - COALESCE(s.cache_write_5m_tokens, 0) - COALESCE(s.cache_write_1h_tokens, 0)))
+      + (COALESCE(s.m_burndown_cached_weight, d.burndown_cached_weight, 0.1) * s.cached_input_tokens)
+      + (COALESCE(s.m_burndown_cache_write_5m_weight, d.burndown_cache_write_5m_weight, 1.0) * COALESCE(s.cache_write_5m_tokens, 0))
+      + (COALESCE(s.m_burndown_cache_write_1h_weight, d.burndown_cache_write_1h_weight, 1.0) * COALESCE(s.cache_write_1h_tokens, 0))
+      + (COALESCE(s.m_burndown_output_weight, d.burndown_output_weight, 4.0) * (s.output_tokens + s.thinking_tokens))
   END AS weighted_burndown_tokens,
   CASE
-    WHEN s.model_name IS NULL OR s.model_name = 'none' OR (s.input_tokens = 0 AND s.output_tokens = 0 AND s.thinking_tokens = 0) THEN
+    WHEN s.input_tokens = 0
+      AND s.output_tokens = 0
+      AND s.thinking_tokens = 0
+      AND COALESCE(s.cache_write_5m_tokens, 0) = 0
+      AND COALESCE(s.cache_write_1h_tokens, 0) = 0 THEN
       0.0
     ELSE
       (
         CASE UPPER(COALESCE(s.serving_traffic_type, 'STANDARD'))
-          WHEN 'PRIORITY' THEN COALESCE(m.priority_paygo_multiplier, d.priority_paygo_multiplier, 1.8)
-          WHEN 'FLEX' THEN COALESCE(m.flex_paygo_multiplier, d.flex_paygo_multiplier, 0.5)
+          WHEN 'PRIORITY' THEN COALESCE(s.m_priority_paygo_multiplier, d.priority_paygo_multiplier, 1.8)
+          WHEN 'FLEX' THEN COALESCE(s.m_flex_paygo_multiplier, d.flex_paygo_multiplier, 0.5)
           ELSE 1.0
         END
       ) * (
         CASE
           WHEN (
             CASE
-              WHEN m.model_name IS NOT NULL THEN (m.long_context_threshold_tokens IS NOT NULL AND s.input_tokens > m.long_context_threshold_tokens)
+              WHEN s.m_model_name IS NOT NULL THEN (s.m_long_context_threshold_tokens IS NOT NULL AND s.input_tokens > s.m_long_context_threshold_tokens)
               ELSE (d.long_context_threshold_tokens IS NOT NULL AND s.input_tokens > d.long_context_threshold_tokens)
             END
           ) THEN
-            (GREATEST(0, s.input_tokens - s.cached_input_tokens - COALESCE(s.cache_write_5m_tokens, 0) - COALESCE(s.cache_write_1h_tokens, 0)) / 1e6) * COALESCE(m.long_context_input_usd_per_1m, d.long_context_input_usd_per_1m)
-            + (s.cached_input_tokens / 1e6) * COALESCE(m.long_context_cached_usd_per_1m, d.long_context_cached_usd_per_1m)
-            + (COALESCE(s.cache_write_5m_tokens, 0) / 1e6) * COALESCE(m.cache_write_5m_usd_per_1m, d.cache_write_5m_usd_per_1m, m.long_context_input_usd_per_1m, d.long_context_input_usd_per_1m)
-            + (COALESCE(s.cache_write_1h_tokens, 0) / 1e6) * COALESCE(m.cache_write_1h_usd_per_1m, d.cache_write_1h_usd_per_1m, m.long_context_input_usd_per_1m, d.long_context_input_usd_per_1m)
-            + ((s.output_tokens + s.thinking_tokens) / 1e6) * COALESCE(m.long_context_output_usd_per_1m, d.long_context_output_usd_per_1m)
+            (GREATEST(0, s.input_tokens - s.cached_input_tokens - COALESCE(s.cache_write_5m_tokens, 0) - COALESCE(s.cache_write_1h_tokens, 0)) / 1e6) * COALESCE(s.m_long_context_input_usd_per_1m, d.long_context_input_usd_per_1m)
+            + (s.cached_input_tokens / 1e6) * COALESCE(s.m_long_context_cached_usd_per_1m, d.long_context_cached_usd_per_1m)
+            + (COALESCE(s.cache_write_5m_tokens, 0) / 1e6) * COALESCE(s.m_cache_write_5m_usd_per_1m, d.cache_write_5m_usd_per_1m, s.m_long_context_input_usd_per_1m, d.long_context_input_usd_per_1m)
+            + (COALESCE(s.cache_write_1h_tokens, 0) / 1e6) * COALESCE(s.m_cache_write_1h_usd_per_1m, d.cache_write_1h_usd_per_1m, s.m_long_context_input_usd_per_1m, d.long_context_input_usd_per_1m)
+            + ((s.output_tokens + s.thinking_tokens) / 1e6) * COALESCE(s.m_long_context_output_usd_per_1m, d.long_context_output_usd_per_1m)
           ELSE
-            (GREATEST(0, s.input_tokens - s.cached_input_tokens - COALESCE(s.cache_write_5m_tokens, 0) - COALESCE(s.cache_write_1h_tokens, 0)) / 1e6) * COALESCE(m.input_usd_per_1m, d.input_usd_per_1m)
-            + (s.cached_input_tokens / 1e6) * COALESCE(m.cached_input_usd_per_1m, d.cached_input_usd_per_1m)
-            + (COALESCE(s.cache_write_5m_tokens, 0) / 1e6) * COALESCE(m.cache_write_5m_usd_per_1m, d.cache_write_5m_usd_per_1m, m.input_usd_per_1m, d.input_usd_per_1m)
-            + (COALESCE(s.cache_write_1h_tokens, 0) / 1e6) * COALESCE(m.cache_write_1h_usd_per_1m, d.cache_write_1h_usd_per_1m, m.input_usd_per_1m, d.input_usd_per_1m)
-            + ((s.output_tokens + s.thinking_tokens) / 1e6) * COALESCE(m.output_usd_per_1m, d.output_usd_per_1m)
+            (GREATEST(0, s.input_tokens - s.cached_input_tokens - COALESCE(s.cache_write_5m_tokens, 0) - COALESCE(s.cache_write_1h_tokens, 0)) / 1e6) * COALESCE(s.m_input_usd_per_1m, d.input_usd_per_1m)
+            + (s.cached_input_tokens / 1e6) * COALESCE(s.m_cached_input_usd_per_1m, d.cached_input_usd_per_1m)
+            + (COALESCE(s.cache_write_5m_tokens, 0) / 1e6) * COALESCE(s.m_cache_write_5m_usd_per_1m, d.cache_write_5m_usd_per_1m, s.m_input_usd_per_1m, d.input_usd_per_1m)
+            + (COALESCE(s.cache_write_1h_tokens, 0) / 1e6) * COALESCE(s.m_cache_write_1h_usd_per_1m, d.cache_write_1h_usd_per_1m, s.m_input_usd_per_1m, d.input_usd_per_1m)
+            + ((s.output_tokens + s.thinking_tokens) / 1e6) * COALESCE(s.m_output_usd_per_1m, d.output_usd_per_1m)
         END
       )
   END AS span_cost_usd,
   s.attributes
-FROM `agent_eval.otel_spans` AS s
-LEFT JOIN `agent_eval.model_pricing_catalog` AS m
-  ON REGEXP_REPLACE(REGEXP_REPLACE(s.model_name, r'^.*/', ''), r'-(?:\d{3}|ga|rc|qcd|preview)$', '') = m.model_name
-  AND s.start_time >= m.effective_start
-  AND s.start_time < m.effective_end
+FROM priced_spans AS s
 LEFT JOIN `agent_eval.v_default_model_pricing` AS d
   ON REGEXP_REPLACE(REGEXP_REPLACE(s.model_name, r'^.*/', ''), r'-(?:\d{3}|ga|rc|qcd|preview)$', '') = d.model_name;
 
@@ -192,20 +263,47 @@ WITH trace_agg AS (
     SUM(w.output_tokens) AS total_output_tokens,
     SUM(w.thinking_tokens) AS total_thinking_tokens,
     SUM(w.weighted_burndown_tokens) AS weighted_burndown_tokens,
-    SUM(CASE WHEN w.finops_traffic_type = 'production_inference' THEN COALESCE(w.span_cost_usd, 0.0) ELSE 0.0 END) AS production_inference_usd,
-    SUM(CASE WHEN w.finops_traffic_type = 'conflict_escalation' THEN COALESCE(w.span_cost_usd, 0.0) ELSE 0.0 END) AS conflict_escalation_usd,
-    SUM(CASE WHEN w.finops_traffic_type = 'agent_gym_eval' THEN COALESCE(w.span_cost_usd, 0.0) ELSE 0.0 END) AS agent_gym_eval_usd,
-    SUM(CASE WHEN w.finops_traffic_type = 'autorater_judge' THEN COALESCE(w.span_cost_usd, 0.0) ELSE 0.0 END) AS span_autorater_judge_usd,
-    SUM(CASE WHEN w.finops_traffic_type = 'optimize' THEN COALESCE(w.span_cost_usd, 0.0) ELSE 0.0 END) AS optimize_usd,
-    SUM(
-      CASE
-        WHEN w.finops_traffic_type NOT IN ('production_inference', 'conflict_escalation', 'agent_gym_eval', 'autorater_judge', 'optimize')
-          THEN COALESCE(w.span_cost_usd, 0.0)
-        ELSE 0.0
-      END
+    IF(
+      COUNTIF(w.finops_traffic_type = 'production_inference' AND w.span_cost_usd IS NULL) > 0,
+      CAST(NULL AS FLOAT64),
+      SUM(CASE WHEN w.finops_traffic_type = 'production_inference' THEN w.span_cost_usd ELSE 0.0 END)
+    ) AS production_inference_usd,
+    IF(
+      COUNTIF(w.finops_traffic_type = 'conflict_escalation' AND w.span_cost_usd IS NULL) > 0,
+      CAST(NULL AS FLOAT64),
+      SUM(CASE WHEN w.finops_traffic_type = 'conflict_escalation' THEN w.span_cost_usd ELSE 0.0 END)
+    ) AS conflict_escalation_usd,
+    IF(
+      COUNTIF(w.finops_traffic_type = 'agent_gym_eval' AND w.span_cost_usd IS NULL) > 0,
+      CAST(NULL AS FLOAT64),
+      SUM(CASE WHEN w.finops_traffic_type = 'agent_gym_eval' THEN w.span_cost_usd ELSE 0.0 END)
+    ) AS agent_gym_eval_usd,
+    IF(
+      COUNTIF(w.finops_traffic_type = 'autorater_judge' AND w.span_cost_usd IS NULL) > 0,
+      CAST(NULL AS FLOAT64),
+      SUM(CASE WHEN w.finops_traffic_type = 'autorater_judge' THEN w.span_cost_usd ELSE 0.0 END)
+    ) AS span_autorater_judge_usd,
+    IF(
+      COUNTIF(w.finops_traffic_type = 'optimize' AND w.span_cost_usd IS NULL) > 0,
+      CAST(NULL AS FLOAT64),
+      SUM(CASE WHEN w.finops_traffic_type = 'optimize' THEN w.span_cost_usd ELSE 0.0 END)
+    ) AS optimize_usd,
+    IF(
+      COUNTIF(
+        w.finops_traffic_type NOT IN ('production_inference', 'conflict_escalation', 'agent_gym_eval', 'autorater_judge', 'optimize')
+        AND w.span_cost_usd IS NULL
+      ) > 0,
+      CAST(NULL AS FLOAT64),
+      SUM(
+        CASE
+          WHEN w.finops_traffic_type NOT IN ('production_inference', 'conflict_escalation', 'agent_gym_eval', 'autorater_judge', 'optimize')
+            THEN w.span_cost_usd
+          ELSE 0.0
+        END
+      )
     ) AS unclassified_usd,
     COUNTIF(w.span_cost_usd IS NULL) AS unpriced_spans,
-    SUM(COALESCE(w.span_cost_usd, 0.0)) AS trace_span_cost_usd
+    IF(COUNTIF(w.span_cost_usd IS NULL) > 0, CAST(NULL AS FLOAT64), SUM(w.span_cost_usd)) AS trace_span_cost_usd
   FROM `agent_eval.v_trace_waterfall` AS w
   GROUP BY w.trace_id
 )
@@ -279,13 +377,15 @@ step2_verdict_by_outcome AS (
   FROM latest_eval_verdicts
   GROUP BY outcome_id
 ),
-step2_spend_by_outcome AS (
+priced_outcome_evals AS (
   SELECT
+    e.eval_id,
     COALESCE(e.outcome_id, t.outcome_id) AS outcome_id,
-    SUM(
-      ((e.judge_input_tokens / 1e6) * COALESCE(m.input_usd_per_1m, d.input_usd_per_1m))
-      + (((e.judge_output_tokens + e.judge_thinking_tokens) / 1e6) * COALESCE(m.output_usd_per_1m, d.output_usd_per_1m))
-    ) AS eval_table_judge_usd
+    e.judge_input_tokens,
+    e.judge_output_tokens,
+    e.judge_thinking_tokens,
+    COALESCE(m.input_usd_per_1m, d.input_usd_per_1m) AS input_usd_per_1m,
+    COALESCE(m.output_usd_per_1m, d.output_usd_per_1m) AS output_usd_per_1m
   FROM deduped_eval_runs AS e
   LEFT JOIN `agent_eval.v_trace_sql_evaluation` AS t
     ON e.trace_id = t.trace_id
@@ -296,7 +396,20 @@ step2_spend_by_outcome AS (
   LEFT JOIN `agent_eval.v_default_model_pricing` AS d
     ON REGEXP_REPLACE(REGEXP_REPLACE(e.judge_model, r'^.*/', ''), r'-(?:\d{3}|ga|rc|qcd|preview)$', '') = d.model_name
   WHERE COALESCE(e.outcome_id, t.outcome_id) IS NOT NULL
-  GROUP BY 1
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY e.eval_id
+    ORDER BY m.effective_start DESC, m.effective_end ASC
+  ) = 1
+),
+step2_spend_by_outcome AS (
+  SELECT
+    outcome_id,
+    SUM(
+      ((judge_input_tokens / 1e6) * input_usd_per_1m)
+      + (((judge_output_tokens + judge_thinking_tokens) / 1e6) * output_usd_per_1m)
+    ) AS eval_table_judge_usd
+  FROM priced_outcome_evals
+  GROUP BY outcome_id
 ),
 step2_judge_by_outcome AS (
   SELECT
@@ -316,7 +429,7 @@ outcome_spans AS (
     COALESCE(o.outcome_status, 'open') AS outcome_status,
     CASE
       WHEN COALESCE(o.outcome_status, 'open') != 'succeeded' THEN FALSE
-      ELSE COALESCE(j.step2_all_pass, o.is_verified, FALSE)
+      ELSE COALESCE(o.is_verified, FALSE) AND COALESCE(j.step2_all_pass, TRUE)
     END AS is_verified,
     COUNT(DISTINCT w.trace_id) AS trace_count,
     COUNT(*) AS span_count,
@@ -324,8 +437,17 @@ outcome_spans AS (
     SUM(w.cached_input_tokens) AS cached_input_tokens,
     SUM(w.output_tokens) AS output_tokens,
     SUM(w.thinking_tokens) AS thinking_tokens,
-    SUM(CASE WHEN w.finops_traffic_type != 'autorater_judge' THEN w.span_cost_usd ELSE 0.0 END) AS measured_model_cost_usd,
-    SUM(CASE WHEN w.finops_traffic_type = 'autorater_judge' THEN w.span_cost_usd ELSE 0.0 END) AS span_judge_cost_usd,
+    COUNTIF(w.span_cost_usd IS NULL) AS unpriced_spans,
+    IF(
+      COUNTIF(w.finops_traffic_type != 'autorater_judge' AND w.span_cost_usd IS NULL) > 0,
+      CAST(NULL AS FLOAT64),
+      SUM(CASE WHEN w.finops_traffic_type != 'autorater_judge' THEN w.span_cost_usd ELSE 0.0 END)
+    ) AS measured_model_cost_usd,
+    IF(
+      COUNTIF(w.finops_traffic_type = 'autorater_judge' AND w.span_cost_usd IS NULL) > 0,
+      CAST(NULL AS FLOAT64),
+      SUM(CASE WHEN w.finops_traffic_type = 'autorater_judge' THEN w.span_cost_usd ELSE 0.0 END)
+    ) AS span_judge_cost_usd,
     COALESCE(MAX(j.eval_table_judge_usd), 0.0) AS outcome_table_judge_usd,
     MAX(r.storage_usd_per_outcome) AS app_storage_usd_per_outcome
   FROM `agent_eval.v_trace_waterfall` AS w
@@ -345,7 +467,7 @@ weighted_outcome_spans AS (
     os.*,
     SUM(os.span_count) OVER (PARTITION BY os.outcome_id) AS outcome_total_spans,
     SUM(os.span_count) OVER (PARTITION BY os.apphub_application_id) AS app_total_spans,
-    SUM(os.span_judge_cost_usd) OVER (PARTITION BY os.outcome_id) AS outcome_span_judge_usd
+    SUM(COALESCE(os.span_judge_cost_usd, 0.0)) OVER (PARTITION BY os.outcome_id) AS outcome_span_judge_usd
   FROM outcome_spans AS os
 ),
 allocated_outcome_spans AS (
@@ -376,19 +498,32 @@ SELECT
   SUM(os.input_tokens) AS total_input_tokens,
   SUM(os.output_tokens) AS total_output_tokens,
   SUM(os.thinking_tokens) AS total_thinking_tokens,
-  SUM(os.measured_model_cost_usd) AS measured_model_cost_usd,
-  SUM(os.measured_judge_cost_usd) AS measured_judge_cost_usd,
+  SUM(os.unpriced_spans) AS unpriced_spans,
+  IF(SUM(os.unpriced_spans) > 0, CAST(NULL AS FLOAT64), SUM(os.measured_model_cost_usd)) AS measured_model_cost_usd,
+  IF(SUM(os.unpriced_spans) > 0, CAST(NULL AS FLOAT64), SUM(os.measured_judge_cost_usd)) AS measured_judge_cost_usd,
   SUM(os.allocated_infra_cost_usd) AS estimated_infra_cost_usd,
   SUM(os.allocated_bq_query_cost_usd) AS bq_query_cost_usd,
-  SUM(os.measured_model_cost_usd + os.measured_judge_cost_usd) AS total_ai_cost_usd,
-  SUM(os.measured_model_cost_usd + os.measured_judge_cost_usd + os.allocated_infra_cost_usd + os.allocated_bq_query_cost_usd) AS total_cost_with_infra_usd,
-  SAFE_DIVIDE(
-    SUM(os.measured_model_cost_usd + os.measured_judge_cost_usd),
-    NULLIF(COUNT(DISTINCT IF(os.is_verified, os.outcome_id, NULL)), 0)
+  IF(SUM(os.unpriced_spans) > 0, CAST(NULL AS FLOAT64), SUM(os.measured_model_cost_usd + os.measured_judge_cost_usd)) AS total_ai_cost_usd,
+  IF(
+    SUM(os.unpriced_spans) > 0,
+    CAST(NULL AS FLOAT64),
+    SUM(os.measured_model_cost_usd + os.measured_judge_cost_usd + os.allocated_infra_cost_usd + os.allocated_bq_query_cost_usd)
+  ) AS total_cost_with_infra_usd,
+  IF(
+    SUM(os.unpriced_spans) > 0,
+    CAST(NULL AS FLOAT64),
+    SAFE_DIVIDE(
+      SUM(os.measured_model_cost_usd + os.measured_judge_cost_usd),
+      NULLIF(COUNT(DISTINCT IF(os.is_verified, os.outcome_id, NULL)), 0)
+    )
   ) AS cost_per_verified_outcome_ai_usd,
-  SAFE_DIVIDE(
-    SUM(os.measured_model_cost_usd + os.measured_judge_cost_usd + os.allocated_infra_cost_usd + os.allocated_bq_query_cost_usd),
-    NULLIF(COUNT(DISTINCT IF(os.is_verified, os.outcome_id, NULL)), 0)
+  IF(
+    SUM(os.unpriced_spans) > 0,
+    CAST(NULL AS FLOAT64),
+    SAFE_DIVIDE(
+      SUM(os.measured_model_cost_usd + os.measured_judge_cost_usd + os.allocated_infra_cost_usd + os.allocated_bq_query_cost_usd),
+      NULLIF(COUNT(DISTINCT IF(os.is_verified, os.outcome_id, NULL)), 0)
+    )
   ) AS cost_per_verified_outcome_usd
 FROM allocated_outcome_spans AS os
 GROUP BY
@@ -434,17 +569,19 @@ WITH trace_metrics AS (
     apphub_application_id,
     COUNT(*) AS total_traces,
     COUNTIF(primary_traffic_type IN ('production_inference', 'conflict_escalation')) AS production_traces,
+    COUNTIF(primary_traffic_type IN ('production_inference', 'conflict_escalation') AND rule0_pass) AS production_rule0_passing_traces,
     AVG(IF(rule0_pass, 1.0, 0.0)) AS rule0_pass_rate,
     AVG(IF(tool_error_count = 0, 1.0, 0.0)) AS tool_success_rate,
     APPROX_QUANTILES(trace_latency_ms, 100)[OFFSET(95)] AS p95_latency_ms,
     COALESCE(AVG(cache_hit_ratio), 0.0) AS avg_cache_hit_ratio,
     SUM(weighted_burndown_tokens) AS total_weighted_burndown_tokens,
-    SUM(production_inference_usd) AS production_inference_usd,
-    SUM(conflict_escalation_usd) AS conflict_escalation_usd,
-    SUM(agent_gym_eval_usd) AS agent_gym_eval_usd,
-    SUM(span_autorater_judge_usd) AS span_autorater_judge_usd,
-    SUM(optimize_usd) AS optimize_usd,
-    SUM(unclassified_usd) AS unclassified_usd
+    SUM(unpriced_spans) AS unpriced_spans,
+    IF(COUNTIF(production_inference_usd IS NULL) > 0, CAST(NULL AS FLOAT64), SUM(production_inference_usd)) AS production_inference_usd,
+    IF(COUNTIF(conflict_escalation_usd IS NULL) > 0, CAST(NULL AS FLOAT64), SUM(conflict_escalation_usd)) AS conflict_escalation_usd,
+    IF(COUNTIF(agent_gym_eval_usd IS NULL) > 0, CAST(NULL AS FLOAT64), SUM(agent_gym_eval_usd)) AS agent_gym_eval_usd,
+    IF(COUNTIF(span_autorater_judge_usd IS NULL) > 0, CAST(NULL AS FLOAT64), SUM(span_autorater_judge_usd)) AS span_autorater_judge_usd,
+    IF(COUNTIF(optimize_usd IS NULL) > 0, CAST(NULL AS FLOAT64), SUM(optimize_usd)) AS optimize_usd,
+    IF(COUNTIF(unclassified_usd IS NULL) > 0, CAST(NULL AS FLOAT64), SUM(unclassified_usd)) AS unclassified_usd
   FROM `agent_eval.v_trace_sql_evaluation`
   GROUP BY apphub_application_id
 ),
@@ -468,15 +605,16 @@ deduped_eval_results AS (
     ORDER BY evaluated_at DESC
   ) = 1
 ),
-judge_spend AS (
+priced_judge_evals AS (
   SELECT
+    e.eval_id,
     e.apphub_application_id,
     e.rubric_id,
-    COUNT(*) AS total_judge_invocations,
-    SUM(
-      ((e.judge_input_tokens / 1e6) * COALESCE(m.input_usd_per_1m, d.input_usd_per_1m))
-      + (((e.judge_output_tokens + e.judge_thinking_tokens) / 1e6) * COALESCE(m.output_usd_per_1m, d.output_usd_per_1m))
-    ) AS eval_table_judge_usd
+    e.judge_input_tokens,
+    e.judge_output_tokens,
+    e.judge_thinking_tokens,
+    COALESCE(m.input_usd_per_1m, d.input_usd_per_1m) AS input_usd_per_1m,
+    COALESCE(m.output_usd_per_1m, d.output_usd_per_1m) AS output_usd_per_1m
   FROM deduped_eval_results AS e
   LEFT JOIN `agent_eval.model_pricing_catalog` AS m
     ON REGEXP_REPLACE(REGEXP_REPLACE(e.judge_model, r'^.*/', ''), r'-(?:\d{3}|ga|rc|qcd|preview)$', '') = m.model_name
@@ -484,7 +622,29 @@ judge_spend AS (
     AND e.evaluated_at < m.effective_end
   LEFT JOIN `agent_eval.v_default_model_pricing` AS d
     ON REGEXP_REPLACE(REGEXP_REPLACE(e.judge_model, r'^.*/', ''), r'-(?:\d{3}|ga|rc|qcd|preview)$', '') = d.model_name
-  GROUP BY e.apphub_application_id, e.rubric_id
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY e.eval_id
+    ORDER BY m.effective_start DESC, m.effective_end ASC
+  ) = 1
+),
+judge_spend AS (
+  SELECT
+    apphub_application_id,
+    rubric_id,
+    COUNT(*) AS total_judge_invocations,
+    SUM(
+      ((judge_input_tokens / 1e6) * input_usd_per_1m)
+      + (((judge_output_tokens + judge_thinking_tokens) / 1e6) * output_usd_per_1m)
+    ) AS eval_table_judge_usd
+  FROM priced_judge_evals
+  GROUP BY apphub_application_id, rubric_id
+),
+app_judge_spend AS (
+  SELECT
+    apphub_application_id,
+    SUM(eval_table_judge_usd) AS app_eval_table_judge_usd
+  FROM judge_spend
+  GROUP BY apphub_application_id
 ),
 latest_rule0_evals AS (
   SELECT
@@ -513,41 +673,96 @@ stratum_judge AS (
   FROM latest_rule0_evals
   GROUP BY apphub_application_id, rubric_id, stratum_bucket
 ),
-stratum_weighted AS (
+app_rubrics AS (
   SELECT
-    sj.apphub_application_id,
-    sj.rubric_id,
-    sj.stratum_judged_count,
+    apphub_application_id,
+    rubric_id,
+    SUM(stratum_judged_count) AS total_judged_samples
+  FROM stratum_judge
+  GROUP BY apphub_application_id, rubric_id
+),
+stratum_coverage AS (
+  SELECT
+    ar.apphub_application_id,
+    ar.rubric_id,
+    ar.total_judged_samples,
+    sp.stratum_bucket,
+    sp.stratum_pop_count,
+    COALESCE(sj.stratum_judged_count, 0) AS stratum_judged_count,
     sj.stratum_pass_rate,
     SAFE_DIVIDE(
-      CAST(COALESCE(sp.stratum_pop_count, sj.stratum_judged_count) AS FLOAT64),
+      CAST(sp.stratum_pop_count AS FLOAT64),
       NULLIF(
-        SUM(CAST(COALESCE(sp.stratum_pop_count, sj.stratum_judged_count) AS FLOAT64)) OVER (
-          PARTITION BY sj.apphub_application_id, sj.rubric_id
+        SUM(CAST(sp.stratum_pop_count AS FLOAT64)) OVER (
+          PARTITION BY ar.apphub_application_id, ar.rubric_id
         ),
         0.0
       )
     ) AS stratum_weight
+  FROM app_rubrics AS ar
+  LEFT JOIN stratum_population AS sp
+    ON ar.apphub_application_id = sp.apphub_application_id
+  LEFT JOIN stratum_judge AS sj
+    ON ar.apphub_application_id = sj.apphub_application_id
+    AND ar.rubric_id = sj.rubric_id
+    AND sp.stratum_bucket = sj.stratum_bucket
+),
+unmatched_judge_strata AS (
+  SELECT
+    sj.apphub_application_id,
+    sj.rubric_id,
+    COUNT(*) AS unmatched_stratum_count
   FROM stratum_judge AS sj
   LEFT JOIN stratum_population AS sp
     ON sj.apphub_application_id = sp.apphub_application_id
     AND sj.stratum_bucket = sp.stratum_bucket
+  WHERE sp.stratum_pop_count IS NULL
+  GROUP BY sj.apphub_application_id, sj.rubric_id
 ),
 stratum_agg AS (
   SELECT
-    apphub_application_id,
-    rubric_id,
-    SUM(stratum_judged_count) AS judged_samples,
-    SUM(stratum_weight * stratum_pass_rate) AS raw_judge_pass_rate,
-    SUM(
-      POW(stratum_weight, 2)
-      * SAFE_DIVIDE(
-        stratum_pass_rate * (1.0 - stratum_pass_rate),
-        NULLIF(stratum_judged_count, 0)
+    sc.apphub_application_id,
+    sc.rubric_id,
+    MAX(sc.total_judged_samples) AS judged_samples,
+    (
+      COUNTIF(sc.stratum_pop_count IS NULL OR sc.stratum_judged_count = 0) > 0
+      OR COALESCE(MAX(ujs.unmatched_stratum_count), 0) > 0
+    ) AS has_incomplete_strata,
+    CASE
+      WHEN COUNTIF(sc.stratum_pop_count IS NULL OR sc.stratum_judged_count = 0) > 0
+        OR COALESCE(MAX(ujs.unmatched_stratum_count), 0) > 0
+        THEN NULL
+      ELSE SUM(sc.stratum_weight * sc.stratum_pass_rate)
+    END AS raw_judge_pass_rate,
+    CASE
+      WHEN COUNTIF(sc.stratum_pop_count IS NULL OR sc.stratum_judged_count = 0) > 0
+        OR COALESCE(MAX(ujs.unmatched_stratum_count), 0) > 0
+        THEN NULL
+      ELSE SUM(
+        POW(sc.stratum_weight, 2)
+        * SAFE_DIVIDE(
+          sc.stratum_pass_rate * (1.0 - sc.stratum_pass_rate),
+          NULLIF(sc.stratum_judged_count, 0)
+        )
       )
-    ) AS var_p_obs
-  FROM stratum_weighted
-  GROUP BY apphub_application_id, rubric_id
+    END AS var_p_obs,
+    CASE
+      WHEN COUNTIF(sc.stratum_pop_count IS NULL OR sc.stratum_judged_count = 0) > 0
+        OR COALESCE(MAX(ujs.unmatched_stratum_count), 0) > 0
+        THEN NULL
+      ELSE SAFE_DIVIDE(
+        1.0,
+        NULLIF(
+          SUM(SAFE_DIVIDE(POW(sc.stratum_weight, 2), NULLIF(sc.stratum_judged_count, 0))),
+          0.0
+        )
+      )
+    END AS kish_eff_n
+  FROM stratum_coverage AS sc
+  LEFT JOIN unmatched_judge_strata AS ujs
+    ON sc.apphub_application_id = ujs.apphub_application_id
+    AND sc.rubric_id = ujs.rubric_id
+  GROUP BY sc.apphub_application_id, sc.rubric_id
 ),
 judge_metrics AS (
   SELECT
@@ -555,8 +770,10 @@ judge_metrics AS (
     js.rubric_id,
     COALESCE(sa.judged_samples, 0) AS judged_samples,
     js.total_judge_invocations,
+    COALESCE(sa.has_incomplete_strata, FALSE) AS has_incomplete_strata,
     sa.raw_judge_pass_rate,
     sa.var_p_obs,
+    sa.kish_eff_n,
     js.eval_table_judge_usd
   FROM judge_spend AS js
   LEFT JOIN stratum_agg AS sa
@@ -655,25 +872,58 @@ calibrated AS (
     END AS required_ac2_gate,
     tm.total_traces,
     tm.production_traces,
+    tm.production_rule0_passing_traces,
     tm.rule0_pass_rate,
     tm.tool_success_rate,
     tm.p95_latency_ms,
     tm.avg_cache_hit_ratio,
     tm.total_weighted_burndown_tokens,
+    tm.unpriced_spans,
     COALESCE(jm.judged_samples, 0) AS judged_samples,
     jm.raw_judge_pass_rate,
+    sc.tp,
+    sc.fn,
+    sc.tn,
+    sc.fp,
     sc.tpr,
     sc.tnr,
     sc.gwet_ac2,
     (sc.tpr + sc.tnr - 1.0) AS youden_j,
+    -- Minimum-n guard: >= 10 judged traces, >= 5 positive & >= 5 negative SME reference labels,
+    -- complete stratum coverage, and positive Youden's J (both raw and Wilson-adjusted).
     CASE
-      WHEN COALESCE(jm.judged_samples, 0) = 0 OR jm.raw_judge_pass_rate IS NULL THEN 'UNJUDGED'
-      WHEN sc.tpr IS NULL OR sc.tnr IS NULL OR (sc.tpr + sc.tnr - 1.0) <= 1e-6 THEN 'UNCALIBRATED'
+      WHEN COALESCE(jm.judged_samples, 0) = 0 THEN 'UNJUDGED'
+      WHEN COALESCE(jm.has_incomplete_strata, FALSE)
+        OR jm.raw_judge_pass_rate IS NULL
+        OR COALESCE(jm.judged_samples, 0) < 10
+        OR sc.tpr IS NULL
+        OR sc.tnr IS NULL
+        OR (sc.tp + sc.fn) < 5
+        OR (sc.tn + sc.fp) < 5
+        OR (sc.tpr + sc.tnr - 1.0) <= 1e-6
+        OR (
+          SAFE_DIVIDE(CAST(sc.tp + 1 AS FLOAT64), CAST(sc.tp + sc.fn + 2 AS FLOAT64))
+          + SAFE_DIVIDE(CAST(sc.tn + 1 AS FLOAT64), CAST(sc.tn + sc.fp + 2 AS FLOAT64))
+          - 1.0
+        ) <= 1e-6
+        THEN 'UNCALIBRATED'
       ELSE 'CALIBRATED'
     END AS calibration_status,
     CASE
-      WHEN COALESCE(jm.judged_samples, 0) = 0 OR jm.raw_judge_pass_rate IS NULL THEN NULL
-      WHEN sc.tpr IS NULL OR sc.tnr IS NULL OR (sc.tpr + sc.tnr - 1.0) <= 1e-6 THEN NULL
+      WHEN COALESCE(jm.judged_samples, 0) < 10
+        OR COALESCE(jm.has_incomplete_strata, FALSE)
+        OR jm.raw_judge_pass_rate IS NULL
+        OR sc.tpr IS NULL
+        OR sc.tnr IS NULL
+        OR (sc.tp + sc.fn) < 5
+        OR (sc.tn + sc.fp) < 5
+        OR (sc.tpr + sc.tnr - 1.0) <= 1e-6
+        OR (
+          SAFE_DIVIDE(CAST(sc.tp + 1 AS FLOAT64), CAST(sc.tp + sc.fn + 2 AS FLOAT64))
+          + SAFE_DIVIDE(CAST(sc.tn + 1 AS FLOAT64), CAST(sc.tn + sc.fp + 2 AS FLOAT64))
+          - 1.0
+        ) <= 1e-6
+        THEN NULL
       ELSE LEAST(
         1.0,
         GREATEST(
@@ -682,13 +932,30 @@ calibrated AS (
         )
       )
     END AS theta_rg,
-    jm.var_p_obs AS var_p_obs,
-    SAFE_DIVIDE(sc.tpr * (1.0 - sc.tpr), NULLIF(sc.tp + sc.fn, 0)) AS var_tpr,
-    SAFE_DIVIDE(sc.tnr * (1.0 - sc.tnr), NULLIF(sc.tn + sc.fp, 0)) AS var_tnr,
+    CASE
+      WHEN jm.var_p_obs IS NOT NULL
+        AND jm.var_p_obs > 0.0
+        AND jm.raw_judge_pass_rate > 0.0
+        AND jm.raw_judge_pass_rate < 1.0
+        THEN GREATEST(
+          1.0,
+          SAFE_DIVIDE(jm.raw_judge_pass_rate * (1.0 - jm.raw_judge_pass_rate), jm.var_p_obs)
+        )
+      WHEN jm.kish_eff_n IS NOT NULL THEN GREATEST(1.0, jm.kish_eff_n)
+      ELSE CAST(COALESCE(jm.judged_samples, 0) AS FLOAT64)
+    END AS eff_n,
+    CAST(sc.tp + sc.fn + 2 AS FLOAT64) AS n_se_adj,
+    CAST(sc.tn + sc.fp + 2 AS FLOAT64) AS n_sp_adj,
+    SAFE_DIVIDE(CAST(sc.tp + 1 AS FLOAT64), CAST(sc.tp + sc.fn + 2 AS FLOAT64)) AS se_adj,
+    SAFE_DIVIDE(CAST(sc.tn + 1 AS FLOAT64), CAST(sc.tn + sc.fp + 2 AS FLOAT64)) AS sp_adj,
     tm.production_inference_usd,
     tm.conflict_escalation_usd,
     tm.agent_gym_eval_usd,
-    GREATEST(tm.span_autorater_judge_usd, COALESCE(jm.eval_table_judge_usd, 0.0)) AS autorater_judge_usd,
+    IF(
+      tm.span_autorater_judge_usd IS NULL,
+      CAST(NULL AS FLOAT64),
+      GREATEST(tm.span_autorater_judge_usd, COALESCE(ajs.app_eval_table_judge_usd, 0.0))
+    ) AS autorater_judge_usd,
     tm.optimize_usd,
     COALESCE(qc.bq_query_cost_usd, 0.0) AS bq_query_cost_usd,
     tm.unclassified_usd
@@ -697,11 +964,60 @@ calibrated AS (
     ON tm.apphub_application_id = r.apphub_application_id
   LEFT JOIN `agent_eval.v_bq_query_cost_attribution` AS qc
     ON tm.apphub_application_id = qc.apphub_application_id
+  LEFT JOIN app_judge_spend AS ajs
+    ON tm.apphub_application_id = ajs.apphub_application_id
   LEFT JOIN judge_metrics AS jm
     ON tm.apphub_application_id = jm.apphub_application_id
   LEFT JOIN sme_calibration AS sc
     ON tm.apphub_application_id = sc.apphub_application_id
     AND jm.rubric_id = sc.rubric_id
+),
+-- Lang & Reiczigel (2014) Eq. (6), (7), (16), (17) boundary-safe 95% CI parameters
+lr_ci_params AS (
+  SELECT
+    c.*,
+    (c.eff_n + 3.841458820694124) AS n_p_adj,
+    SAFE_DIVIDE(
+      c.raw_judge_pass_rate * c.eff_n + 1.920729410347062,
+      c.eff_n + 3.841458820694124
+    ) AS p_adj,
+    (c.se_adj + c.sp_adj - 1.0) AS j_adj
+  FROM calibrated AS c
+),
+lr_ci AS (
+  SELECT
+    p.*,
+    CASE
+      WHEN p.theta_rg IS NULL THEN NULL
+      ELSE LEAST(
+        1.0,
+        GREATEST(0.0, SAFE_DIVIDE(p.p_adj + p.sp_adj - 1.0, p.j_adj))
+      )
+    END AS theta_adj
+  FROM lr_ci_params AS p
+),
+lr_ci_final AS (
+  SELECT
+    l.*,
+    CASE
+      WHEN l.theta_adj IS NULL THEN NULL
+      ELSE 2.0 * 3.841458820694124 * (
+        l.theta_adj * SAFE_DIVIDE(l.se_adj * (1.0 - l.se_adj), l.n_se_adj)
+        - (1.0 - l.theta_adj) * SAFE_DIVIDE(l.sp_adj * (1.0 - l.sp_adj), l.n_sp_adj)
+      )
+    END AS dp_shift,
+    CASE
+      WHEN l.theta_adj IS NULL THEN NULL
+      ELSE SAFE_DIVIDE(
+        SQRT(
+          SAFE_DIVIDE(l.p_adj * (1.0 - l.p_adj), l.n_p_adj)
+          + POW(l.theta_adj, 2) * SAFE_DIVIDE(l.se_adj * (1.0 - l.se_adj), l.n_se_adj)
+          + POW(1.0 - l.theta_adj, 2) * SAFE_DIVIDE(l.sp_adj * (1.0 - l.sp_adj), l.n_sp_adj)
+        ),
+        l.j_adj
+      )
+    END AS se_theta_adj
+  FROM lr_ci AS l
 )
 SELECT
   c.apphub_application_id,
@@ -722,39 +1038,20 @@ SELECT
   c.raw_judge_pass_rate,
   c.theta_rg AS calibrated_pass_rate,
   CASE
-    WHEN c.theta_rg IS NULL THEN NULL
+    WHEN c.theta_adj IS NULL THEN NULL
     ELSE LEAST(
       1.0,
-      GREATEST(
-        0.0,
-        c.theta_rg - 1.959963984540054 * SAFE_DIVIDE(
-          SQRT(
-            COALESCE(c.var_p_obs, 0.0)
-            + POW(c.theta_rg, 2) * COALESCE(c.var_tpr, 0.0)
-            + POW(1.0 - c.theta_rg, 2) * COALESCE(c.var_tnr, 0.0)
-          ),
-          NULLIF(c.youden_j, 0.0)
-        )
-      )
+      GREATEST(0.0, c.theta_adj + c.dp_shift - 1.959963984540054 * c.se_theta_adj)
     )
   END AS calibrated_ci_95_lower,
   CASE
-    WHEN c.theta_rg IS NULL THEN NULL
+    WHEN c.theta_adj IS NULL THEN NULL
     ELSE LEAST(
       1.0,
-      GREATEST(
-        0.0,
-        c.theta_rg + 1.959963984540054 * SAFE_DIVIDE(
-          SQRT(
-            COALESCE(c.var_p_obs, 0.0)
-            + POW(c.theta_rg, 2) * COALESCE(c.var_tpr, 0.0)
-            + POW(1.0 - c.theta_rg, 2) * COALESCE(c.var_tnr, 0.0)
-          ),
-          NULLIF(c.youden_j, 0.0)
-        )
-      )
+      GREATEST(0.0, c.theta_adj + c.dp_shift + 1.959963984540054 * c.se_theta_adj)
     )
   END AS calibrated_ci_95_upper,
+  c.unpriced_spans,
   c.production_inference_usd,
   c.conflict_escalation_usd,
   c.agent_gym_eval_usd,
@@ -762,12 +1059,19 @@ SELECT
   c.optimize_usd,
   c.bq_query_cost_usd,
   c.unclassified_usd,
-  (c.production_inference_usd + c.conflict_escalation_usd + c.agent_gym_eval_usd + c.autorater_judge_usd + c.optimize_usd + c.bq_query_cost_usd + c.unclassified_usd) AS total_spend_usd,
+  IF(
+    c.unpriced_spans > 0,
+    CAST(NULL AS FLOAT64),
+    c.production_inference_usd + c.conflict_escalation_usd + c.agent_gym_eval_usd + c.autorater_judge_usd + c.optimize_usd + c.bq_query_cost_usd + c.unclassified_usd
+  ) AS total_spend_usd,
   CASE
-    WHEN c.theta_rg IS NULL OR c.theta_rg <= 0.0 OR c.rule0_pass_rate <= 0.0 OR c.production_traces = 0 THEN NULL
+    WHEN c.unpriced_spans > 0
+      OR c.theta_rg IS NULL
+      OR c.theta_rg <= 0.0
+      OR c.production_rule0_passing_traces = 0 THEN NULL
     ELSE SAFE_DIVIDE(
       c.production_inference_usd + c.conflict_escalation_usd + c.agent_gym_eval_usd + c.autorater_judge_usd + c.optimize_usd + c.bq_query_cost_usd + c.unclassified_usd,
-      c.production_traces * c.rule0_pass_rate * c.theta_rg
+      c.production_rule0_passing_traces * c.theta_rg
     )
   END AS cost_per_verified_outcome_usd
-FROM calibrated AS c;
+FROM lr_ci_final AS c;

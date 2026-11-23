@@ -164,15 +164,23 @@ FROM bq_query_jobs
 GROUP BY apphub_application_id;
 
 CREATE VIEW v_outcomes AS
-WITH ranked_closed AS (
+WITH outcome_step1 AS (
+    SELECT
+        outcome_id,
+        MIN(rule0_pass) AS outcome_step1_pass
+    FROM v_trace_sql_evaluation
+    WHERE outcome_id IS NOT NULL
+    GROUP BY outcome_id
+),
+ranked_closed AS (
     SELECT
         outcome_id,
         COALESCE(NULLIF(outcome_owner, ''), NULLIF(apphub_application_id, 'unregistered_app'), 'unregistered_app') AS outcome_owner,
-        COALESCE(outcome_status, 'succeeded') AS outcome_status,
+        COALESCE(NULLIF(TRIM(outcome_status), ''), 'unknown') AS outcome_status,
         source_mode,
         end_epoch_ms,
         CASE
-            WHEN COALESCE(outcome_status, 'succeeded') != 'succeeded' THEN 0
+            WHEN COALESCE(NULLIF(TRIM(outcome_status), ''), 'unknown') != 'succeeded' THEN 0
             ELSE COALESCE(outcome_verified, rule0_pass)
         END AS close_verified,
         ROW_NUMBER() OVER (
@@ -188,7 +196,7 @@ latest_closed AS (
     WHERE rn = 1
 ),
 verified_agg AS (
-    SELECT outcome_id, MIN(close_verified) AS is_verified
+    SELECT outcome_id, MIN(close_verified) AS close_verified
     FROM ranked_closed
     GROUP BY outcome_id
 )
@@ -198,9 +206,13 @@ SELECT
     l.outcome_status,
     l.source_mode,
     l.closed_at,
-    v.is_verified
+    CASE
+        WHEN v.close_verified = 1 AND COALESCE(os1.outcome_step1_pass, 0) = 1 THEN 1
+        ELSE 0
+    END AS is_verified
 FROM latest_closed AS l
-INNER JOIN verified_agg AS v ON l.outcome_id = v.outcome_id;
+INNER JOIN verified_agg AS v ON l.outcome_id = v.outcome_id
+LEFT JOIN outcome_step1 AS os1 ON l.outcome_id = os1.outcome_id;
 
 CREATE VIEW v_infra_cost_estimate AS
 SELECT
@@ -235,7 +247,8 @@ outcome_agg AS (
         COALESCE(o.outcome_owner, MAX(NULLIF(s.outcome_owner, '')), MAX(NULLIF(s.apphub_application_id, 'unregistered_app')), 'unregistered_app') AS apphub_application_id,
         CASE
             WHEN COALESCE(o.outcome_status, 'open') != 'succeeded' THEN 0
-            ELSE COALESCE(s2.step2_all_pass, o.is_verified, 0)
+            WHEN COALESCE(o.is_verified, 0) = 1 AND COALESCE(s2.step2_all_pass, 1) = 1 THEN 1
+            ELSE 0
         END AS is_verified,
         SUM(CASE WHEN s.finops_traffic_type != 'autorater_judge' THEN s.span_cost_usd ELSE 0.0 END) AS measured_model_cost_usd,
         SUM(CASE WHEN s.finops_traffic_type = 'autorater_judge' THEN s.span_cost_usd ELSE 0.0 END) AS span_judge_cost_usd,
@@ -292,6 +305,8 @@ WITH app_traces AS (
         COUNT(*) AS total_traces,
         SUM(CASE WHEN primary_traffic_type IN ('production_inference', 'conflict_escalation')
             THEN 1 ELSE 0 END) AS production_traces,
+        SUM(CASE WHEN primary_traffic_type IN ('production_inference', 'conflict_escalation') AND rule0_pass = 1
+            THEN 1 ELSE 0 END) AS production_rule0_passing_traces,
         AVG(CAST(rule0_pass AS REAL)) AS rule0_pass_rate,
         AVG(CASE WHEN tool_error_count = 0 THEN 1.0 ELSE 0.0 END) AS tool_success_rate,
         COALESCE(AVG(cache_hit_ratio), 0.0) AS avg_cache_hit_ratio,
@@ -344,32 +359,89 @@ stratum_judge AS (
     WHERE t.rule0_pass = 1
     GROUP BY t.apphub_application_id, e.rubric_id, stratum_bucket
 ),
-stratum_weighted AS (
+app_rubrics AS (
+    SELECT
+        apphub_application_id,
+        rubric_id,
+        SUM(stratum_judged_count) AS total_judged_samples
+    FROM stratum_judge
+    GROUP BY apphub_application_id, rubric_id
+),
+stratum_coverage AS (
+    SELECT
+        ar.apphub_application_id,
+        ar.rubric_id,
+        ar.total_judged_samples,
+        sp.stratum_bucket,
+        sp.stratum_pop_count,
+        COALESCE(sj.stratum_judged_count, 0) AS stratum_judged_count,
+        sj.stratum_pass_rate,
+        CASE
+            WHEN SUM(CAST(sp.stratum_pop_count AS REAL)) OVER (
+                PARTITION BY ar.apphub_application_id, ar.rubric_id
+            ) > 0.0
+            THEN CAST(sp.stratum_pop_count AS REAL)
+                / SUM(CAST(sp.stratum_pop_count AS REAL)) OVER (
+                    PARTITION BY ar.apphub_application_id, ar.rubric_id
+                )
+            ELSE NULL
+        END AS stratum_weight
+    FROM app_rubrics AS ar
+    LEFT JOIN stratum_pop AS sp
+        ON ar.apphub_application_id = sp.apphub_application_id
+    LEFT JOIN stratum_judge AS sj
+        ON ar.apphub_application_id = sj.apphub_application_id
+        AND ar.rubric_id = sj.rubric_id
+        AND sp.stratum_bucket = sj.stratum_bucket
+),
+unmatched_judge_strata AS (
     SELECT
         sj.apphub_application_id,
         sj.rubric_id,
-        sj.stratum_judged_count,
-        sj.stratum_pass_rate,
-        CAST(COALESCE(sp.stratum_pop_count, sj.stratum_judged_count) AS REAL)
-        / SUM(CAST(COALESCE(sp.stratum_pop_count, sj.stratum_judged_count) AS REAL))
-          OVER (PARTITION BY sj.apphub_application_id, sj.rubric_id) AS stratum_weight
+        COUNT(*) AS unmatched_stratum_count
     FROM stratum_judge AS sj
     LEFT JOIN stratum_pop AS sp
         ON sj.apphub_application_id = sp.apphub_application_id
         AND sj.stratum_bucket = sp.stratum_bucket
+    WHERE sp.stratum_pop_count IS NULL
+    GROUP BY sj.apphub_application_id, sj.rubric_id
 ),
 stratum_agg AS (
     SELECT
-        apphub_application_id,
-        rubric_id,
-        SUM(stratum_judged_count) AS judged_samples,
-        SUM(stratum_weight * stratum_pass_rate) AS raw_judge_pass_rate,
-        SUM(
-            POW(stratum_weight, 2.0)
-            * (stratum_pass_rate * (1.0 - stratum_pass_rate)) / stratum_judged_count
-        ) AS var_p_obs
-    FROM stratum_weighted
-    GROUP BY apphub_application_id, rubric_id
+        sc.apphub_application_id,
+        sc.rubric_id,
+        MAX(sc.total_judged_samples) AS judged_samples,
+        CASE
+            WHEN SUM(CASE WHEN sc.stratum_pop_count IS NULL OR sc.stratum_judged_count = 0 THEN 1 ELSE 0 END) > 0
+                OR COALESCE(MAX(ujs.unmatched_stratum_count), 0) > 0
+            THEN 1 ELSE 0
+        END AS has_incomplete_strata,
+        CASE
+            WHEN SUM(CASE WHEN sc.stratum_pop_count IS NULL OR sc.stratum_judged_count = 0 THEN 1 ELSE 0 END) > 0
+                OR COALESCE(MAX(ujs.unmatched_stratum_count), 0) > 0
+            THEN NULL
+            ELSE SUM(sc.stratum_weight * sc.stratum_pass_rate)
+        END AS raw_judge_pass_rate,
+        CASE
+            WHEN SUM(CASE WHEN sc.stratum_pop_count IS NULL OR sc.stratum_judged_count = 0 THEN 1 ELSE 0 END) > 0
+                OR COALESCE(MAX(ujs.unmatched_stratum_count), 0) > 0
+            THEN NULL
+            ELSE SUM(
+                POW(sc.stratum_weight, 2.0)
+                * (sc.stratum_pass_rate * (1.0 - sc.stratum_pass_rate)) / sc.stratum_judged_count
+            )
+        END AS var_p_obs,
+        CASE
+            WHEN SUM(CASE WHEN sc.stratum_pop_count IS NULL OR sc.stratum_judged_count = 0 THEN 1 ELSE 0 END) > 0
+                OR COALESCE(MAX(ujs.unmatched_stratum_count), 0) > 0
+            THEN NULL
+            ELSE 1.0 / SUM(POW(sc.stratum_weight, 2.0) / sc.stratum_judged_count)
+        END AS kish_eff_n
+    FROM stratum_coverage AS sc
+    LEFT JOIN unmatched_judge_strata AS ujs
+        ON sc.apphub_application_id = ujs.apphub_application_id
+        AND sc.rubric_id = ujs.rubric_id
+    GROUP BY sc.apphub_application_id, sc.rubric_id
 ),
 judge_spend AS (
     SELECT
@@ -380,13 +452,22 @@ judge_spend AS (
     INNER JOIN v_trace_sql_evaluation AS t ON e.trace_id = t.trace_id
     GROUP BY t.apphub_application_id, e.rubric_id
 ),
+app_judge_spend AS (
+    SELECT
+        apphub_application_id,
+        SUM(table_judge_usd) AS app_table_judge_usd
+    FROM judge_spend
+    GROUP BY apphub_application_id
+),
 judge_stats AS (
     SELECT
         js.apphub_application_id,
         js.rubric_id,
         COALESCE(sa.judged_samples, 0) AS judged_samples,
+        COALESCE(sa.has_incomplete_strata, 0) AS has_incomplete_strata,
         sa.raw_judge_pass_rate,
         sa.var_p_obs,
+        sa.kish_eff_n,
         js.table_judge_usd
     FROM judge_spend AS js
     LEFT JOIN stratum_agg AS sa
@@ -397,6 +478,8 @@ sme_rates AS (
     SELECT
         apphub_application_id,
         rubric_id,
+        CAST(tp AS REAL) AS tp,
+        CAST(tn AS REAL) AS tn,
         CAST(tp + fn AS REAL) AS n_pos,
         CAST(tn + fp AS REAL) AS n_neg,
         CASE WHEN (tp + fn) > 0 THEN CAST(tp AS REAL) / (tp + fn) ELSE NULL END AS tpr,
@@ -441,13 +524,20 @@ rg_base AS (
         COALESCE(j.judged_samples, 0) AS judged_samples,
         j.raw_judge_pass_rate,
         j.var_p_obs,
-        MAX(a.span_autorater_judge_usd, COALESCE(j.table_judge_usd, 0.0)) AS autorater_judge_usd,
+        j.kish_eff_n,
+        MAX(a.span_autorater_judge_usd, COALESCE(ajs.app_table_judge_usd, 0.0)) AS autorater_judge_usd,
         COALESCE(qc.bq_query_cost_usd, 0.0) AS bq_query_cost_usd,
+        s.tp,
+        s.tn,
         s.n_pos,
         s.n_neg,
         s.tpr,
         s.tnr,
         (s.tpr + s.tnr - 1.0) AS youden_j,
+        (s.n_pos + 2.0) AS n_se_adj,
+        (s.n_neg + 2.0) AS n_sp_adj,
+        CASE WHEN s.n_pos IS NOT NULL THEN (s.tp + 1.0) / (s.n_pos + 2.0) ELSE NULL END AS se_adj,
+        CASE WHEN s.n_neg IS NOT NULL THEN (s.tn + 1.0) / (s.n_neg + 2.0) ELSE NULL END AS sp_adj,
         g.gwet_ac2,
         cfg.irr_threshold,
         COALESCE(oc.total_outcomes, 0) AS outcome_total_count,
@@ -455,25 +545,49 @@ rg_base AS (
         oc.cost_per_verified_outcome_ai_usd AS outcome_cost_per_verified_ai_usd,
         oc.cost_per_verified_outcome_usd AS outcome_cost_per_verified_usd,
         CASE
-            WHEN COALESCE(j.judged_samples, 0) = 0 OR j.raw_judge_pass_rate IS NULL THEN 'UNJUDGED'
-            WHEN s.tpr IS NOT NULL AND s.tnr IS NOT NULL AND (s.tpr + s.tnr - 1.0) > 1e-6 THEN 'CALIBRATED'
-            ELSE 'UNCALIBRATED'
+            WHEN COALESCE(j.judged_samples, 0) = 0 THEN 'UNJUDGED'
+            WHEN COALESCE(j.has_incomplete_strata, 0) = 1
+                OR j.raw_judge_pass_rate IS NULL
+                OR COALESCE(j.judged_samples, 0) < 10
+                OR s.tpr IS NULL
+                OR s.tnr IS NULL
+                OR s.n_pos < 5.0
+                OR s.n_neg < 5.0
+                OR (s.tpr + s.tnr - 1.0) <= 1e-6
+                OR (((s.tp + 1.0) / (s.n_pos + 2.0)) + ((s.tn + 1.0) / (s.n_neg + 2.0)) - 1.0) <= 1e-6
+                THEN 'UNCALIBRATED'
+            ELSE 'CALIBRATED'
         END AS calibration_status,
         CASE
-            WHEN COALESCE(j.judged_samples, 0) > 0
+            WHEN COALESCE(j.judged_samples, 0) >= 10
+                AND COALESCE(j.has_incomplete_strata, 0) = 0
                 AND j.raw_judge_pass_rate IS NOT NULL
                 AND s.tpr IS NOT NULL
                 AND s.tnr IS NOT NULL
+                AND s.n_pos >= 5.0
+                AND s.n_neg >= 5.0
                 AND (s.tpr + s.tnr - 1.0) > 1e-6
+                AND (((s.tp + 1.0) / (s.n_pos + 2.0)) + ((s.tn + 1.0) / (s.n_neg + 2.0)) - 1.0) > 1e-6
             THEN MIN(1.0, MAX(0.0, (j.raw_judge_pass_rate + s.tnr - 1.0) / (s.tpr + s.tnr - 1.0)))
             ELSE NULL
-        END AS calibrated_pass_rate
+        END AS calibrated_pass_rate,
+        CASE
+            WHEN j.var_p_obs IS NOT NULL
+                AND j.var_p_obs > 0.0
+                AND j.raw_judge_pass_rate > 0.0
+                AND j.raw_judge_pass_rate < 1.0
+            THEN MAX(1.0, (j.raw_judge_pass_rate * (1.0 - j.raw_judge_pass_rate)) / j.var_p_obs)
+            WHEN j.kish_eff_n IS NOT NULL THEN MAX(1.0, j.kish_eff_n)
+            ELSE CAST(COALESCE(j.judged_samples, 0) AS REAL)
+        END AS eff_n
     FROM app_traces AS a
     CROSS JOIN eval_config AS cfg
     INNER JOIN p95_latencies AS p
         ON a.apphub_application_id = p.apphub_application_id
     LEFT JOIN v_bq_query_cost_attribution AS qc
         ON a.apphub_application_id = qc.apphub_application_id
+    LEFT JOIN app_judge_spend AS ajs
+        ON a.apphub_application_id = ajs.apphub_application_id
     LEFT JOIN judge_stats AS j
         ON a.apphub_application_id = j.apphub_application_id
     LEFT JOIN sme_rates AS s
@@ -485,20 +599,46 @@ rg_base AS (
     LEFT JOIN v_cost_per_verified_outcome AS oc
         ON a.apphub_application_id = oc.apphub_application_id
 ),
+lr_ci_params AS (
+    SELECT
+        *,
+        (eff_n + 3.841458820694124) AS n_p_adj,
+        (raw_judge_pass_rate * eff_n + 1.920729410347062) / (eff_n + 3.841458820694124) AS p_adj,
+        (se_adj + sp_adj - 1.0) AS j_adj,
+        (production_inference_usd + conflict_escalation_usd + agent_gym_eval_usd + autorater_judge_usd + optimize_usd + bq_query_cost_usd + unclassified_usd) AS total_spend_usd
+    FROM rg_base
+),
+lr_ci_theta AS (
+    SELECT
+        *,
+        CASE
+            WHEN calibrated_pass_rate IS NOT NULL
+            THEN MIN(1.0, MAX(0.0, (p_adj + sp_adj - 1.0) / j_adj))
+            ELSE NULL
+        END AS theta_adj
+    FROM lr_ci_params
+),
 rg_ci AS (
     SELECT
         *,
         CASE
-            WHEN calibrated_pass_rate IS NOT NULL THEN
-                SQRT(
-                    COALESCE(var_p_obs, 0.0)
-                    + POW(calibrated_pass_rate, 2.0) * (tpr * (1.0 - tpr) / n_pos)
-                    + POW(1.0 - calibrated_pass_rate, 2.0) * (tnr * (1.0 - tnr) / n_neg)
-                ) / youden_j
+            WHEN theta_adj IS NOT NULL THEN
+                2.0 * 3.841458820694124 * (
+                    theta_adj * (se_adj * (1.0 - se_adj) / n_se_adj)
+                    - (1.0 - theta_adj) * (sp_adj * (1.0 - sp_adj) / n_sp_adj)
+                )
             ELSE NULL
-        END AS se_theta,
-        (production_inference_usd + conflict_escalation_usd + agent_gym_eval_usd + autorater_judge_usd + optimize_usd + bq_query_cost_usd + unclassified_usd) AS total_spend_usd
-    FROM rg_base
+        END AS dp_shift,
+        CASE
+            WHEN theta_adj IS NOT NULL THEN
+                SQRT(
+                    (p_adj * (1.0 - p_adj) / n_p_adj)
+                    + POW(theta_adj, 2.0) * (se_adj * (1.0 - se_adj) / n_se_adj)
+                    + POW(1.0 - theta_adj, 2.0) * (sp_adj * (1.0 - sp_adj) / n_sp_adj)
+                ) / j_adj
+            ELSE NULL
+        END AS se_theta
+    FROM lr_ci_theta
 )
 SELECT
     apphub_application_id,
@@ -515,10 +655,10 @@ SELECT
     raw_judge_pass_rate,
     calibrated_pass_rate,
     CASE WHEN se_theta IS NOT NULL
-        THEN MIN(1.0, MAX(0.0, calibrated_pass_rate - 1.959963984540054 * se_theta))
+        THEN MIN(1.0, MAX(0.0, theta_adj + dp_shift - 1.959963984540054 * se_theta))
         ELSE NULL END AS calibrated_ci_95_lower,
     CASE WHEN se_theta IS NOT NULL
-        THEN MIN(1.0, MAX(0.0, calibrated_pass_rate + 1.959963984540054 * se_theta))
+        THEN MIN(1.0, MAX(0.0, theta_adj + dp_shift + 1.959963984540054 * se_theta))
         ELSE NULL END AS calibrated_ci_95_upper,
     gwet_ac2,
     CASE WHEN gwet_ac2 IS NOT NULL
@@ -535,9 +675,8 @@ SELECT
     CASE
         WHEN calibrated_pass_rate IS NOT NULL
             AND calibrated_pass_rate > 0.0
-            AND rule0_pass_rate > 0.0
-            AND production_traces > 0
-        THEN total_spend_usd / (production_traces * rule0_pass_rate * calibrated_pass_rate)
+            AND production_rule0_passing_traces > 0
+        THEN total_spend_usd / (production_rule0_passing_traces * calibrated_pass_rate)
         ELSE NULL
     END AS cost_per_verified_outcome_usd,
     outcome_total_count,

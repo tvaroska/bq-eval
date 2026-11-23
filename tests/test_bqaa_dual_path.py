@@ -105,7 +105,7 @@ def test_bqaa_adapter_sql_contract_and_strict_fallback() -> None:
 def test_bqaa_mode_a_and_mode_c_transpile_to_sqlite_with_null_shadow_outcome_and_tool_error() -> (
     None
 ):
-    """Transpile `v_bqaa_otel_spans` (Mode A) and `v_otel_allspans_only` + Hybrid `UNION ALL` (Mode C) in SQLite."""
+    """Transpile shipped Mode A and Mode C span & payload views directly in SQLite."""
     from tests.sql_helpers import (
         _extract_view_sql_text,
         _new_sqlite_bq_conn,
@@ -117,11 +117,31 @@ def test_bqaa_mode_a_and_mode_c_transpile_to_sqlite_with_null_shadow_outcome_and
     bqaa_view_sql = _transpile_bq_view_to_sqlite(
         _extract_view_sql_text(adapter_path, "agent_eval.v_bqaa_otel_spans")
     )
+    bqaa_payloads_sql = _transpile_bq_view_to_sqlite(
+        _extract_view_sql_text(adapter_path, "agent_eval.v_bqaa_trace_payloads")
+    )
     allspans_view_sql = _transpile_bq_view_to_sqlite(
         _extract_view_sql_text(ddl_path, "agent_eval.v_otel_allspans_only")
         .replace("`obs_traces._AllSpans`", "`_AllSpans`")
         .replace("status.code", "status_code_raw")
         .replace("resource.attributes", "resource_attributes")
+    )
+    logs_payloads_sql = _transpile_bq_view_to_sqlite(
+        _extract_view_sql_text(ddl_path, "agent_eval.v_otel_logs_payloads_only")
+        .replace("`obs_logs._AllLogs`", "`_AllLogs`")
+        .replace("l.resource.labels", "l.resource_labels")
+    )
+    mode_a_spans_sql = _transpile_bq_view_to_sqlite(
+        _extract_view_sql_text(adapter_path, "agent_eval.v_mode_a_otel_spans")
+    )
+    mode_a_payloads_sql = _transpile_bq_view_to_sqlite(
+        _extract_view_sql_text(adapter_path, "agent_eval.v_mode_a_trace_payloads")
+    )
+    mode_c_spans_sql = _transpile_bq_view_to_sqlite(
+        _extract_view_sql_text(adapter_path, "agent_eval.v_mode_c_hybrid_otel_spans")
+    )
+    mode_c_payloads_sql = _transpile_bq_view_to_sqlite(
+        _extract_view_sql_text(adapter_path, "agent_eval.v_mode_c_hybrid_trace_payloads")
     )
 
     conn = _new_sqlite_bq_conn()
@@ -163,9 +183,38 @@ def test_bqaa_mode_a_and_mode_c_transpile_to_sqlite_with_null_shadow_outcome_and
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE _AllLogs (
+            trace TEXT,
+            timestamp TEXT,
+            resource_labels TEXT,
+            json_payload TEXT
+        )
+        """
+    )
+    conn.execute(
+        "CREATE TABLE completions (_FILE_NAME TEXT, payload TEXT, user_prompt TEXT, retrieved_context TEXT, final_response TEXT)"
+    )
     conn.executemany(
         "INSERT INTO agent_events VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         [
+            (
+                "ev-shared-user",
+                "2026-11-21T12:00:00+00:00",
+                "USER_MESSAGE_RECEIVED",
+                "shared_agent",
+                "s1",
+                "inv-1",
+                "0123456789abcdef0123456789abcdef",
+                None,
+                None,
+                json.dumps({"text": "BQAA prompt"}),
+                json.dumps({"custom_metadata": {"apphub.application.id": "bqaa-app"}}),
+                None,
+                "OK",
+                None,
+            ),
             (
                 "ev-shared",
                 "2026-11-21T12:00:01+00:00",
@@ -173,7 +222,7 @@ def test_bqaa_mode_a_and_mode_c_transpile_to_sqlite_with_null_shadow_outcome_and
                 "shared_agent",
                 "s1",
                 "inv-1",
-                "tr-shared",
+                "0123456789abcdef0123456789abcdef",
                 "sp-bqaa-shared",
                 None,
                 "{}",
@@ -187,6 +236,22 @@ def test_bqaa_mode_a_and_mode_c_transpile_to_sqlite_with_null_shadow_outcome_and
                     }
                 ),
                 '{"total_ms": 100}',
+                "OK",
+                None,
+            ),
+            (
+                "ev-shadow-user",
+                "2026-11-21T12:00:01+00:00",
+                "USER_MESSAGE_RECEIVED",
+                "shadow_agent",
+                "s2",
+                "inv-shadow",
+                "tr-bqaa-only",
+                None,
+                None,
+                json.dumps({"text": "Shadow prompt"}),
+                "{}",
+                None,
                 "OK",
                 None,
             ),
@@ -211,7 +276,7 @@ def test_bqaa_mode_a_and_mode_c_transpile_to_sqlite_with_null_shadow_outcome_and
     conn.execute(
         "INSERT INTO _AllSpans VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
         (
-            "tr-shared",
+            "0123456789abcdef0123456789abcdef",
             "sp-otel-shared",
             None,
             "invoke_agent",
@@ -231,36 +296,67 @@ def test_bqaa_mode_a_and_mode_c_transpile_to_sqlite_with_null_shadow_outcome_and
             ),
         ),
     )
-
-    conn.execute(f"CREATE VIEW v_bqaa_otel_spans AS {bqaa_view_sql}")
-    conn.execute(f"CREATE VIEW v_otel_allspans_only AS {allspans_view_sql}")
     conn.execute(
-        """
-        CREATE VIEW otel_spans_hybrid AS
-        SELECT * FROM v_otel_allspans_only
-        UNION ALL
-        SELECT b.* FROM v_bqaa_otel_spans AS b
-        WHERE NOT EXISTS (SELECT 1 FROM v_otel_allspans_only AS f WHERE f.trace_id = b.trace_id)
-        """
+        "INSERT INTO _AllLogs VALUES (?,?,?,?)",
+        (
+            "projects/p/traces/0123456789abcdef0123456789abcdef",
+            "2026-11-21T12:00:01+00:00",
+            json.dumps({"apphub.application.id": "otel-stamped-app"}),
+            json.dumps(
+                {
+                    "gen_ai.prompt": "OTel prompt wins",
+                    "gen_ai.retrieved_context": "otel ctx",
+                    "gen_ai.completion": "otel resp",
+                }
+            ),
+        ),
     )
 
-    bqaa_err = conn.execute(
-        "SELECT outcome_id, tool_call_status, gcp_apphub_application_id "
-        "FROM v_bqaa_otel_spans WHERE trace_id = 'tr-bqaa-only'"
-    ).fetchone()
-    assert bqaa_err["outcome_id"] is None
-    assert bqaa_err["tool_call_status"] == "TIMEOUT"
-    assert bqaa_err["gcp_apphub_application_id"] is None
+    conn.execute(f"CREATE VIEW v_bqaa_otel_spans AS {bqaa_view_sql}")
+    conn.execute(f"CREATE VIEW v_bqaa_trace_payloads AS {bqaa_payloads_sql}")
+    conn.execute(f"CREATE VIEW v_otel_allspans_only AS {allspans_view_sql}")
+    conn.execute(f"CREATE VIEW v_otel_logs_payloads_only AS {logs_payloads_sql}")
+    conn.execute(f"CREATE VIEW v_mode_a_otel_spans AS {mode_a_spans_sql}")
+    conn.execute(f"CREATE VIEW v_mode_a_trace_payloads AS {mode_a_payloads_sql}")
+    conn.execute(f"CREATE VIEW v_mode_c_hybrid_otel_spans AS {mode_c_spans_sql}")
+    conn.execute(f"CREATE VIEW v_mode_c_hybrid_trace_payloads AS {mode_c_payloads_sql}")
 
-    hybrid_rows = {
-        str(r["trace_id"]): r for r in conn.execute("SELECT * FROM otel_spans_hybrid").fetchall()
+    mode_a_spans = {
+        str(r["trace_id"]): r for r in conn.execute("SELECT * FROM v_mode_a_otel_spans").fetchall()
+    }
+    mode_a_payloads = {
+        str(r["trace_id"]): r
+        for r in conn.execute("SELECT * FROM v_mode_a_trace_payloads").fetchall()
+    }
+    mode_c_spans = {
+        str(r["trace_id"]): r
+        for r in conn.execute("SELECT * FROM v_mode_c_hybrid_otel_spans").fetchall()
+    }
+    mode_c_payloads = {
+        str(r["trace_id"]): r
+        for r in conn.execute("SELECT * FROM v_mode_c_hybrid_trace_payloads").fetchall()
     }
     conn.close()
-    assert set(hybrid_rows) == {"tr-shared", "tr-bqaa-only"}
-    assert hybrid_rows["tr-shared"]["span_id"] == "sp-otel-shared"
-    assert hybrid_rows["tr-shared"]["gcp_apphub_application_id"] == "otel-stamped-app"
-    assert hybrid_rows["tr-bqaa-only"]["outcome_id"] is None
-    assert hybrid_rows["tr-bqaa-only"]["tool_call_status"] == "TIMEOUT"
+
+    shared_id = "0123456789abcdef0123456789abcdef"
+    assert set(mode_a_spans) == {shared_id, "tr-bqaa-only"}
+    assert mode_a_spans["tr-bqaa-only"]["outcome_id"] is None
+    assert mode_a_spans["tr-bqaa-only"]["tool_call_status"] == "TIMEOUT"
+    assert mode_a_spans["tr-bqaa-only"]["gcp_apphub_application_id"] is None
+    assert mode_a_payloads[shared_id]["user_prompt"] == "BQAA prompt"
+    assert mode_a_payloads["tr-bqaa-only"]["apphub_application_id"] == "unregistered_app"
+
+    assert set(mode_c_spans) == {shared_id, "tr-bqaa-only"}
+    assert mode_c_spans[shared_id]["span_id"] == "sp-otel-shared"
+    assert mode_c_spans[shared_id]["gcp_apphub_application_id"] == "otel-stamped-app"
+    assert mode_c_spans["tr-bqaa-only"]["outcome_id"] is None
+    assert mode_c_spans["tr-bqaa-only"]["tool_call_status"] == "TIMEOUT"
+
+    assert set(mode_c_payloads) == {shared_id, "tr-bqaa-only"}
+    assert mode_c_payloads[shared_id]["user_prompt"] == "OTel prompt wins"
+    assert mode_c_payloads[shared_id]["apphub_application_id"] == "otel-stamped-app"
+    assert mode_c_payloads["tr-bqaa-only"]["user_prompt"] == "Shadow prompt"
+    assert mode_c_payloads["tr-bqaa-only"]["apphub_application_id"] == "unregistered_app"
 
 
 def test_bqaa_python_twin_dedup_strict_fallback_and_sqlite_eval() -> None:
@@ -448,7 +544,10 @@ def test_bqaa_python_twin_dedup_strict_fallback_and_sqlite_eval() -> None:
         sme_confusion=ConfusionMatrix(tp=87, fn=2, tn=7, fp=4),
     )
     assert set(summaries) == {"meridian-loan-consolidation", "unregistered_app"}
-    assert summaries["meridian-loan-consolidation"].calibration_status == "CALIBRATED"
+    # Single judged trace fails closed under the minimum-n >= 10 calibration guard.
+    assert summaries["meridian-loan-consolidation"].judged_samples == 1
+    assert summaries["meridian-loan-consolidation"].calibration_status == "UNCALIBRATED"
+    assert summaries["meridian-loan-consolidation"].calibrated_pass_rate is None
     assert summaries["unregistered_app"].calibration_status == "UNJUDGED"
     assert summaries["unregistered_app"].calibrated_pass_rate is None
 

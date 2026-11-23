@@ -23,15 +23,17 @@ def open_sqlite_twin() -> sqlite3.Connection:
 
 
 def _parse_outcome_verified_flag(raw_value: object) -> int | None:
+    """Parse `outcome.verified` fail-closed: absent/blank -> None, `'true'` -> 1, anything else -> 0."""
+    if raw_value is None:
+        return None
     if isinstance(raw_value, bool):
         return 1 if raw_value else 0
     if isinstance(raw_value, str):
         lowered = raw_value.strip().lower()
-        if lowered == "true":
-            return 1
-        if lowered == "false":
-            return 0
-    return None
+        if not lowered:
+            return None
+        return 1 if lowered == "true" else 0
+    return 0
 
 
 def _parse_optional_float(raw_value: object, default: float | None = None) -> float | None:

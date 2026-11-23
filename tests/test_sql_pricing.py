@@ -327,3 +327,410 @@ def test_sql_pricing_constants_match_python_default_model_skus() -> None:
             assert float(s1_cost) == pytest.approx(py_cost, abs=1e-12)
             assert float(ent_cost) == pytest.approx(py_cost, abs=1e-12)
     conn.close()
+
+
+def test_unpriced_flagged() -> None:
+    """Unknown model and token-bearing `none`/NULL model spans surface `unpriced_spans` and NULL costs (S-6)."""
+    conn = _new_sqlite_bq_conn()
+    _create_enterprise_sqlite_fixture(conn)
+    _install_enterprise_views(conn)
+    step1_path = SQL_DIR / "core" / "step1_trace_views.sql"
+    for view_name in (
+        "agent_eval.v_step1_cost_per_outcome",
+        "agent_eval.v_cost_per_verified_outcome",
+    ):
+        short_name = view_name.split(".", maxsplit=1)[1]
+        conn.execute(
+            f"CREATE VIEW {short_name} AS "
+            f"{_transpile_bq_view_to_sqlite(_extract_view_sql_text(step1_path, view_name))}"
+        )
+
+    t0 = "2026-11-21T12:00:00+00:00"
+    t1 = "2026-11-21T12:00:01+00:00"
+    conn.executemany(
+        ENTERPRISE_OTEL_SPANS_BASE_INSERT,
+        [
+            # App 1: 10M-token span with model_name='none' -> MUST be NULL (not $0.0) and flagged
+            (
+                "tr-none-tok",
+                "sp-none-tok",
+                None,
+                "chat",
+                "app-unpriced-none",
+                "svc",
+                "agent",
+                "SPAN_KIND_SERVER",
+                "chat",
+                "none",
+                None,
+                None,
+                "OK",
+                1,
+                "production_inference",
+                "out-none-tok",
+                "app-unpriced-none",
+                "PDF",
+                None,
+                None,
+                None,
+                t0,
+                t1,
+                t1,
+                1000.0,
+                10_000_000,
+                0,
+                50_000,
+                0,
+                "{}",
+            ),
+            (
+                "tr-none-tok",
+                "sp-none-close",
+                "sp-none-tok",
+                "outcome.closed",
+                "app-unpriced-none",
+                "svc",
+                "agent",
+                "SPAN_KIND_INTERNAL",
+                "invoke_agent",
+                "none",
+                None,
+                None,
+                "OK",
+                1,
+                "production_inference",
+                "out-none-tok",
+                "app-unpriced-none",
+                "PDF",
+                None,
+                None,
+                None,
+                t1,
+                t1,
+                t1,
+                0.0,
+                0,
+                0,
+                0,
+                0,
+                '{"outcome.status": "succeeded", "outcome.verified": "true"}',
+            ),
+            # App 2: unknown model name with tokens -> NULL and flagged
+            (
+                "tr-unk-sku",
+                "sp-unk-sku",
+                None,
+                "chat",
+                "app-unpriced-unk",
+                "svc",
+                "agent",
+                "SPAN_KIND_SERVER",
+                "chat",
+                "mystery-llm-v99",
+                None,
+                None,
+                "OK",
+                1,
+                "production_inference",
+                "out-unk-sku",
+                "app-unpriced-unk",
+                "PDF",
+                None,
+                None,
+                None,
+                t0,
+                t1,
+                t1,
+                1000.0,
+                100_000,
+                0,
+                10_000,
+                0,
+                "{}",
+            ),
+            # App 3: genuine 0-token tool span with model_name='none' -> priced at $0.0, unpriced_spans=0
+            (
+                "tr-zero-ok",
+                "sp-zero-ok",
+                None,
+                "execute_tool",
+                "app-zero-ok",
+                "svc",
+                "agent",
+                "SPAN_KIND_INTERNAL",
+                "execute_tool",
+                "none",
+                "lookup",
+                "SUCCESS",
+                "OK",
+                1,
+                "production_inference",
+                None,
+                "app-zero-ok",
+                None,
+                None,
+                None,
+                None,
+                t0,
+                t1,
+                t1,
+                50.0,
+                0,
+                0,
+                0,
+                0,
+                "{}",
+            ),
+        ],
+    )
+
+    for app_id in ("app-unpriced-none", "app-unpriced-unk"):
+        s1_eval = conn.execute(
+            "SELECT unpriced_spans, trace_cost_usd FROM v_step1_trace_eval WHERE apphub_application_id = ?",
+            (app_id,),
+        ).fetchone()
+        s1_cpo = conn.execute(
+            "SELECT unpriced_spans, total_cost_usd, step1_cost_per_outcome_usd FROM v_step1_cost_per_outcome WHERE apphub_application_id = ?",
+            (app_id,),
+        ).fetchone()
+        s1_out = conn.execute(
+            "SELECT unpriced_spans, measured_model_cost_usd, total_ai_cost_usd, cost_per_verified_outcome_usd FROM v_cost_per_verified_outcome WHERE apphub_application_id = ?",
+            (app_id,),
+        ).fetchone()
+        ent_eval = conn.execute(
+            "SELECT unpriced_spans, production_inference_usd, trace_span_cost_usd FROM v_trace_sql_evaluation WHERE apphub_application_id = ?",
+            (app_id,),
+        ).fetchone()
+        ent_out = conn.execute(
+            "SELECT unpriced_spans, measured_model_cost_usd, total_ai_cost_usd, cost_per_verified_outcome_usd FROM v_enterprise_cost_per_verified_outcome WHERE apphub_application_id = ?",
+            (app_id,),
+        ).fetchone()
+        ent_sum = conn.execute(
+            "SELECT unpriced_spans, production_inference_usd, total_spend_usd, cost_per_verified_outcome_usd FROM v_agent_eval_and_finops_summary WHERE apphub_application_id = ?",
+            (app_id,),
+        ).fetchone()
+        assert int(s1_eval["unpriced_spans"]) == 1 and s1_eval["trace_cost_usd"] is None
+        assert int(s1_cpo["unpriced_spans"]) == 1 and s1_cpo["total_cost_usd"] is None
+        assert s1_cpo["step1_cost_per_outcome_usd"] is None
+        assert int(s1_out["unpriced_spans"]) == 1 and s1_out["measured_model_cost_usd"] is None
+        assert (
+            s1_out["total_ai_cost_usd"] is None and s1_out["cost_per_verified_outcome_usd"] is None
+        )
+        assert int(ent_eval["unpriced_spans"]) == 1
+        assert ent_eval["production_inference_usd"] is None
+        assert ent_eval["trace_span_cost_usd"] is None
+        assert int(ent_out["unpriced_spans"]) == 1 and ent_out["measured_model_cost_usd"] is None
+        assert ent_out["total_ai_cost_usd"] is None
+        assert int(ent_sum["unpriced_spans"]) == 1
+        assert ent_sum["production_inference_usd"] is None
+        assert ent_sum["total_spend_usd"] is None
+        assert ent_sum["cost_per_verified_outcome_usd"] is None
+
+    zero_ok = conn.execute(
+        "SELECT unpriced_spans, total_spend_usd FROM v_agent_eval_and_finops_summary "
+        "WHERE apphub_application_id = 'app-zero-ok'"
+    ).fetchone()
+    conn.close()
+    assert int(zero_ok["unpriced_spans"]) == 0
+    assert float(zero_ok["total_spend_usd"]) == pytest.approx(0.0, abs=1e-12)
+
+
+def test_price_row_overlap() -> None:
+    """Overlapping effective-dated catalog rows take the latest `effective_start` without duplicating spans or judge runs (S-7)."""
+    from tests.sql_helpers import ENTERPRISE_EVAL_RESULTS_BASE_INSERT
+
+    conn = _new_sqlite_bq_conn()
+    _create_enterprise_sqlite_fixture(conn)
+    _install_enterprise_views(conn)
+    # Seed two overlapping catalog rows for gemini-3.8-flash:
+    # Old seed (2026-01-01..2099-12-31): $0.15 in / $0.60 out
+    # New price update (2026-11-01..2099-12-31): $0.25 in / $1.00 out
+    conn.executemany(
+        """
+        INSERT INTO model_pricing_catalog (
+            model_name, provider, lifecycle_track, effective_start, effective_end,
+            input_usd_per_1m, cached_input_usd_per_1m, cache_write_5m_usd_per_1m,
+            cache_write_1h_usd_per_1m, output_usd_per_1m, long_context_threshold_tokens,
+            long_context_input_usd_per_1m, long_context_cached_usd_per_1m,
+            long_context_output_usd_per_1m, burndown_uncached_weight,
+            burndown_cached_weight, burndown_cache_write_5m_weight,
+            burndown_cache_write_1h_weight, burndown_output_weight,
+            burndown_long_uncached_weight, burndown_long_cached_weight,
+            burndown_long_output_weight, priority_paygo_multiplier, flex_paygo_multiplier
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """,
+        [
+            (
+                "gemini-3.8-flash",
+                "google",
+                "long_term_ga",
+                "2026-01-01T00:00:00+00:00",
+                "2099-12-31T23:59:59+00:00",
+                0.15,
+                0.015,
+                0.15,
+                0.15,
+                0.60,
+                200000,
+                0.30,
+                0.030,
+                2.25,
+                1.0,
+                0.1,
+                1.0,
+                1.0,
+                4.0,
+                2.0,
+                0.2,
+                7.5,
+                1.8,
+                0.5,
+            ),
+            (
+                "gemini-3.8-flash",
+                "google",
+                "long_term_ga",
+                "2026-11-01T00:00:00+00:00",
+                "2099-12-31T23:59:59+00:00",
+                0.25,
+                0.025,
+                0.25,
+                0.25,
+                1.00,
+                200000,
+                0.50,
+                0.050,
+                3.75,
+                1.0,
+                0.1,
+                1.0,
+                1.0,
+                4.0,
+                2.0,
+                0.2,
+                7.5,
+                1.8,
+                0.5,
+            ),
+        ],
+    )
+    t0 = "2026-11-21T12:00:00+00:00"
+    t1 = "2026-11-21T12:00:01+00:00"
+    conn.executemany(
+        ENTERPRISE_OTEL_SPANS_BASE_INSERT,
+        [
+            (
+                "tr-overlap-1",
+                "sp-overlap-1",
+                None,
+                "chat",
+                "overlap-app",
+                "svc",
+                "agent",
+                "SPAN_KIND_SERVER",
+                "chat",
+                "gemini-3.8-flash",
+                None,
+                None,
+                "OK",
+                1,
+                "production_inference",
+                "out-overlap-1",
+                "overlap-app",
+                "PDF",
+                None,
+                None,
+                None,
+                t0,
+                t1,
+                t1,
+                1000.0,
+                100_000,
+                0,
+                10_000,
+                0,
+                "{}",
+            ),
+            (
+                "tr-overlap-1",
+                "sp-overlap-close",
+                "sp-overlap-1",
+                "outcome.closed",
+                "overlap-app",
+                "svc",
+                "agent",
+                "SPAN_KIND_INTERNAL",
+                "invoke_agent",
+                "none",
+                None,
+                None,
+                "OK",
+                1,
+                "production_inference",
+                "out-overlap-1",
+                "overlap-app",
+                "PDF",
+                None,
+                None,
+                None,
+                t1,
+                t1,
+                t1,
+                0.0,
+                0,
+                0,
+                0,
+                0,
+                '{"outcome.status": "succeeded", "outcome.verified": "true"}',
+            ),
+        ],
+    )
+    conn.execute(
+        ENTERPRISE_EVAL_RESULTS_BASE_INSERT,
+        (
+            "ev-overlap-1",
+            "run-ov",
+            "tr-overlap-1",
+            "out-overlap-1",
+            "overlap-app",
+            "groundedness_4pt_v1",
+            "gemini-3.8-flash",
+            "CANARY_5PCT",
+            1,
+            "ok",
+            4,
+            1,
+            1_000_000,
+            100_000,
+            0,
+            "2026-11-21T12:05:00+00:00",
+        ),
+    )
+
+    wf_rows = conn.execute(
+        "SELECT span_id, span_cost_usd, weighted_burndown_tokens FROM v_trace_waterfall WHERE trace_id = 'tr-overlap-1'"
+    ).fetchall()
+    sum_row = conn.execute(
+        "SELECT production_inference_usd, autorater_judge_usd, total_weighted_burndown_tokens "
+        "FROM v_agent_eval_and_finops_summary WHERE apphub_application_id = 'overlap-app'"
+    ).fetchone()
+    cpvo_row = conn.execute(
+        "SELECT measured_model_cost_usd, measured_judge_cost_usd "
+        "FROM v_enterprise_cost_per_verified_outcome WHERE apphub_application_id = 'overlap-app'"
+    ).fetchone()
+    conn.close()
+
+    # Latest row ($0.25/1M in + $1.00/1M out):
+    #   span (100K in, 10K out, <=200K): $0.025 + $0.010 = $0.035 (NOT old $0.021 or doubled $0.056)
+    #   judge (1M in, 100K out): $0.25 + $0.10 = $0.35 (NOT old $0.21 or doubled $0.56)
+    assert len(wf_rows) == 2
+    by_span = {str(r["span_id"]): r for r in wf_rows}
+    assert float(by_span["sp-overlap-1"]["span_cost_usd"]) == pytest.approx(0.035, abs=1e-12)
+    assert float(by_span["sp-overlap-1"]["weighted_burndown_tokens"]) == pytest.approx(
+        140_000.0, abs=1e-12
+    )
+    assert float(sum_row["production_inference_usd"]) == pytest.approx(0.035, abs=1e-12)
+    assert float(sum_row["autorater_judge_usd"]) == pytest.approx(0.35, abs=1e-12)
+    assert float(sum_row["total_weighted_burndown_tokens"]) == pytest.approx(140_000.0, abs=1e-12)
+    assert float(cpvo_row["measured_model_cost_usd"]) == pytest.approx(0.035, abs=1e-12)
+    assert float(cpvo_row["measured_judge_cost_usd"]) == pytest.approx(0.35, abs=1e-12)

@@ -132,6 +132,16 @@ WITH app_models AS (
   FROM `agent_eval.v_trace_waterfall`
   WHERE model_name IS NOT NULL AND model_name != 'none'
   GROUP BY apphub_application_id, model_name
+),
+app_irr AS (
+  SELECT
+    apphub_application_id,
+    CASE
+      WHEN COUNTIF(gwet_ac2 IS NULL) > 0 THEN CAST(NULL AS FLOAT64)
+      ELSE MIN(gwet_ac2)
+    END AS gwet_ac2
+  FROM `agent_eval.v_agent_eval_and_finops_summary`
+  GROUP BY apphub_application_id
 )
 SELECT
   r.apphub_application_id,
@@ -173,16 +183,27 @@ SELECT
 FROM `agent_eval.app_registry` AS r
 LEFT JOIN app_models AS am
   ON r.apphub_application_id = am.apphub_application_id
-LEFT JOIN `agent_eval.v_agent_eval_and_finops_summary` AS s
+LEFT JOIN app_irr AS s
   ON r.apphub_application_id = s.apphub_application_id;
 
 -- -----------------------------------------------------------------------------
 -- View 9: 3-Pool Hourly FOCUS 1.2 & Spillover Attribution
---   * Isolates prod | eval | optimize lanes and separates Involuntary vs. TenantBurst
---     overflow using app_registry.funded_gsus entitlement share.
+--   * Isolates prod | eval | optimize lanes.
+--   * App-level spillover rule:
+--       - `pool_total_funded_gsus = SUM(funded_gsus)` once per registered app in
+--         `app_registry` (including idle funded apps with zero traffic that hour).
+--       - `funded_gsu_share = funded_gsus / pool_total_funded_gsus`.
+--       - `demand_share = app_hour_burndown_tokens / hour_total_burndown_tokens`
+--         summing across all lanes of that app in the hour.
+--       - PayGo spillover is Involuntary iff `funded_gsus > 0` and
+--         `demand_share <= funded_gsu_share`; otherwise TenantBurst.
 -- -----------------------------------------------------------------------------
 CREATE OR REPLACE VIEW `agent_eval.v_focus_three_pool_hourly_chargeback` AS
-WITH lane_hourly AS (
+WITH pool_funding AS (
+  SELECT COALESCE(SUM(COALESCE(funded_gsus, 0.0)), 0.0) AS pool_total_funded_gsus
+  FROM `agent_eval.app_registry`
+),
+lane_hourly AS (
   SELECT
     e.usage_hour,
     e.apphub_application_id,
@@ -204,12 +225,25 @@ WITH lane_hourly AS (
     ON e.apphub_application_id = r.apphub_application_id
   GROUP BY 1, 2, 3, 4, 5
 ),
+app_hourly AS (
+  SELECT
+    usage_hour,
+    apphub_application_id,
+    SUM(total_weighted_burndown_tokens) AS app_hour_burndown_tokens
+  FROM lane_hourly
+  GROUP BY usage_hour, apphub_application_id
+),
 hourly_totals AS (
   SELECT
     lh.*,
+    ah.app_hour_burndown_tokens,
     SUM(lh.total_weighted_burndown_tokens) OVER (PARTITION BY lh.usage_hour) AS hour_total_burndown_tokens,
-    SUM(lh.funded_gsus) OVER (PARTITION BY lh.usage_hour) AS hour_total_funded_gsus
+    pf.pool_total_funded_gsus
   FROM lane_hourly AS lh
+  INNER JOIN app_hourly AS ah
+    ON lh.usage_hour = ah.usage_hour
+    AND lh.apphub_application_id = ah.apphub_application_id
+  CROSS JOIN pool_funding AS pf
 )
 SELECT
   usage_hour,
@@ -220,21 +254,21 @@ SELECT
   pt_burndown_tokens,
   paygo_burndown_tokens,
   total_weighted_burndown_tokens,
-  COALESCE(SAFE_DIVIDE(funded_gsus, NULLIF(hour_total_funded_gsus, 0.0)), 0.0) AS funded_gsu_share,
-  COALESCE(SAFE_DIVIDE(total_weighted_burndown_tokens, NULLIF(hour_total_burndown_tokens, 0.0)), 0.0) AS demand_share,
+  COALESCE(SAFE_DIVIDE(funded_gsus, NULLIF(pool_total_funded_gsus, 0.0)), 0.0) AS funded_gsu_share,
+  COALESCE(SAFE_DIVIDE(app_hour_burndown_tokens, NULLIF(hour_total_burndown_tokens, 0.0)), 0.0) AS demand_share,
   CASE
     WHEN paygo_spillover_usd <= 0.0 THEN 0.0
     WHEN funded_gsus <= 0.0
-      OR SAFE_DIVIDE(total_weighted_burndown_tokens, NULLIF(hour_total_burndown_tokens, 0.0))
-         > COALESCE(SAFE_DIVIDE(funded_gsus, NULLIF(hour_total_funded_gsus, 0.0)), 0.0)
+      OR COALESCE(SAFE_DIVIDE(app_hour_burndown_tokens, NULLIF(hour_total_burndown_tokens, 0.0)), 0.0)
+         > COALESCE(SAFE_DIVIDE(funded_gsus, NULLIF(pool_total_funded_gsus, 0.0)), 0.0) + 1e-9
       THEN paygo_spillover_usd
     ELSE 0.0
   END AS pool3_tenant_burst_spillover_usd,
   CASE
     WHEN paygo_spillover_usd <= 0.0 THEN 0.0
     WHEN funded_gsus > 0.0
-      AND SAFE_DIVIDE(total_weighted_burndown_tokens, NULLIF(hour_total_burndown_tokens, 0.0))
-         <= COALESCE(SAFE_DIVIDE(funded_gsus, NULLIF(hour_total_funded_gsus, 0.0)), 0.0)
+      AND COALESCE(SAFE_DIVIDE(app_hour_burndown_tokens, NULLIF(hour_total_burndown_tokens, 0.0)), 0.0)
+         <= COALESCE(SAFE_DIVIDE(funded_gsus, NULLIF(pool_total_funded_gsus, 0.0)), 0.0) + 1e-9
       THEN paygo_spillover_usd
     ELSE 0.0
   END AS pool3_involuntary_spillover_usd,

@@ -419,7 +419,9 @@ def test_retail_2app_twin_headline_numeric_pins(tmp_path: Path) -> None:
     assert order.calibrated_pass_rate is not None
     assert order.cost_per_verified_outcome_usd is not None
     assert order.calibrated_pass_rate == pytest.approx(0.873711340206, abs=1e-6)
-    assert order.calibrated_ci_95_lower == pytest.approx(0.647415, abs=1e-4)
+    expected_lr = rogan_gladen_calibrate(0.90, 20, ConfusionMatrix(tp=87, fn=2, tn=7, fp=4))
+    assert order.calibrated_ci_95_lower == pytest.approx(expected_lr.ci_95_lower, abs=1e-12)
+    assert order.calibrated_ci_95_lower == pytest.approx(0.4652, abs=1e-4)
     assert order.calibrated_ci_95_upper == pytest.approx(1.0, abs=1e-12)
     assert order.production_inference_usd == pytest.approx(37 * 0.001875, abs=1e-12)
     expected_escalation = (

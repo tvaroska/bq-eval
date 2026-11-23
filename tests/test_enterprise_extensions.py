@@ -811,3 +811,188 @@ def test_clause_scoped_nfr_gate_loss_bank_and_atif_export() -> None:
     assert "AIzaSyD1234567890abcdef" not in trajs[0].sanitized_response
     assert "sk-secret1234567890" not in trajs[0].sanitized_reasoning
     assert "user.synthetic@example.invalid" in sanitize_atif_text("bob@bank.com")
+
+
+def test_three_pool_multi_lane() -> None:
+    """Three-pool SQL & Python classify spillover at the app level across lanes and include idle funded apps (S-2, T-5)."""
+    t0 = datetime(2026, 11, 22, 14, 0, 0, tzinfo=UTC)
+    t1 = t0 + timedelta(hours=1)
+    # Hour 0 (t0):
+    #   app-funded (funded=5): prod 300K + eval 100K = 400K total (demand_share=400/2000=0.20 <= 5/20=0.25 -> Involuntary on BOTH lanes)
+    #   app-burst  (funded=5): prod 1600K (demand_share=1600/2000=0.80 > 0.25 -> TenantBurst)
+    #   app-idle   (funded=10): 0 traffic in t0 (must STILL stay in pool_total_funded_gsus=20.0!)
+    # Hour 1 (t1):
+    #   app-funded (funded=5): prod 300K + eval 300K = 600K total (demand_share=600/2000=0.30 > 0.25 -> TenantBurst on BOTH lanes,
+    #     even though prod alone is 300/2000=0.15 <= 0.25!)
+    #   app-burst  (funded=5): prod 1400K (demand_share=1400/2000=0.70 > 0.25 -> TenantBurst)
+    spans = [
+        # Hour 0
+        make_span(
+            "tr-ml-h0-fp",
+            "sp-ml-h0-fp",
+            app_id="app-funded",
+            model_name="gemini-3.8-flash",
+            finops_traffic_type=FinOpsTrafficType.PRODUCTION_INFERENCE,
+            serving_traffic_type=ServingTrafficType.STANDARD,
+            input_tokens=150_000,
+            cached_input_tokens=0,
+            output_tokens=37_500,  # burndown = 150K + 4*37.5K = 300K
+            thinking_tokens=0,
+            base_time=t0,
+        ),
+        make_span(
+            "tr-ml-h0-fe",
+            "sp-ml-h0-fe",
+            app_id="app-funded",
+            model_name="gemini-3.8-flash",
+            finops_traffic_type=FinOpsTrafficType.AGENT_GYM_EVAL,
+            serving_traffic_type=ServingTrafficType.STANDARD,
+            input_tokens=60_000,
+            cached_input_tokens=0,
+            output_tokens=10_000,  # burndown = 60K + 4*10K = 100K
+            thinking_tokens=0,
+            base_time=t0,
+        ),
+        make_span(
+            "tr-ml-h0-bp",
+            "sp-ml-h0-bp",
+            app_id="app-burst",
+            model_name="gemini-3.8-flash",
+            finops_traffic_type=FinOpsTrafficType.PRODUCTION_INFERENCE,
+            serving_traffic_type=ServingTrafficType.STANDARD,
+            input_tokens=160_000,
+            cached_input_tokens=0,
+            output_tokens=360_000,  # burndown = 160K + 4*360K = 1,600K
+            thinking_tokens=0,
+            base_time=t0,
+        ),
+        # Hour 1
+        make_span(
+            "tr-ml-h1-fp",
+            "sp-ml-h1-fp",
+            app_id="app-funded",
+            model_name="gemini-3.8-flash",
+            finops_traffic_type=FinOpsTrafficType.PRODUCTION_INFERENCE,
+            serving_traffic_type=ServingTrafficType.STANDARD,
+            input_tokens=150_000,
+            cached_input_tokens=0,
+            output_tokens=37_500,  # 300K
+            thinking_tokens=0,
+            base_time=t1,
+        ),
+        make_span(
+            "tr-ml-h1-fe",
+            "sp-ml-h1-fe",
+            app_id="app-funded",
+            model_name="gemini-3.8-flash",
+            finops_traffic_type=FinOpsTrafficType.AGENT_GYM_EVAL,
+            serving_traffic_type=ServingTrafficType.STANDARD,
+            input_tokens=150_000,
+            cached_input_tokens=0,
+            output_tokens=37_500,  # 300K -> app-funded combined = 600K (30% > 25%)
+            thinking_tokens=0,
+            base_time=t1,
+        ),
+        make_span(
+            "tr-ml-h1-bp",
+            "sp-ml-h1-bp",
+            app_id="app-burst",
+            model_name="gemini-3.8-flash",
+            finops_traffic_type=FinOpsTrafficType.PRODUCTION_INFERENCE,
+            serving_traffic_type=ServingTrafficType.STANDARD,
+            input_tokens=160_000,
+            cached_input_tokens=0,
+            output_tokens=310_000,  # 1,400K
+            thinking_tokens=0,
+            base_time=t1,
+        ),
+    ]
+
+    conn = _new_sqlite_bq_conn()
+    _create_enterprise_sqlite_fixture(conn)
+    _install_enterprise_views(conn)
+    _install_extra_views(
+        conn, "finops/capacity_views.sql", ("agent_eval.v_focus_three_pool_hourly_chargeback",)
+    )
+    conn.executemany(
+        "INSERT INTO app_registry (apphub_application_id, cost_center, funded_gsus) VALUES (?,?,?)",
+        [
+            ("app-funded", "CC-F", 5.0),
+            ("app-burst", "CC-B", 5.0),
+            ("app-idle", "CC-I", 10.0),
+        ],
+    )
+    for sp in spans:
+        insert_enterprise_sqlite_span(conn, sp)
+    sql_rows = {
+        (str(r["usage_hour"]), str(r["apphub_application_id"]), str(r["traffic_lane"])): dict(r)
+        for r in conn.execute("SELECT * FROM v_focus_three_pool_hourly_chargeback").fetchall()
+    }
+    conn.close()
+
+    h0_key = "2026-11-22T14:00:00+00:00"
+    h1_key = "2026-11-22T15:00:00+00:00"
+    # Pool total funded GSUs = 5 + 5 + 10 = 20 -> funded_gsu_share = 0.25 (not 5/15=0.333 or 5/10=0.5)
+    for lane in ("prod", "eval"):
+        r0 = sql_rows[(h0_key, "app-funded", lane)]
+        assert float(r0["funded_gsu_share"]) == pytest.approx(0.25, abs=1e-12)
+        assert float(r0["demand_share"]) == pytest.approx(0.20, abs=1e-12)
+        assert float(r0["pool3_involuntary_spillover_usd"]) > 0.0
+        assert float(r0["pool3_tenant_burst_spillover_usd"]) == pytest.approx(0.0, abs=1e-12)
+
+        r1 = sql_rows[(h1_key, "app-funded", lane)]
+        assert float(r1["funded_gsu_share"]) == pytest.approx(0.25, abs=1e-12)
+        assert float(r1["demand_share"]) == pytest.approx(0.30, abs=1e-12)
+        assert float(r1["pool3_involuntary_spillover_usd"]) == pytest.approx(0.0, abs=1e-12)
+        assert float(r1["pool3_tenant_burst_spillover_usd"]) > 0.0
+
+    assert float(sql_rows[(h0_key, "app-burst", "prod")]["pool3_tenant_burst_spillover_usd"]) > 0.0
+    assert float(
+        sql_rows[(h0_key, "app-burst", "prod")]["pool3_involuntary_spillover_usd"]
+    ) == pytest.approx(0.0, abs=1e-12)
+
+    # Python allocator: exact app-level entitlement parity (including idle app, exact boundary,
+    # zero-funded app, all-zero funding, and wf_overflow > 0).
+    # Capacity = 1,000,000 tokens/hr; funded = {app-funded: 5, app-burst: 5, app-idle: 10} -> entitlement = 250,000 each.
+    py_multi = allocate_focus_three_pool_hourly_chargeback(
+        hourly_demand_by_app_lane={
+            # Hour 0: app-funded total = 150K + 100K = 250K (exact boundary -> Involuntary on BOTH prod and eval)
+            # Hour 1: app-funded total = 150K + 150K = 300K (> 250K -> TenantBurst on BOTH prod and eval)
+            ("app-funded", "prod"): [150_000.0, 150_000.0],
+            ("app-funded", "eval"): [100_000.0, 150_000.0],
+            ("app-burst", "prod"): [1_200_000.0, 1_200_000.0],
+            ("app-unfunded", "prod"): [100_000.0, 0.0],
+        },
+        app_cost_centers={"app-funded": "CC-F", "app-burst": "CC-B", "app-unfunded": "CC-U"},
+        funded_gsus_by_app={
+            "app-funded": 5.0,
+            "app-burst": 5.0,
+            "app-idle": 10.0,
+            "app-unfunded": 0.0,
+        },
+        hourly_reserved_pt_capacity_tokens=1_000_000.0,
+        reserved_pt_fixed_cost_usd=200.0,
+        paygo_spillover_usd_per_1m_by_app=1.0,
+    )
+    assert py_multi.reconciliation_drift_usd < 1e-12
+    by_k = {(r.apphub_application_id, r.traffic_lane): r for r in py_multi.rows}
+    # Hour 0 app-funded eval overflows (wf_overflow > 0) and is within entitlement -> involuntary > 0!
+    assert by_k[("app-funded", "prod")].pool3_involuntary_spillover_usd > 0.0
+    assert by_k[("app-funded", "prod")].pool3_tenant_burst_spillover_usd > 0.0
+    assert by_k[("app-funded", "eval")].pool3_involuntary_spillover_usd > 0.0
+    assert by_k[("app-funded", "eval")].pool3_tenant_burst_spillover_usd > 0.0
+    # Unfunded app always bills to tenant burst, never involuntary.
+    assert by_k[("app-unfunded", "prod")].pool3_involuntary_spillover_usd == pytest.approx(0.0)
+    assert by_k[("app-unfunded", "prod")].pool3_tenant_burst_spillover_usd > 0.0
+
+    # Zero total funded GSUs -> all overflow is tenant burst (no division by zero).
+    py_zero_funded = allocate_focus_three_pool_hourly_chargeback(
+        hourly_demand_by_app_lane={("app-a", "prod"): [1_500_000.0]},
+        app_cost_centers={"app-a": "CC-A"},
+        funded_gsus_by_app={"app-a": 0.0},
+        hourly_reserved_pt_capacity_tokens=1_000_000.0,
+        reserved_pt_fixed_cost_usd=100.0,
+        paygo_spillover_usd_per_1m_by_app=1.0,
+    )
+    assert py_zero_funded.rows[0].pool3_involuntary_spillover_usd == pytest.approx(0.0)
+    assert py_zero_funded.rows[0].pool3_tenant_burst_spillover_usd == pytest.approx(0.5, abs=1e-12)

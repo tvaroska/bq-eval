@@ -22,8 +22,8 @@ These numbers replay 343 reconstructed cases (676 spans). There are no human lab
 | :--- | :--- | :--- |
 | Judge cost model, 100k traces | Screening with rules before judging | Judge spend down 92.2% ($250 to $19.62) |
 | Address checks, 280 cases | Rules catch the cheap failures first | 44 rejects at no AI cost; 20 of 20 planted traps caught, 0 false alarms in 216 |
-| Address checks, judged rows | Fast judge against a stronger model | 30 of 30 pass/fail matches; corrected pass rate 91.5% (88.0% to 95.1%) |
-| Order support, 50 traces | Why raw pass rates mislead | Raw 81.8%, corrected 87.4% (wide interval, 65% to 100%) |
+| Address checks, judged rows | Fast judge against a stronger model | 30 of 30 pass/fail matches; corrected pass rate 91.5% (83.9% to 100%) |
+| Order support, 50 traces | Why raw pass rates mislead | Raw 90.0%, corrected 87.4% (wide interval, 47% to 100%) |
 | Skill upgrade, 18 cases | Cost per outcome across versions | AI cost per outcome down 99.3% (8 vs. 10 cases) |
 
 ## Why Not Langfuse, LangSmith, Datadog or Cloud Billing?
