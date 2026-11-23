@@ -8,8 +8,6 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from bq_eval.core.contract.types import NonNegFloat, PosFloat
 
-SpilloverTier = Literal["priority", "standard", "flex"]
-
 
 class ThreePoolFocusRow(BaseModel):
     """3-Pool Hourly FOCUS 1.2 + Spillover (`Involuntary` vs. `TenantBurst`) chargeback row."""

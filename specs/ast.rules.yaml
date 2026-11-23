@@ -1,8 +1,8 @@
 # Declarative Structural & Security AST Contract (ast-grep)
-# Enforces package and layer boundaries across bq_eval/{core,finops,deploy,labs,demo,cli}/:
+# Enforces package and layer boundaries across bq_eval/{core,finops,deploy,demo,cli}/:
 # 1. bq_eval/** never imports examples/, benchmarks/, dynamic imports, or LLM SDKs.
-# 2. Packages: core imports no other package; finops and deploy build on core; labs builds on
-#    core and finops; demo builds on core and finops; only cli may import everything.
+# 2. Packages: core imports no other package; finops and deploy build on core; demo builds on
+#    core and finops; only cli may import everything.
 # 3. Layers: */contract/ imports only pydantic and contracts; */engine/ never imports pydantic,
 #    demo or cli; demo/render/ imports no calculation modules.
 # 4. SQLAlchemy ORM, shell=True subprocesses, and unparameterized SQL execute() are banned.
@@ -66,7 +66,7 @@ rule:
 id: core-package-dependencies
 language: Python
 severity: error
-message: "Package violation (core/): bq_eval/core/ must not import bq_eval.{finops,deploy,labs,demo,cli}."
+message: "Package violation (core/): bq_eval/core/ must not import bq_eval.{finops,deploy,demo,cli}."
 files:
   - "bq_eval/core/**/*.py"
 metadata:
@@ -75,7 +75,7 @@ metadata:
     - "from bq_eval.finops.engine.spend import compute_pareto_frontier"
     - "from bq_eval.demo.pipeline import run_showcase_pipeline"
     - "import bq_eval.deploy.engine.bootstrap"
-    - "from ...labs import optimizer"
+    - "from ...demo import loadgen"
     - "from bq_eval import cli"
   valid_examples:
     - "from bq_eval.core.contract.otel import OTelGenAISpanRecord"
@@ -84,23 +84,23 @@ metadata:
 rule:
   any:
     - kind: import_statement
-      regex: "(?s)^import\\s+(.+,\\s*)*bq_eval\\.(finops|deploy|labs|demo|cli)(\\b|\\.)"
+      regex: "(?s)^import\\s+(.+,\\s*)*bq_eval\\.(finops|deploy|demo|cli)(\\b|\\.)"
     - kind: import_from_statement
-      regex: "(?s)^from\\s+(bq_eval\\.|\\.\\.\\.\\s*)(finops|deploy|labs|demo|cli)(\\b|\\.)"
+      regex: "(?s)^from\\s+(bq_eval\\.|\\.\\.\\.\\s*)(finops|deploy|demo|cli)(\\b|\\.)"
     - kind: import_from_statement
-      regex: "(?s)^from\\s+(bq_eval|\\.\\.\\.)\\s+import\\s+(.*[\\s,(])?(finops|deploy|labs|demo|cli)\\b"
+      regex: "(?s)^from\\s+(bq_eval|\\.\\.\\.)\\s+import\\s+(.*[\\s,(])?(finops|deploy|demo|cli)\\b"
 ---
 id: finops-package-dependencies
 language: Python
 severity: error
-message: "Package violation (finops/): bq_eval/finops/ must not import bq_eval.{deploy,labs,demo,cli}."
+message: "Package violation (finops/): bq_eval/finops/ must not import bq_eval.{deploy,demo,cli}."
 files:
   - "bq_eval/finops/**/*.py"
 metadata:
   test_path: "bq_eval/finops/engine/probe.py"
   invalid_examples:
     - "from bq_eval.demo import pipeline"
-    - "from bq_eval.labs.engine.optimizer import cluster_failure_loss_bank"
+    - "from bq_eval.cli.app import main"
     - "from ...deploy import engine"
   valid_examples:
     - "from bq_eval.core.engine.cost import compute_span_cost_usd"
@@ -108,16 +108,16 @@ metadata:
 rule:
   any:
     - kind: import_statement
-      regex: "(?s)^import\\s+(.+,\\s*)*bq_eval\\.(deploy|labs|demo|cli)(\\b|\\.)"
+      regex: "(?s)^import\\s+(.+,\\s*)*bq_eval\\.(deploy|demo|cli)(\\b|\\.)"
     - kind: import_from_statement
-      regex: "(?s)^from\\s+(bq_eval\\.|\\.\\.\\.\\s*)(deploy|labs|demo|cli)(\\b|\\.)"
+      regex: "(?s)^from\\s+(bq_eval\\.|\\.\\.\\.\\s*)(deploy|demo|cli)(\\b|\\.)"
     - kind: import_from_statement
-      regex: "(?s)^from\\s+(bq_eval|\\.\\.\\.)\\s+import\\s+(.*[\\s,(])?(deploy|labs|demo|cli)\\b"
+      regex: "(?s)^from\\s+(bq_eval|\\.\\.\\.)\\s+import\\s+(.*[\\s,(])?(deploy|demo|cli)\\b"
 ---
 id: deploy-package-dependencies
 language: Python
 severity: error
-message: "Package violation (deploy/): bq_eval/deploy/ must not import bq_eval.{finops,labs,demo,cli}."
+message: "Package violation (deploy/): bq_eval/deploy/ must not import bq_eval.{finops,demo,cli}."
 files:
   - "bq_eval/deploy/**/*.py"
 metadata:
@@ -131,46 +131,23 @@ metadata:
 rule:
   any:
     - kind: import_statement
-      regex: "(?s)^import\\s+(.+,\\s*)*bq_eval\\.(finops|labs|demo|cli)(\\b|\\.)"
+      regex: "(?s)^import\\s+(.+,\\s*)*bq_eval\\.(finops|demo|cli)(\\b|\\.)"
     - kind: import_from_statement
-      regex: "(?s)^from\\s+(bq_eval\\.|\\.\\.\\.\\s*)(finops|labs|demo|cli)(\\b|\\.)"
+      regex: "(?s)^from\\s+(bq_eval\\.|\\.\\.\\.\\s*)(finops|demo|cli)(\\b|\\.)"
     - kind: import_from_statement
-      regex: "(?s)^from\\s+(bq_eval|\\.\\.\\.)\\s+import\\s+(.*[\\s,(])?(finops|labs|demo|cli)\\b"
----
-id: labs-package-dependencies
-language: Python
-severity: error
-message: "Package violation (labs/): bq_eval/labs/ must not import bq_eval.{deploy,demo,cli}."
-files:
-  - "bq_eval/labs/**/*.py"
-metadata:
-  test_path: "bq_eval/labs/engine/probe.py"
-  invalid_examples:
-    - "from bq_eval.demo.pipeline import run_showcase_pipeline"
-    - "from bq_eval.cli.app import main"
-  valid_examples:
-    - "from bq_eval.finops.engine.spend import compute_pareto_frontier"
-    - "from bq_eval.core.engine.cost import compute_span_cost_usd"
-rule:
-  any:
-    - kind: import_statement
-      regex: "(?s)^import\\s+(.+,\\s*)*bq_eval\\.(deploy|demo|cli)(\\b|\\.)"
-    - kind: import_from_statement
-      regex: "(?s)^from\\s+(bq_eval\\.|\\.\\.\\.\\s*)(deploy|demo|cli)(\\b|\\.)"
-    - kind: import_from_statement
-      regex: "(?s)^from\\s+(bq_eval|\\.\\.\\.)\\s+import\\s+(.*[\\s,(])?(deploy|demo|cli)\\b"
+      regex: "(?s)^from\\s+(bq_eval|\\.\\.\\.)\\s+import\\s+(.*[\\s,(])?(finops|demo|cli)\\b"
 ---
 id: demo-package-dependencies
 language: Python
 severity: error
-message: "Package violation (demo/): bq_eval/demo/ must not import bq_eval.{labs,deploy,cli}."
+message: "Package violation (demo/): bq_eval/demo/ must not import bq_eval.{deploy,cli}."
 files:
   - "bq_eval/demo/**/*.py"
 metadata:
   test_path: "bq_eval/demo/probe.py"
   invalid_examples:
     - "from bq_eval.cli.app import main"
-    - "from bq_eval.labs.engine.optimizer import cluster_failure_loss_bank"
+    - "from bq_eval.deploy.engine.bootstrap import REPO_ROOT"
     - "from ..cli import server"
     - "from .. import cli"
   valid_examples:
@@ -179,11 +156,11 @@ metadata:
 rule:
   any:
     - kind: import_statement
-      regex: "(?s)^import\\s+(.+,\\s*)*bq_eval\\.(labs|deploy|cli)(\\b|\\.)"
+      regex: "(?s)^import\\s+(.+,\\s*)*bq_eval\\.(deploy|cli)(\\b|\\.)"
     - kind: import_from_statement
-      regex: "(?s)^from\\s+(bq_eval\\.|\\.\\.\\.?\\s*)(labs|deploy|cli)(\\b|\\.)"
+      regex: "(?s)^from\\s+(bq_eval\\.|\\.\\.\\.?\\s*)(deploy|cli)(\\b|\\.)"
     - kind: import_from_statement
-      regex: "(?s)^from\\s+(bq_eval|\\.\\.\\.?)\\s+import\\s+(.*[\\s,(])?(labs|deploy|cli)\\b"
+      regex: "(?s)^from\\s+(bq_eval|\\.\\.\\.?)\\s+import\\s+(.*[\\s,(])?(deploy|cli)\\b"
 ---
 id: contract-layer-imports-only-contracts
 language: Python

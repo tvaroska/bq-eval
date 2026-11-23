@@ -131,7 +131,7 @@ def test_declarative_ast_rules_and_positive_controls(tmp_path: Path) -> None:
     assert rules_path.is_file(), "Missing specs/ast.rules.yaml declarative AST contract"
     raw = rules_path.read_text(encoding="utf-8")
     blocks = [c for c in re.split(r"(?m)^---\s*$", raw) if re.search(r"(?m)^id:\s*\S+", c)]
-    assert len(blocks) == 13, f"Expected 13 rules in specs/ast.rules.yaml, got {len(blocks)}"
+    assert len(blocks) == 12, f"Expected 12 rules in specs/ast.rules.yaml, got {len(blocks)}"
 
     venv_ast_grep = REPO_ROOT / ".venv" / "bin" / "ast-grep"
     assert venv_ast_grep.is_file(), (

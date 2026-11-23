@@ -1,19 +1,26 @@
-"""Empirical proof validation, INFORMATION_SCHEMA.JOBS cost attribution & wage sensitivity."""
+"""Empirical proof validation, INFORMATION_SCHEMA.JOBS cost attribution & wage sensitivity.
+
+Offline helper script for `M10-3` live BigQuery proof runs and dual-human SME calibration panels.
+"""
 
 from __future__ import annotations
 
+import argparse
 import math
 import re
+import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Literal
 
+from pydantic import BaseModel, ConfigDict
+
 from bq_eval.core.contract.otel import LONG_CONTEXT_THRESHOLD_TOKENS, OTelGenAISpanRecord
 from bq_eval.core.contract.pricing import normalize_model_name
 from bq_eval.core.contract.results import BqQueryCostRow, ConfusionMatrix
+from bq_eval.core.contract.types import NonNegFloat
 from bq_eval.core.engine.calibration import compute_gwet_ac2
 from bq_eval.core.engine.cost import compute_span_burndown_tokens, compute_span_cost_usd
-from bq_eval.labs.contract.proof import WageSensitivityPoint
 
 BYTES_PER_TIB: float = float(1024**4)
 MS_PER_HOUR: float = 3_600_000.0
@@ -26,6 +33,19 @@ _FORBIDDEN_HUMAN_RATER_RE = re.compile(
 )
 _REGION_RE = re.compile(r"^[a-z0-9-]{2,32}$")
 _IDENT_RE = re.compile(r"^[a-zA-Z0-9_-]{2,64}$")
+
+
+class WageSensitivityPoint(BaseModel):
+    """Escalation wage sensitivity point across human-review hourly rates."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    hourly_wage_usd: NonNegFloat
+    ai_cost_per_verified_outcome_usd: NonNegFloat
+    judge_cost_per_verified_outcome_usd: NonNegFloat
+    bq_query_cost_per_verified_outcome_usd: NonNegFloat
+    human_escalation_cost_per_verified_outcome_usd: NonNegFloat
+    fully_loaded_cpvo_usd: NonNegFloat
 
 
 @dataclass(frozen=True)
@@ -340,3 +360,35 @@ def sum_bq_query_costs_by_app(rows: Sequence[BqQueryCostRow]) -> Mapping[str, fl
             totals.get(row.apphub_application_id, 0.0) + row.query_cost_usd
         )
     return totals
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Emit INFORMATION_SCHEMA.JOBS sync SQL for empirical proof runs.",
+    )
+    parser.add_argument("--project-id", required=True, help="Target GCP project ID.")
+    parser.add_argument("--dataset-id", default="agent_eval", help="Target BigQuery dataset ID.")
+    parser.add_argument("--region", default="us", help="BigQuery region (e.g. us, us-central1).")
+    parser.add_argument(
+        "--lookback-days",
+        type=int,
+        default=7,
+        help="Days of INFORMATION_SCHEMA.JOBS history to fold in (1-180).",
+    )
+    args = parser.parse_args(argv)
+    try:
+        sql = build_information_schema_jobs_sync_sql(
+            project_id=args.project_id,
+            dataset_id=args.dataset_id,
+            region=args.region,
+            lookback_days=args.lookback_days,
+        )
+    except ValueError as exc:
+        print(f"empirical_proof: error: {exc}", file=sys.stderr)
+        return 2
+    print(sql, end="")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -13,7 +13,6 @@ from bq_eval.core.contract.otel import (
     resolve_application_id,
 )
 from bq_eval.core.contract.results import ConfusionMatrix
-from bq_eval.core.contract.rubrics import OrdinalScoreOutput
 from bq_eval.core.engine.calibration import (
     build_calibration_result,
     compute_gwet_ac2,
@@ -140,32 +139,6 @@ def test_sqlite_rule0_tool_loop_and_template16_real_9_tool_spans() -> None:
     report = evaluate_time_shifted_corpus(spans=spans, reference_time=now)
     audit_row = next(r for r in report.step1_rows if r.apphub_application_id == "unregistered_app")
     assert audit_row.step1_pass_rate == pytest.approx(0.75)
-
-
-def test_ordinal_score_output_contract() -> None:
-    """CoT-first OrdinalScoreOutput validates fields, min_length, and binary_pass consistency."""
-    valid = OrdinalScoreOutput(
-        reasoning_trace="Every figure matches [DOC-01] with zero extrapolation.",
-        ordinal_score=4,
-        binary_pass=True,
-    )
-    assert next(iter(OrdinalScoreOutput.model_fields.keys())) == "reasoning_trace"
-    assert valid.ordinal_score == 4
-
-    with pytest.raises(ValidationError):
-        OrdinalScoreOutput(reasoning_trace="too short", ordinal_score=4, binary_pass=True)
-    with pytest.raises(ValidationError):
-        OrdinalScoreOutput(
-            reasoning_trace="Long enough rationale for validation.",
-            ordinal_score=5,  # type: ignore[arg-type]
-            binary_pass=True,
-        )
-    with pytest.raises(ValidationError, match="binary_pass"):
-        OrdinalScoreOutput(
-            reasoning_trace="Contradictory pass flag on failing score.",
-            ordinal_score=1,
-            binary_pass=True,
-        )
 
 
 def test_numeric_gates_fail_closed_on_nan_negative_and_out_of_range() -> None:

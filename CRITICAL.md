@@ -12,7 +12,7 @@ Break one of these and the numbers this repo reports stop being trustworthy.
    - Trust a judge only when its agreement with the reference (Gwet's AC2, `compute_gwet_ac2()`) is at least 0.80.
 
 3. **Treat trace text as untrusted.**
-   - Escape `&`, `<` and `>` in prompts, retrieved chunks and answers before wrapping them in `<untrusted_text>` (`wrap_untrusted_text()`, `escape_sql_xml_expr()`, and the matching `REPLACE()` in the SQL views).
+   - Escape `&`, `<` and `>` in prompts, retrieved chunks and answers before wrapping them in `<untrusted_text>` (`escape_sql_xml_expr()` and the matching `REPLACE()` in the SQL views).
    - Judges write their reasoning before their score. Scores use a 4-point scale with no neutral middle; 3 or higher passes.
 
 4. **Cost is per finished outcome, not per trace.**
@@ -21,7 +21,7 @@ Break one of these and the numbers this repo reports stop being trustworthy.
    - Switch to a cheaper model only if it never turns a correct answer into a wrong one on the paired test set (`compute_pareto_frontier()`).
 
 5. **Package boundaries hold.**
-   - `core` imports no other package. `finops` and `deploy` build on `core`; `labs` and `demo` build on `core` and `finops`; only `cli` imports everything. `tests/test_isolation_guard.py` and `specs/ast.rules.yaml` enforce this.
+   - `core` imports no other package. `finops` and `deploy` build on `core`; `demo` builds on `core` and `finops`; only `cli` imports everything. `tests/test_isolation_guard.py` and `specs/ast.rules.yaml` enforce this.
 
 6. **Nothing private leaks.**
    - No customer names, internal codenames, internal links, bug IDs, `../` path hacks or workstation paths (`tests/test_repo_hygiene.py`).

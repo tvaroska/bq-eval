@@ -23,7 +23,7 @@ from bq_eval.deploy.engine.bootstrap import (
     substitute_sql_parameters,
     validate_bootstrap_offline,
 )
-from bq_eval.labs.engine.empirical_proof import (
+from scripts.empirical_proof import (
     BlindHumanLabelRow,
     analyze_unconfounded_context_cliff_arms,
     build_bq_query_cost_row,
@@ -32,6 +32,9 @@ from bq_eval.labs.engine.empirical_proof import (
     compute_escalation_wage_sensitivity,
     sum_bq_query_costs_by_app,
     validate_blind_dual_human_labels,
+)
+from scripts.empirical_proof import (
+    main as empirical_proof_main,
 )
 from tests.conftest import make_span
 from tests.sql_helpers import (
@@ -368,7 +371,9 @@ def test_wheel_contains_sql_and_receipt(tmp_path: Path) -> None:
     assert run.stdout.strip() == "WHEEL_OK"
 
 
-def test_bq_query_cost_folded_into_cpvo_sql_sqlite_parity() -> None:
+def test_bq_query_cost_folded_into_cpvo_sql_sqlite_parity(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     """`INFORMATION_SCHEMA.JOBS` query cost folds into `total_spend_usd` and CPVO across BigQuery SQL & SQLite."""
     sync_sql = build_information_schema_jobs_sync_sql(
         project_id="demo-proj",
@@ -378,6 +383,8 @@ def test_bq_query_cost_folded_into_cpvo_sql_sqlite_parity() -> None:
     )
     _parse_bigquery_statements(sync_sql, "information_schema_jobs_sync_sql")
     assert "INFORMATION_SCHEMA.JOBS_BY_PROJECT" in sync_sql
+    assert empirical_proof_main(["--project-id", "demo-proj"]) == 0
+    assert "INFORMATION_SCHEMA.JOBS_BY_PROJECT" in capsys.readouterr().out
 
     on_demand_row = build_bq_query_cost_row(
         job_id="job-od-1",

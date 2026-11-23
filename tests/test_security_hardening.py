@@ -13,7 +13,6 @@ import pytest
 
 from bq_eval.cli import app as cli_app
 from bq_eval.cli import server as cli_server
-from bq_eval.core.contract.rubrics import wrap_untrusted_text
 from bq_eval.core.engine.sql_eval import (
     build_ai_evaluate_agent_sql,
     build_ai_generate_table_judge_sql,
@@ -70,7 +69,7 @@ def test_single_pass_template_blocks_placeholder_and_inline_handler_injection() 
 
 
 def test_sql_and_xml_input_guards_reject_bool_and_injection() -> None:
-    """Reject `bool` canary pct, unsafe `column_expr`, and unsafe XML `tag`."""
+    """Reject `bool` canary pct and unsafe `column_expr` identifiers."""
     with pytest.raises(ValueError, match="not bool"):
         build_ai_generate_table_judge_sql(project_id="demo-proj", canary_sample_pct=True)
     with pytest.raises(ValueError, match="not bool"):
@@ -80,11 +79,6 @@ def test_sql_and_xml_input_guards_reject_bool_and_injection() -> None:
     for bad_col in ("", "p.user_prompt; DROP TABLE x", "COALESCE(a, b)", "p.a' OR '1'='1"):
         with pytest.raises(ValueError, match="Invalid column_expr"):
             escape_sql_xml_expr(bad_col)
-
-    assert "<custom_tag>" in wrap_untrusted_text("hello", tag="custom_tag")
-    for bad_tag in ("", "untrusted><script>", "tag with space", "123bad"):
-        with pytest.raises(ValueError, match="Invalid XML wrapper tag"):
-            wrap_untrusted_text("hello", tag=bad_tag)
 
 
 def test_non_loopback_host_guard(capsys: pytest.CaptureFixture[str]) -> None:

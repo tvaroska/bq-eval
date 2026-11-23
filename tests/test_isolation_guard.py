@@ -4,9 +4,8 @@ Two axes, both enforced on every `bq_eval/**/*.py` file:
 
 Packages (what may depend on what):
 - `core`: rule checks, judge SQL, calibration, cost per outcome. Depends on nothing else.
-- `finops`: chargeback, capacity, governance, multi-cloud. Depends on `core`.
+- `finops`: chargeback and capacity export. Depends on `core`.
 - `deploy`: bootstrap SQL rendering. Depends on `core`.
-- `labs`: experimental analyses. Depends on `core` and `finops`.
 - `demo`: corpus replay and workbench. Depends on `core` and `finops`.
 - `cli`: may import any package.
 
@@ -51,7 +50,6 @@ PACKAGE_DEPS: dict[str, tuple[str, ...]] = {
     "core": ("core",),
     "finops": ("core", "finops"),
     "deploy": ("core", "deploy"),
-    "labs": ("core", "finops", "labs"),
     "demo": ("core", "finops", "demo"),
 }
 
@@ -276,7 +274,7 @@ def test_unlisted_module_and_leaked_import_positive_controls(tmp_path: Path) -> 
         ),
         (
             "bq_eval/finops/engine/probe.py",
-            "from bq_eval.labs.engine.optimizer import cluster_failure_loss_bank",
+            "from bq_eval.deploy.engine.bootstrap import REPO_ROOT",
         ),
         (
             "bq_eval/finops/engine/probe.py",
@@ -288,7 +286,7 @@ def test_unlisted_module_and_leaked_import_positive_controls(tmp_path: Path) -> 
         ),
         (
             "bq_eval/demo/pipeline.py",
-            "from bq_eval.labs.engine.optimizer import cluster_failure_loss_bank",
+            "from bq_eval.deploy.engine.bootstrap import REPO_ROOT",
         ),
         ("bq_eval/demo/pipeline.py", "from bq_eval.cli.app import main"),
         # Layer direction inside a package.
@@ -358,10 +356,6 @@ def test_folder_guard_catches_every_forbidden_import(
             "from bq_eval.deploy.contract.bootstrap import BootstrapMode",
         ),
         (
-            "bq_eval/labs/engine/probe.py",
-            "from bq_eval.finops.engine.spend import compute_pareto_frontier",
-        ),
-        (
             "bq_eval/demo/render/renderer.py",
             "from bq_eval.demo.contract.results import ShowcaseRunArtifacts",
         ),
@@ -373,7 +367,7 @@ def test_folder_guard_catches_every_forbidden_import(
         ("bq_eval/cli/app.py", "from bq_eval.demo.pipeline import run_showcase_pipeline"),
         (
             "bq_eval/cli/app.py",
-            "from bq_eval.labs.engine.optimizer import cluster_failure_loss_bank",
+            "from bq_eval.finops.engine.chargeback_three_pool import allocate_focus_three_pool_hourly_chargeback",
         ),
     ],
 )
@@ -433,7 +427,7 @@ def test_importing_core_loads_no_other_package() -> None:
         "import sys\n"
         + "".join(f"import {mod}\n" for mod in pure_modules)
         + "print(sorted(m for m in sys.modules if m.startswith(("
-        "'bq_eval.finops', 'bq_eval.deploy', 'bq_eval.labs', 'bq_eval.demo', 'bq_eval.cli', "
+        "'bq_eval.finops', 'bq_eval.deploy', 'bq_eval.demo', 'bq_eval.cli', "
         "'google.genai', 'vertexai', 'openai', 'anthropic'"
         "))))"
     )

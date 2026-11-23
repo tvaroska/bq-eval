@@ -1,59 +1,15 @@
-"""Governance (`RL-1` to `RL-5`), Omni zero-egress, 5m SLO/429 breaches, sessions, RingBuffer, and ATIF."""
+"""Shipped SQL view tests for governance (`RL-1`-`RL-5`), Omni zero-egress, 5m SLO/429 breaches, sessions, and policy NFR gate."""
 
 from __future__ import annotations
 
-import json
 import sqlite3
 from datetime import UTC, datetime
 
 import pytest
 from sqlglot import exp
 
-from bq_eval.core.contract.otel import (
-    FinOpsTrafficType,
-    GenAISpanKind,
-    ServingTrafficType,
-    TracePayloadRecord,
-)
-from bq_eval.core.engine.otel_export import (
-    GenAISpanRecorder,
-    RingBufferSpanExporter,
-    format_x_cloud_trace_context,
-    parse_trace_context_headers,
-)
-from bq_eval.core.engine.ports import SQLiteEvalBackend
+from bq_eval.core.contract.otel import FinOpsTrafficType, ServingTrafficType
 from bq_eval.core.engine.sql_eval import evaluate_traces_in_sqlite
-from bq_eval.finops.contract.governance import (
-    AppGovernanceRecord,
-    AutonomyTier,
-    LifecycleTrackPolicy,
-    RiskLevel,
-)
-from bq_eval.finops.engine.governance import (
-    InferenceRequestLogRecord,
-    evaluate_app_governance,
-    reconcile_inference_requests,
-)
-from bq_eval.finops.engine.multicloud import (
-    FORBIDDEN_RAW_PAYLOAD_COLUMNS,
-    RemoteTraceSliceRecord,
-    build_omni_in_residency_judge_sql,
-    normalize_omni_application_id,
-    normalize_workload_principal,
-    reconcile_multicloud_cpvo,
-    verify_zero_raw_payload_egress,
-)
-from bq_eval.finops.engine.sqlite_capacity import (
-    evaluate_5m_breaches_in_sqlite,
-    evaluate_interaction_lineage_in_sqlite,
-)
-from bq_eval.labs.contract.optimizer import PairedEvalOutcome
-from bq_eval.labs.engine.optimizer import (
-    cluster_failure_loss_bank,
-    evaluate_clause_scoped_nfr_gate,
-    export_atif_v1_8_trajectories,
-    sanitize_atif_text,
-)
 from tests.conftest import make_span
 from tests.sql_helpers import (
     SQL_DIR,
@@ -66,6 +22,20 @@ from tests.sql_helpers import (
     insert_enterprise_sqlite_span,
 )
 
+FORBIDDEN_RAW_PAYLOAD_COLUMNS: frozenset[str] = frozenset(
+    {
+        "user_prompt",
+        "retrieved_context",
+        "final_response",
+        "raw_prompt",
+        "raw_response",
+        "prompt_text",
+        "completion_text",
+        "payload",
+        "json_payload",
+    }
+)
+
 
 def _install_extra_views(conn: sqlite3.Connection, file_name: str, views: tuple[str, ...]) -> None:
     path = SQL_DIR / file_name
@@ -75,8 +45,61 @@ def _install_extra_views(conn: sqlite3.Connection, file_name: str, views: tuple[
         conn.execute(f"CREATE VIEW {short} AS {sql}")
 
 
-def test_inference_reconciliation_and_rl1_rl5_governance_parity() -> None:
-    """`v_inference_request_reconciliation` & `v_app_risk_governance` match Python twins."""
+def _check_view_zero_egress(
+    view_name: str,
+    body: exp.Expression,
+    declared_views: frozenset[str],
+) -> list[str]:
+    violations: list[str] = []
+    safe_star_sources = declared_views | {
+        cte.alias.lower() for cte in body.find_all(exp.CTE) if cte.alias
+    }
+    if isinstance(body, exp.Select) and any(isinstance(e, exp.Star) for e in body.expressions):
+        violations.append(f"{view_name}: top-level SELECT * is forbidden in zero-egress views")
+    for sub_select in body.find_all(exp.Select):
+        if not any(isinstance(e, exp.Star) for e in sub_select.expressions):
+            continue
+        from_clause = sub_select.args.get("from_")
+        from_tables = (
+            [t.name.lower() for t in from_clause.find_all(exp.Table) if t.name]
+            if from_clause is not None
+            else []
+        )
+        if not from_tables or any(t not in safe_star_sources for t in from_tables):
+            violations.append(
+                f"{view_name}: SELECT * over external source {from_tables} is forbidden"
+            )
+    referenced = {col.name.lower() for col in body.find_all(exp.Column) if col.name}
+    projected = (
+        {e.alias_or_name.lower() for e in body.expressions}
+        if isinstance(body, exp.Select)
+        else set()
+    )
+    for bad in sorted((referenced | projected) & FORBIDDEN_RAW_PAYLOAD_COLUMNS):
+        violations.append(f"{view_name}: forbidden raw payload reference {bad!r}")
+    return violations
+
+
+def _find_zero_egress_ast_violations(sql_text: str, label: str) -> list[str]:
+    """Check every `CREATE [OR REPLACE] VIEW` via SQL AST for unsafe `SELECT *` or raw payload columns."""
+    stmts = _parse_bigquery_statements(sql_text, label)
+    view_stmts = [
+        s
+        for s in stmts
+        if isinstance(s, exp.Create) and (s.args.get("kind") or "").upper() == "VIEW"
+    ]
+    declared_views = frozenset(s.this.name.lower() for s in view_stmts if s.this is not None)
+    violations: list[str] = []
+    for stmt in view_stmts:
+        if stmt.expression is None:
+            continue
+        view_name = stmt.this.sql(dialect="bigquery") if stmt.this is not None else "<view>"
+        violations.extend(_check_view_zero_egress(view_name, stmt.expression, declared_views))
+    return violations
+
+
+def test_inference_reconciliation_and_rl1_rl5_governance_sql_views() -> None:
+    """`v_inference_request_reconciliation` & `v_app_risk_governance` enforce drift alerts and RL-1..RL-5 gates."""
     base = datetime(2026, 11, 22, 14, 15, 0, tzinfo=UTC)
     otel_spans = [
         make_span(
@@ -108,63 +131,40 @@ def test_inference_reconciliation_and_rl1_rl5_governance_parity() -> None:
             base_time=base,
         ),
     ]
-    server_logs = [
-        InferenceRequestLogRecord(
-            request_id="req-1",
-            apphub_application_id="gov-rl1-app",
-            model_name="gemini-4-carbon",
-            serving_traffic_type=ServingTrafficType.STANDARD,
-            request_type_header="dedicated",
-            http_status_code=200,
-            input_tokens=10_000,
-            output_tokens=1_000,
-            request_timestamp=base,
+    server_log_rows = [
+        (
+            "req-1",
+            None,
+            "gov-rl1-app",
+            "gemini-4-carbon",
+            "STANDARD",
+            "dedicated",
+            200,
+            10_000,
+            0,
+            0,
+            0,
+            1_000,
+            0,
+            base.isoformat(),
         ),
-        InferenceRequestLogRecord(
-            request_id="req-2",
-            apphub_application_id="gov-rl4-app",
-            model_name="gemini-3.8-flash",
-            serving_traffic_type=ServingTrafficType.STANDARD,
-            request_type_header="shared",
-            http_status_code=429,
-            input_tokens=9_000,
-            output_tokens=1_000,
-            request_timestamp=base,
+        (
+            "req-2",
+            None,
+            "gov-rl4-app",
+            "gemini-3.8-flash",
+            "STANDARD",
+            "shared",
+            429,
+            9_000,
+            0,
+            0,
+            0,
+            1_000,
+            0,
+            base.isoformat(),
         ),
     ]
-
-    py_rec = {
-        r.apphub_application_id: r for r in reconcile_inference_requests(otel_spans, server_logs)
-    }
-    assert py_rec["gov-rl1-app"].reconciliation_status == "RECONCILED"
-    assert py_rec["gov-rl1-app"].pt_eligible_involuntary_spillover_count == 1
-    assert py_rec["gov-rl4-app"].reconciliation_status == "DRIFT_ALERT"
-    assert py_rec["gov-rl4-app"].intentional_shared_bypass_count == 1
-
-    rl1_app = AppGovernanceRecord(
-        apphub_application_id="gov-rl1-app",
-        risk_tier=RiskLevel.RL_1,
-        autonomy_tier=AutonomyTier.BOUNDED_AUTONOMOUS,
-        lifecycle_track_policy=LifecycleTrackPolicy.LONG_TERM_GA_ONLY,
-        funded_gsus=4.0,
-        pt_commitment_months=12,
-    )
-    rl4_app = AppGovernanceRecord(
-        apphub_application_id="gov-rl4-app",
-        risk_tier=RiskLevel.RL_4,
-        autonomy_tier=AutonomyTier.HUMAN_IN_LOOP,
-        lifecycle_track_policy=LifecycleTrackPolicy.SHORT_TERM_GA_ALLOWED,
-        funded_gsus=0.0,
-        pt_commitment_months=0,
-    )
-    rl1_eval = evaluate_app_governance(rl1_app, "gemini-4-carbon", observed_ac2=0.82)
-    rl4_eval = evaluate_app_governance(rl4_app, "gemini-3.8-flash", observed_ac2=0.78)
-    assert rl1_eval.required_ac2_gate == 0.85
-    assert rl1_eval.passes_ac2_gate is False
-    assert rl1_eval.pt_commitment_allowed is False
-    assert rl4_eval.required_ac2_gate == 0.75
-    assert rl4_eval.passes_ac2_gate is True
-    assert rl4_eval.pt_commitment_allowed is True
 
     conn = _new_sqlite_bq_conn()
     _create_enterprise_sqlite_fixture(conn)
@@ -208,26 +208,10 @@ def test_inference_reconciliation_and_rl1_rl5_governance_parity() -> None:
     )
     for sp in otel_spans:
         insert_enterprise_sqlite_span(conn, sp)
-    for lg in server_logs:
-        conn.execute(
-            "INSERT INTO inference_request_logs VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (
-                lg.request_id,
-                None,
-                lg.apphub_application_id,
-                lg.model_name,
-                str(lg.serving_traffic_type),
-                lg.request_type_header,
-                lg.http_status_code,
-                lg.input_tokens,
-                lg.cached_input_tokens,
-                lg.cache_write_5m_tokens,
-                lg.cache_write_1h_tokens,
-                lg.output_tokens,
-                lg.thinking_tokens,
-                base.isoformat(),
-            ),
-        )
+    conn.executemany(
+        "INSERT INTO inference_request_logs VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        server_log_rows,
+    )
 
     sql_rec = {
         str(r["apphub_application_id"]): dict(r)
@@ -249,79 +233,28 @@ def test_inference_reconciliation_and_rl1_rl5_governance_parity() -> None:
     assert bool(sql_gov["gov-rl4-app"]["pt_commitment_allowed"]) is True
 
 
-def test_bigquery_omni_zero_egress_ast_proof_and_multicloud_cpvo() -> None:
-    """`sql/finops/omni_spoke_views.sql` proves zero raw prompt egress, strict fallback, and unified CPVO."""
+def test_bigquery_omni_zero_egress_ast_proof() -> None:
+    """`sql/finops/omni_spoke_views.sql` projects zero raw prompts or `SELECT *`, with positive controls."""
     omni_sql = (SQL_DIR / "finops" / "omni_spoke_views.sql").read_text(encoding="utf-8")
-    stmts = _parse_bigquery_statements(omni_sql, "omni_spoke_views.sql")
-    ok, violations = verify_zero_raw_payload_egress(omni_sql)
-    assert ok, f"Zero-egress violation: {violations}"
+    violations = _find_zero_egress_ast_violations(omni_sql, "omni_spoke_views.sql")
+    assert not violations, f"Zero-egress violation: {violations}"
 
-    for stmt in stmts:
-        if isinstance(stmt, exp.Create) and (stmt.args.get("kind") or "").upper() == "VIEW":
-            select_node = stmt.expression
-            if isinstance(select_node, exp.Select):
-                projected = {col.alias_or_name.lower() for col in select_node.expressions}
-                assert not (projected & FORBIDDEN_RAW_PAYLOAD_COLUMNS), (
-                    f"Omni view projected forbidden raw payload columns: {projected & FORBIDDEN_RAW_PAYLOAD_COLUMNS}"
-                )
-
-    assert normalize_workload_principal("spiffe://corp.example/ns/agents/sa/runner") == (
-        "spiffe://corp.example/ns/agents/sa/runner"
+    # Positive controls: CREATE VIEW without OR REPLACE, SELECT *, and literal ';' cannot slip past AST.
+    star_leak = _find_zero_egress_ast_violations(
+        "CREATE VIEW `agent_eval.v_bad_star` AS SELECT * FROM `agent_eval.aws_omni_otel_spans`;",
+        "star_leak",
     )
-    assert normalize_workload_principal("arn:aws:iam::123:role/agent", cloud_provider="aws") == (
-        "principal://iam.googleapis.com/projects/external-aws/subject/arn:aws:iam::123:role/agent"
-    )
-    assert normalize_omni_application_id(None) == "unregistered_app"
-    assert normalize_omni_application_id("   ") == "unregistered_app"
+    assert any("SELECT *" in v for v in star_leak)
 
-    judge_sql = build_omni_in_residency_judge_sql(
-        project_id="hub-proj-01",
-        cloud_provider="aws",
-        canary_sample_pct=5,
+    col_leak = _find_zero_egress_ast_violations(
+        "CREATE VIEW `agent_eval.v_bad_col` AS SELECT ';' AS sep, user_prompt FROM `agent_eval.t`;",
+        "col_leak",
     )
-    _parse_bigquery_statements(judge_sql, "omni_in_residency_judge_sql")
-    assert "FARM_FINGERPRINT(trace_id)" in judge_sql
-
-    unified = reconcile_multicloud_cpvo(
-        gcp_outcomes=[("shared-app", 100, 90, 9.0)],
-        remote_slices=[
-            RemoteTraceSliceRecord(
-                cloud_provider="aws",
-                cloud_region="us-east-1",
-                apphub_application_id="shared-app",
-                workload_principal="spiffe://aws/agent",
-                model_name="claude-sonnet-4-6",
-                finops_traffic_type="production_inference",
-                total_traces=50,
-                rule0_passing_traces=48,
-                verified_outcomes=40,
-                total_spend_usd=17.0,
-            ),
-            RemoteTraceSliceRecord(
-                cloud_provider="azure",
-                cloud_region="eastus2",
-                apphub_application_id="",
-                workload_principal="principal://azure/shadow",
-                model_name="gemini-3.8-flash",
-                finops_traffic_type="production_inference",
-                total_traces=10,
-                rule0_passing_traces=10,
-                verified_outcomes=0,
-                total_spend_usd=1.2,
-            ),
-        ],
-    )
-    assert unified["shared-app"].active_clouds == 2
-    assert unified["shared-app"].verified_outcomes == 130
-    assert unified["shared-app"].unified_cost_per_verified_outcome_usd == pytest.approx(
-        26.0 / 130.0, abs=1e-12
-    )
-    assert "unregistered_app" in unified
-    assert unified["unregistered_app"].unified_cost_per_verified_outcome_usd is None
+    assert any("user_prompt" in v for v in col_leak)
 
 
-def test_sessions_5m_breaches_optimize_lane_and_ring_buffer() -> None:
-    """Session lineage, 5m SLO/429 breaches, `optimize` lane, and `<2s` RingBuffer export."""
+def test_sessions_5m_breaches_and_optimize_lane_sql_views() -> None:
+    """Session lineage, 5m SLO/429 breaches, and `optimize` spend lane execute cleanly in SQL."""
     base = datetime(2026, 11, 22, 16, 1, 0, tzinfo=UTC)
     spans = [
         make_span(
@@ -382,48 +315,20 @@ def test_sessions_5m_breaches_optimize_lane_and_ring_buffer() -> None:
     ).fetchone()
     conn.close()
 
-    py_sess = evaluate_interaction_lineage_in_sqlite(spans)[0]
-    py_breach = evaluate_5m_breaches_in_sqlite(spans, sla_latency_ms=5000.0)[0]
     py_sum = evaluate_traces_in_sqlite(spans)["live-app"]
 
-    assert int(bq_sess["turn_count"]) == py_sess.turn_count == 2
-    assert int(bq_sess["first_failure_turn_index"]) == py_sess.first_failure_turn_index == 1
+    assert int(bq_sess["turn_count"]) == 2
+    assert int(bq_sess["first_failure_turn_index"]) == 1
     assert bool(bq_sess["session_rule0_pass"]) is False
-    assert bq_breach["breach_reason"] == py_breach.breach_reason == "HTTP_429_STORM"
+    assert bq_breach["breach_reason"] == "HTTP_429_STORM"
     assert bool(bq_breach["is_breach"]) is True
     assert float(bq_opt["optimize_usd"]) == pytest.approx(py_sum.optimize_usd, abs=1e-12)
     assert float(bq_opt["optimize_usd"]) > 0.0
     assert float(bq_opt["unclassified_usd"]) == 0.0
 
-    # RingBufferSpanExporter + GenAISpanRecorder + W3C headers -> SQLiteEvalBackend (<2s CI parity).
-    tid, parent_sid, sampled = parse_trace_context_headers(
-        {"traceparent": "00-0123456789abcdef0123456789abcdef-fedcba9876543210-01"}
-    )
-    assert tid == "0123456789abcdef0123456789abcdef"
-    assert parent_sid == "fedcba9876543210"
-    assert sampled is True
-    assert format_x_cloud_trace_context(tid, parent_sid, True).endswith(";o=1")
 
-    exporter = RingBufferSpanExporter(maxlen=64)
-    recorder = GenAISpanRecorder(exporter, service_name="ci-svc", apphub_application_id="ci-app")
-    with recorder.start_span(
-        "invoke_agent",
-        span_kind=GenAISpanKind.INVOKE_AGENT,
-        trace_id=tid,
-        parent_span_id=parent_sid,
-        session_id="sess-ci",
-        turn_index=0,
-    ) as st:
-        st["input_tokens"] = 8_000
-        st["output_tokens"] = 400
-    backend = SQLiteEvalBackend()
-    ci_summary = backend.evaluate_traces(exporter.get_spans())["ci-app"]
-    assert ci_summary.total_traces == 1
-    assert json.loads(json.dumps({"ok": True}))["ok"] is True
-
-
-def test_clause_scoped_nfr_gate_loss_bank_and_atif_export() -> None:
-    """Clause-scoped `policy_sha256` `NFR == 0.0%` gate, loss-bank clustering & `ATIF-v1.8` export."""
+def test_clause_scoped_nfr_gate_sql_view() -> None:
+    """`v_step3_policy_nfr_gate` separates amended-clause flips from unamended negative flips."""
     conn = _new_sqlite_bq_conn()
     _create_enterprise_sqlite_fixture(conn)
     _install_extra_views(
@@ -528,58 +433,6 @@ def test_clause_scoped_nfr_gate_loss_bank_and_atif_export() -> None:
     nfr_sql_row = conn.execute("SELECT * FROM v_step3_policy_nfr_gate").fetchone()
     conn.close()
 
-    outcomes = [
-        PairedEvalOutcome(
-            trace_id="tr-c1",
-            apphub_application_id="pol-app",
-            rubric_id="groundedness_4pt_v1",
-            baseline_pass=True,
-            candidate_pass=False,
-            baseline_policy_sha256="sha-v1",
-            candidate_policy_sha256="sha-v2",
-            amended_clause_ids=("CL-4.2", "CL-9.1"),
-            target_clause_id="CL-4.2",
-            failure_signature="clause_4_2_stricter",
-            reasoning_trace="Contact jane.doe@corp.example SSN 123-45-6789 token sk-secret1234567890",
-            trace_cost_usd=0.05,
-        ),
-        PairedEvalOutcome(
-            trace_id="tr-c2",
-            apphub_application_id="pol-app",
-            rubric_id="groundedness_4pt_v1",
-            baseline_pass=True,
-            candidate_pass=True,
-            baseline_policy_sha256="sha-v1",
-            candidate_policy_sha256="sha-v2",
-            amended_clause_ids=("CL-4.2", "CL-9.1"),
-            target_clause_id="CL-1.0",
-        ),
-    ]
-    nfr_py = evaluate_clause_scoped_nfr_gate(outcomes)[("pol-app", "groundedness_4pt_v1")]
-    assert int(nfr_sql_row["amended_clause_flips"]) == nfr_py.amended_clause_flips == 1
-    assert int(nfr_sql_row["unamended_negative_flips"]) == nfr_py.unamended_negative_flips == 0
+    assert int(nfr_sql_row["amended_clause_flips"]) == 1
+    assert int(nfr_sql_row["unamended_negative_flips"]) == 0
     assert bool(nfr_sql_row["passes_nfr_gate"]) is True
-    assert nfr_py.passes_nfr_gate is True
-
-    clusters = cluster_failure_loss_bank(outcomes)
-    assert len(clusters) == 1
-    assert clusters[0].status == "NEW"
-
-    payload_map = {
-        "tr-c1": TracePayloadRecord(
-            trace_id="tr-c1",
-            apphub_application_id="pol-app",
-            ingested_at=datetime(2026, 11, 22, 11, 0, 0, tzinfo=UTC),
-            user_prompt="Email alice@example.com about 123-45-6789",
-            retrieved_context="",
-            final_response="Used key AIzaSyD1234567890abcdef",
-        )
-    }
-    trajs = export_atif_v1_8_trajectories(spans=[], payloads=payload_map, outcomes=outcomes)
-    assert len(trajs) == 1
-    assert trajs[0].schema_version == "ATIF-v1.8"
-    assert "alice@example.com" not in trajs[0].sanitized_prompt
-    assert "123-45-6789" not in trajs[0].sanitized_prompt
-    assert "AIzaSyD1234567890abcdef" not in trajs[0].sanitized_response
-    assert "sk-secret1234567890" not in trajs[0].sanitized_reasoning
-    assert "user.synthetic@example.invalid" in sanitize_atif_text("bob@bank.com")

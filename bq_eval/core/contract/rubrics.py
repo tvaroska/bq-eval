@@ -1,12 +1,10 @@
-"""4-Point Ordinal Rubrics, CoT-First Schema Contracts, and XML Prompt-Injection Escaping."""
+"""4-Point Ordinal Rubrics and CoT-First System Prompt Contracts."""
 
 from __future__ import annotations
 
-import html
-import re
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class OrdinalScaleLevel(BaseModel):
@@ -36,42 +34,6 @@ class RubricSpec(BaseModel):
         OrdinalScaleLevel,
         OrdinalScaleLevel,
     ]
-
-
-class OrdinalScoreOutput(BaseModel):
-    """Structured output contract for Tier 2 `AI.GENERATE_TABLE` judge calls.
-
-    `reasoning_trace` MUST precede `ordinal_score` so autoregressive decoding
-    commits to concrete evidence before emitting the integer rating.
-    """
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    reasoning_trace: str = Field(..., min_length=10)
-    ordinal_score: Literal[1, 2, 3, 4]
-    binary_pass: bool
-
-    @model_validator(mode="after")
-    def _validate_binary_pass_consistency(self) -> OrdinalScoreOutput:
-        expected_pass = self.ordinal_score >= 3
-        if self.binary_pass != expected_pass:
-            raise ValueError(
-                f"binary_pass={self.binary_pass} contradicts ordinal_score={self.ordinal_score} "
-                "(passing threshold >= 3)."
-            )
-        return self
-
-
-_XML_TAG_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_.-]*$")
-
-
-def wrap_untrusted_text(raw_text: str, tag: str = "untrusted_text") -> str:
-    """XML-escape untrusted user/model text and wrap in `<untrusted_text>` tags."""
-    cleaned_tag = tag.strip()
-    if not cleaned_tag or not _XML_TAG_RE.fullmatch(cleaned_tag):
-        raise ValueError(f"Invalid XML wrapper tag {tag!r}: must match ^[a-zA-Z_][a-zA-Z0-9_.-]*$.")
-    escaped = html.escape(raw_text or "", quote=False)
-    return f"<{cleaned_tag}>\n{escaped}\n</{cleaned_tag}>"
 
 
 def build_autorater_system_prompt(rubric: RubricSpec) -> str:

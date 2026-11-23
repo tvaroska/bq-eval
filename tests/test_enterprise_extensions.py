@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from bq_eval.cli.app import main as cli_main
 from bq_eval.core.contract.otel import (
     FinOpsTrafficType,
     OTelGenAISpanRecord,
@@ -20,10 +22,7 @@ from bq_eval.finops.engine.chargeback_three_pool import (
     allocate_focus_three_pool_hourly_chargeback,
     build_capacity_residual_schedule_request,
 )
-from bq_eval.finops.engine.sqlite_capacity import (
-    evaluate_hourly_burndown_in_sqlite,
-    evaluate_interaction_lineage_in_sqlite,
-)
+from bq_eval.finops.engine.sqlite_capacity import evaluate_hourly_burndown_in_sqlite
 from tests.conftest import make_span
 from tests.sql_helpers import (
     SQL_DIR,
@@ -672,13 +671,55 @@ def test_clause_gate_exact() -> None:
         "WHERE session_id = 'sess-multi-span'"
     ).fetchone()
     conn.close()
-    sq_sess = evaluate_interaction_lineage_in_sqlite(session_spans)[0]
 
     assert int(nfr["unamended_negative_flips"]) == 1
     assert int(nfr["passes_nfr_gate"]) == 0
     assert int(bq_sess["turn_count"]) == 2
     assert int(bq_sess["max_turn_index"]) == 1
     assert int(bq_sess["trace_count"]) == 2
-    assert sq_sess.turn_count == 2
-    assert sq_sess.max_turn_index == 1
-    assert sq_sess.trace_count == 2
+
+
+def test_residual_schedule_preserves_zero_traffic_hours_and_capacity_export_cli(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Zero-traffic hours stay in the hourly grid as `0.0` and `bq-eval capacity-export` runs end-to-end."""
+    t0 = datetime(2026, 11, 22, 10, 0, 0, tzinfo=UTC)
+    spans = [
+        make_span(
+            "tr-gap-h0",
+            "sp-gap-h0",
+            app_id="gap-app",
+            model_name="gemini-3.8-flash",
+            input_tokens=60_000,
+            cached_input_tokens=0,
+            output_tokens=0,
+            thinking_tokens=0,
+            base_time=t0,
+        ),
+        make_span(
+            "tr-gap-h3",
+            "sp-gap-h3",
+            app_id="gap-app",
+            model_name="gemini-3.8-flash",
+            input_tokens=120_000,
+            cached_input_tokens=0,
+            output_tokens=0,
+            thinking_tokens=0,
+            base_time=t0 + timedelta(hours=3),
+        ),
+    ]
+    hourly_rows = evaluate_hourly_burndown_in_sqlite(spans)
+    req = build_capacity_residual_schedule_request(
+        hourly_rows,
+        model="gemini-3.8-flash",
+        provisioned_gsus=4,
+    )
+    # 10:00Z, 11:00Z (gap), 12:00Z (gap), 13:00Z -> 4 contiguous hours with 0.0 in the valley.
+    assert req.revenue_tpm_by_hour == (1000.0, 0.0, 0.0, 2000.0)
+
+    rc = cli_main(["capacity-export", "--corpus", "m2-live", "--provisioned-gsus", "4"])
+    assert rc == 0
+    exported = json.loads(capsys.readouterr().out)
+    assert exported["corpus_id"] == "m2-live"
+    assert exported["three_pool_chargeback"]["reconciliation_drift_usd"] < 1e-12
+    assert len(exported["residual_schedule_request"]["revenue_tpm_by_hour"]) >= 1

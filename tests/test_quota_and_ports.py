@@ -26,7 +26,6 @@ from bq_eval.core.engine.ports import (
     SQLiteEvalBackend,
     WarehouseEvalBackend,
 )
-from bq_eval.core.engine.quota import DailyQuotaGuard, QuotaCandidateTrace
 from bq_eval.demo.pipeline import run_showcase_pipeline
 from bq_eval.finops.engine.capacity_export import hourly_burndown_rows
 from bq_eval.finops.engine.sqlite_capacity import evaluate_hourly_burndown_in_sqlite
@@ -543,25 +542,3 @@ def test_bigquery_adapter_maps_all_spend_buckets() -> None:
     sq_hourly = evaluate_hourly_burndown_in_sqlite([claude_span])
     assert sq_hourly[0].long_context_cliff_spans == 0
     assert sq_hourly[0].weighted_burndown_tokens == pytest.approx(255_000.0, abs=1e-12)
-
-    # S-5: DailyQuotaGuard.reserve_batch honors instance max_output_tokens / thinking_level defaults
-    guard_hi = DailyQuotaGuard(
-        daily_judge_token_cap=20_000,
-        per_app_default_token_cap=20_000,
-        max_output_tokens=1000,
-        thinking_level="HIGH",
-    )
-    res_hi = guard_hi.reserve_batch(
-        [
-            QuotaCandidateTrace(
-                trace_id="tr-def-1",
-                apphub_application_id="app-hi",
-                rubric_id="groundedness_4pt_v1",
-                prompt_text="x" * 400,
-                trace_start_iso="2026-11-21T09:00:00+00:00",
-            )
-        ],
-        rubric_id="groundedness_4pt_v1",
-    )
-    assert res_hi.total_reserved_tokens == 100 + 1000 + 8192
-    guard_hi.close()

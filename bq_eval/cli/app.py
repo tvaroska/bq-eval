@@ -11,6 +11,10 @@ from typing import cast
 
 from bq_eval import __version__
 from bq_eval.cli.bootstrap_cmd import register_bootstrap_subparser, run_bootstrap_command
+from bq_eval.cli.capacity_cmd import (
+    register_capacity_export_subparser,
+    run_capacity_export_command,
+)
 from bq_eval.cli.server import create_workbench_server
 from bq_eval.core.contract.otel import BQAAAgentEvent
 from bq_eval.core.contract.pricing import MANAGED_EVALUATE_AGENT_METRICS
@@ -215,6 +219,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional path to export aggregated TracePayloadRecord rows as JSONL.",
     )
     register_bootstrap_subparser(sub)
+    register_capacity_export_subparser(sub)
     return parser
 
 
@@ -392,6 +397,7 @@ def _run_command(args: argparse.Namespace) -> int:
         "judge-sql": _run_judge_sql,
         "bqaa": _run_bqaa,
         "bootstrap": run_bootstrap_command,
+        "capacity-export": run_capacity_export_command,
     }
     handler = handlers.get(args.command)
     return handler(args) if handler is not None else 1

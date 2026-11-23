@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from typing import Literal
 
 from bq_eval.finops.contract.chargeback import (
@@ -269,6 +270,27 @@ def allocate_focus_three_pool_hourly_chargeback(  # noqa: PLR0913
     )
 
 
+def parse_utc_hour(raw_hour: str) -> datetime:
+    """Parse an ISO-8601 timestamp string and floor it to its UTC hour."""
+    cleaned = raw_hour.strip()
+    if cleaned.endswith("Z"):
+        cleaned = f"{cleaned[:-1]}+00:00"
+    dt = datetime.fromisoformat(cleaned)
+    utc_dt = dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt.astimezone(UTC)
+    return utc_dt.replace(minute=0, second=0, microsecond=0)
+
+
+def contiguous_utc_hours(raw_hours: Sequence[str], *, max_hours: int = 168) -> tuple[datetime, ...]:
+    """Expand observed ISO hour keys into a contiguous UTC hourly grid (no silent gaps)."""
+    parsed = sorted({parse_utc_hour(h) for h in raw_hours})
+    if not parsed:
+        return ()
+    start, end = parsed[0], parsed[-1]
+    span_hours = int((end - start).total_seconds() // 3600) + 1
+    count = min(max_hours, max(1, span_hours))
+    return tuple(start + timedelta(hours=offset) for offset in range(count))
+
+
 def build_capacity_residual_schedule_request(  # noqa: PLR0913
     hourly_rows: Sequence[HourlyBurndownExportRow],
     *,
@@ -285,22 +307,26 @@ def build_capacity_residual_schedule_request(  # noqa: PLR0913
     if not (0.1 < safety_headroom_ratio <= 0.85):
         raise ValueError("safety_headroom_ratio must satisfy 0.1 < ratio <= 0.85.")
 
-    revenue_by_hour: dict[str, float] = {}
+    revenue_by_hour: dict[datetime, float] = {}
+    matched_raw_hours: list[str] = []
     inferred_evergreen = 0.0
     for row in hourly_rows:
         if row.model_name != model and row.model != model:
             continue
-        hour_key = row.timestamp or row.usage_hour
-        revenue_by_hour.setdefault(hour_key, 0.0)
+        raw_hour = row.timestamp or row.usage_hour
+        hour_dt = parse_utc_hour(raw_hour)
+        matched_raw_hours.append(raw_hour)
+        revenue_by_hour.setdefault(hour_dt, 0.0)
         if row.finops_traffic_type in _PROD_TRAFFIC_TYPES:
-            revenue_by_hour[hour_key] += row.weighted_burndown_tokens / 60.0
+            revenue_by_hour[hour_dt] += row.weighted_burndown_tokens / 60.0
         else:
             inferred_evergreen += row.weighted_burndown_tokens
 
-    if not revenue_by_hour:
+    if not matched_raw_hours:
         raise ValueError(f"No hourly burndown rows matched model {model!r}.")
 
-    ordered_tpm = tuple(round(revenue_by_hour[h], 2) for h in sorted(revenue_by_hour))
+    grid = contiguous_utc_hours(matched_raw_hours, max_hours=168)
+    ordered_tpm = tuple(round(revenue_by_hour.get(h, 0.0), 2) for h in grid)
     effective_backfill = (
         evergreen_backfill_tokens if evergreen_backfill_tokens > 0.0 else inferred_evergreen
     )
@@ -309,7 +335,7 @@ def build_capacity_residual_schedule_request(  # noqa: PLR0913
         model=model,
         provisioned_gsus=provisioned_gsus,
         safety_headroom_ratio=safety_headroom_ratio,
-        revenue_tpm_by_hour=ordered_tpm[:168],
+        revenue_tpm_by_hour=ordered_tpm,
         deadline_jobs=tuple(deadline_jobs),
         evergreen_backfill_tokens=effective_backfill,
         paygo_per_1m_burndown_tokens_usd=paygo_per_1m_burndown_tokens_usd,
