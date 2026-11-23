@@ -213,7 +213,7 @@ def test_capacity_wire_contract_hourly_burndown_jsonl_and_hourly_focus_chargebac
     tmp_path: Path,
 ) -> None:
     """Verify `v_capacity_hourly_burndown_export`, `otel_spans.jsonl`, and `allocate_focus_hourly_chargeback`."""
-    from tests.test_sql_contracts import (
+    from tests.sql_helpers import (
         ENTERPRISE_OTEL_SPANS_BASE_INSERT,
         _create_enterprise_sqlite_fixture,
         _install_enterprise_views,
@@ -349,7 +349,7 @@ def test_capacity_wire_contract_hourly_burndown_jsonl_and_hourly_focus_chargebac
 
 def test_docubridge_canonical_select_views_contract() -> None:
     """Execute DocuBridge's 4 canonical `SELECT` queries against transpiled `bq-eval` views."""
-    from tests.test_sql_contracts import (
+    from tests.sql_helpers import (
         ENTERPRISE_OTEL_SPANS_BASE_INSERT,
         _create_enterprise_sqlite_fixture,
         _extract_view_sql_text,

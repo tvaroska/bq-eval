@@ -64,7 +64,7 @@ from bq_eval.labs.engine.optimizer import (
     sanitize_atif_text,
 )
 from tests.conftest import make_span
-from tests.test_sql_contracts import (
+from tests.sql_helpers import (
     SQL_DIR,
     _create_enterprise_sqlite_fixture,
     _extract_view_sql_text,

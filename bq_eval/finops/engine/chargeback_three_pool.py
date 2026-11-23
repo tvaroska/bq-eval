@@ -1,9 +1,10 @@
-"""3-Pool Hourly FOCUS 1.2 Chargeback (`prod|eval|optimize`) & `capacity` wire sync."""
+"""Three-pool hourly chargeback (prod, eval, optimize) and the capacity scheduling export."""
 
 from __future__ import annotations
 
 import math
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
 from typing import Literal
 
 from bq_eval.finops.contract.chargeback import (
@@ -66,7 +67,111 @@ def _normalize_hourly_lane_matrix(
     return padded, max_hours
 
 
-def allocate_focus_three_pool_hourly_chargeback(  # noqa: C901, PLR0912, PLR0913, PLR0915
+@dataclass
+class _PoolLedger:
+    """Running USD and token totals per (app, lane) across the hours being allocated."""
+
+    keys: list[tuple[str, TrafficLane]]
+    tokens: dict[tuple[str, TrafficLane], float] = field(default_factory=dict)
+    pool1: dict[tuple[str, TrafficLane], float] = field(default_factory=dict)
+    pool2: dict[tuple[str, TrafficLane], float] = field(default_factory=dict)
+    pool3_involuntary: dict[tuple[str, TrafficLane], float] = field(default_factory=dict)
+    pool3_burst: dict[tuple[str, TrafficLane], float] = field(default_factory=dict)
+    idle_tokens: float = 0.0
+    idle_usd: float = 0.0
+
+    def __post_init__(self) -> None:
+        for book in (self.tokens, self.pool1, self.pool2, self.pool3_involuntary, self.pool3_burst):
+            book.update(dict.fromkeys(self.keys, 0.0))
+
+    def row_total(self, k: tuple[str, TrafficLane]) -> float:
+        return self.pool1[k] + self.pool2[k] + self.pool3_involuntary[k] + self.pool3_burst[k]
+
+
+def _validate_three_pool_scalars(
+    capacity_tokens: float,
+    fixed_cost_usd: float,
+    funded_gsus_by_app: Mapping[str, float],
+) -> None:
+    if not math.isfinite(capacity_tokens) or capacity_tokens <= 0:
+        raise ValueError("hourly_reserved_pt_capacity_tokens must be finite and positive.")
+    if not math.isfinite(fixed_cost_usd) or fixed_cost_usd < 0.0:
+        raise ValueError("reserved_pt_fixed_cost_usd must be finite and non-negative.")
+    for app_id, gsus in funded_gsus_by_app.items():
+        if not math.isfinite(gsus) or gsus < 0.0:
+            raise ValueError(f"funded_gsus_by_app[{app_id!r}] must be finite and non-negative.")
+
+
+def _is_involuntary_spill(
+    app_id: str,
+    app_tokens: float,
+    funded_gsus_by_app: Mapping[str, float],
+    capacity_tokens: float,
+) -> bool:
+    """Spillover is involuntary when the app stayed within its funded share of the reservation."""
+    funded = funded_gsus_by_app.get(app_id, 0.0)
+    total_funded = sum(funded_gsus_by_app.values())
+    if funded <= 0.0 or total_funded <= 0.0:
+        return False
+    entitlement = (funded / total_funded) * capacity_tokens
+    return app_tokens <= entitlement + 1e-9
+
+
+def _allocate_hour(  # noqa: PLR0913
+    ledger: _PoolLedger,
+    padded: Mapping[tuple[str, TrafficLane], Sequence[float]],
+    hour: int,
+    capacity_tokens: float,
+    hourly_commit_usd: float,
+    funded_gsus_by_app: Mapping[str, float],
+    paygo_rates: Mapping[str, float] | float,
+) -> None:
+    prod_keys = [k for k in ledger.keys if k[1] == "prod"]
+    wf_keys = [k for k in ledger.keys if k[1] in ("eval", "optimize")]
+    prod_total = sum(padded[k][hour] for k in prod_keys)
+    wf_total = sum(padded[k][hour] for k in wf_keys)
+
+    # Production fills the reservation first; eval/optimize take what is left; the rest is idle.
+    prod_on_pt = min(capacity_tokens, prod_total)
+    spare_after_prod = max(0.0, capacity_tokens - prod_on_pt)
+    wf_on_pt = min(spare_after_prod, wf_total)
+    idle = max(0.0, spare_after_prod - wf_on_pt)
+
+    pool1_usd = hourly_commit_usd * (prod_on_pt / capacity_tokens)
+    pool2_usd = hourly_commit_usd * (wf_on_pt / capacity_tokens)
+    ledger.idle_usd += hourly_commit_usd * (idle / capacity_tokens)
+    ledger.idle_tokens += idle
+    prod_overflow = max(0.0, prod_total - capacity_tokens)
+    wf_overflow = max(0.0, wf_total - spare_after_prod)
+
+    for k in prod_keys:
+        app_id, tok = k[0], padded[k][hour]
+        ledger.tokens[k] += tok
+        if prod_total <= 0.0:
+            continue
+        share = tok / prod_total
+        ledger.pool1[k] += pool1_usd * share
+        if prod_overflow > 0.0:
+            spill_usd = (prod_overflow * share / 1e6) * _rate_for_app(paygo_rates, app_id)
+            if _is_involuntary_spill(app_id, tok, funded_gsus_by_app, capacity_tokens):
+                ledger.pool3_involuntary[k] += spill_usd
+            else:
+                ledger.pool3_burst[k] += spill_usd
+
+    for k in wf_keys:
+        app_id, tok = k[0], padded[k][hour]
+        ledger.tokens[k] += tok
+        if wf_total <= 0.0:
+            continue
+        share = tok / wf_total
+        ledger.pool2[k] += pool2_usd * share
+        if wf_overflow > 0.0:
+            ledger.pool3_burst[k] += (wf_overflow * share / 1e6) * _rate_for_app(
+                paygo_rates, app_id
+            )
+
+
+def allocate_focus_three_pool_hourly_chargeback(  # noqa: PLR0913
     hourly_demand_by_app_lane: Mapping[tuple[str, TrafficLane], Sequence[float]],
     app_cost_centers: Mapping[str, str],
     funded_gsus_by_app: Mapping[str, float],
@@ -77,135 +182,64 @@ def allocate_focus_three_pool_hourly_chargeback(  # noqa: C901, PLR0912, PLR0913
     platform_owner_id: str = "platform-shared-reservation",
     platform_cost_center: str = "CC-PLATFORM-IDLE",
 ) -> ThreePoolChargebackSummary:
-    """Compute 3-Pool Hourly FOCUS 1.2 Chargeback with `prod|eval|optimize` isolation.
+    """Split a reserved-capacity bill and its overflow across apps, hour by hour.
 
-    * Pool 1 (Active PT): Interactive `prod` share of committed hourly PT capacity.
-    * Pool 2 (Water-Fill / Idle PT): `eval` and `optimize` valley reclamation plus central idle tax.
-    * Pool 3 (PayGo Spillover): Splits overflow into `Involuntary` (within app's `funded_gsus`
-      entitlement) vs. `TenantBurst` (above app's `funded_gsus` entitlement or unreserved burst).
-    Reconciles `Pool 1 + Pool 2 + Pool 3` to `< 1e-12` USD drift.
+    * Pool 1: production's share of the reservation.
+    * Pool 2: eval and optimize traffic that fits in the capacity production left unused;
+      whatever is still unused is billed to the platform as idle.
+    * Pool 3: pay-as-you-go overflow, split into involuntary (the app stayed within its funded
+      share) and tenant burst (it went above it, or had no funded share).
+    The pools add up to the fixed cost plus overflow within `1e-12` USD.
     """
-    if (
-        not math.isfinite(hourly_reserved_pt_capacity_tokens)
-        or hourly_reserved_pt_capacity_tokens <= 0
-    ):
-        raise ValueError("hourly_reserved_pt_capacity_tokens must be finite and positive.")
-    if not math.isfinite(reserved_pt_fixed_cost_usd) or reserved_pt_fixed_cost_usd < 0.0:
-        raise ValueError("reserved_pt_fixed_cost_usd must be finite and non-negative.")
-
-    for app_id, gsus in funded_gsus_by_app.items():
-        if not math.isfinite(gsus) or gsus < 0.0:
-            raise ValueError(f"funded_gsus_by_app[{app_id!r}] must be finite and non-negative.")
-
+    _validate_three_pool_scalars(
+        hourly_reserved_pt_capacity_tokens, reserved_pt_fixed_cost_usd, funded_gsus_by_app
+    )
     padded, max_hours = _normalize_hourly_lane_matrix(hourly_demand_by_app_lane)
     hourly_commit_usd = reserved_pt_fixed_cost_usd / max_hours
-    total_funded_gsus = sum(funded_gsus_by_app.values())
-
-    keys = sorted(padded)
-    tot_tokens = dict.fromkeys(keys, 0.0)
-    pool1_usd = dict.fromkeys(keys, 0.0)
-    pool2_wf_usd = dict.fromkeys(keys, 0.0)
-    pool3_invol_usd = dict.fromkeys(keys, 0.0)
-    pool3_burst_usd = dict.fromkeys(keys, 0.0)
-    idle_tokens_total = 0.0
-    idle_usd_total = 0.0
-
-    for h in range(max_hours):
-        prod_keys = [k for k in keys if k[1] == "prod"]
-        wf_keys = [k for k in keys if k[1] in ("eval", "optimize")]
-
-        prod_total_h = sum(padded[k][h] for k in prod_keys)
-        wf_total_h = sum(padded[k][h] for k in wf_keys)
-
-        prod_on_pt_h = min(hourly_reserved_pt_capacity_tokens, prod_total_h)
-        spare_after_prod_h = max(0.0, hourly_reserved_pt_capacity_tokens - prod_on_pt_h)
-        wf_on_pt_h = min(spare_after_prod_h, wf_total_h)
-        idle_h = max(0.0, spare_after_prod_h - wf_on_pt_h)
-
-        pool1_h_usd = hourly_commit_usd * (prod_on_pt_h / hourly_reserved_pt_capacity_tokens)
-        pool2_wf_h_usd = hourly_commit_usd * (wf_on_pt_h / hourly_reserved_pt_capacity_tokens)
-        idle_usd_total += hourly_commit_usd * (idle_h / hourly_reserved_pt_capacity_tokens)
-        idle_tokens_total += idle_h
-
-        prod_overflow_h = max(0.0, prod_total_h - hourly_reserved_pt_capacity_tokens)
-        wf_overflow_h = max(0.0, wf_total_h - spare_after_prod_h)
-
-        for k in prod_keys:
-            app_id = k[0]
-            tok = padded[k][h]
-            tot_tokens[k] += tok
-            if prod_total_h > 0.0:
-                share = tok / prod_total_h
-                pool1_usd[k] += pool1_h_usd * share
-                if prod_overflow_h > 0.0:
-                    app_overflow_tok = prod_overflow_h * share
-                    app_entitlement = (
-                        (funded_gsus_by_app.get(app_id, 0.0) / total_funded_gsus)
-                        * hourly_reserved_pt_capacity_tokens
-                        if total_funded_gsus > 0.0
-                        else 0.0
-                    )
-                    rate = _rate_for_app(paygo_spillover_usd_per_1m_by_app, app_id)
-                    spill_usd = (app_overflow_tok / 1e6) * rate
-                    if funded_gsus_by_app.get(app_id, 0.0) > 0.0 and tok <= app_entitlement + 1e-9:
-                        pool3_invol_usd[k] += spill_usd
-                    else:
-                        pool3_burst_usd[k] += spill_usd
-
-        for k in wf_keys:
-            app_id = k[0]
-            tok = padded[k][h]
-            tot_tokens[k] += tok
-            if wf_total_h > 0.0:
-                share = tok / wf_total_h
-                pool2_wf_usd[k] += pool2_wf_h_usd * share
-                if wf_overflow_h > 0.0:
-                    wf_overflow_tok = wf_overflow_h * share
-                    rate = _rate_for_app(paygo_spillover_usd_per_1m_by_app, app_id)
-                    pool3_burst_usd[k] += (wf_overflow_tok / 1e6) * rate
-
-    rows: list[ThreePoolFocusRow] = []
-    prod_sum = 0.0
-    eval_sum = 0.0
-    opt_sum = 0.0
-
-    for k in keys:
-        app_id, lane = k
-        total_row_usd = pool1_usd[k] + pool2_wf_usd[k] + pool3_invol_usd[k] + pool3_burst_usd[k]
-        if lane == "prod":
-            prod_sum += total_row_usd
-        elif lane == "eval":
-            eval_sum += total_row_usd
-        else:
-            opt_sum += total_row_usd
-        rows.append(
-            ThreePoolFocusRow(
-                apphub_application_id=app_id,
-                cost_center=app_cost_centers.get(app_id, "UNASSIGNED"),
-                traffic_lane=lane,
-                weighted_burndown_tokens=tot_tokens[k],
-                pool1_active_pt_usd=pool1_usd[k],
-                pool2_waterfill_pt_usd=pool2_wf_usd[k],
-                pool2_unutilized_idle_usd=0.0,
-                pool3_involuntary_spillover_usd=pool3_invol_usd[k],
-                pool3_tenant_burst_spillover_usd=pool3_burst_usd[k],
-                total_allocated_usd=total_row_usd,
-            )
+    ledger = _PoolLedger(keys=sorted(padded))
+    for hour in range(max_hours):
+        _allocate_hour(
+            ledger,
+            padded,
+            hour,
+            hourly_reserved_pt_capacity_tokens,
+            hourly_commit_usd,
+            funded_gsus_by_app,
+            paygo_spillover_usd_per_1m_by_app,
         )
 
-    if idle_usd_total > 0.0:
+    rows = [
+        ThreePoolFocusRow(
+            apphub_application_id=app_id,
+            cost_center=app_cost_centers.get(app_id, "UNASSIGNED"),
+            traffic_lane=lane,
+            weighted_burndown_tokens=ledger.tokens[(app_id, lane)],
+            pool1_active_pt_usd=ledger.pool1[(app_id, lane)],
+            pool2_waterfill_pt_usd=ledger.pool2[(app_id, lane)],
+            pool2_unutilized_idle_usd=0.0,
+            pool3_involuntary_spillover_usd=ledger.pool3_involuntary[(app_id, lane)],
+            pool3_tenant_burst_spillover_usd=ledger.pool3_burst[(app_id, lane)],
+            total_allocated_usd=ledger.row_total((app_id, lane)),
+        )
+        for app_id, lane in ledger.keys
+    ]
+    lane_totals = {"prod": 0.0, "eval": 0.0, "optimize": 0.0}
+    for k in ledger.keys:
+        lane_totals[k[1]] += ledger.row_total(k)
+
+    if ledger.idle_usd > 0.0:
         rows.append(
             ThreePoolFocusRow(
                 apphub_application_id=platform_owner_id,
                 cost_center=platform_cost_center,
                 traffic_lane="platform_idle",
-                weighted_burndown_tokens=idle_tokens_total,
+                weighted_burndown_tokens=ledger.idle_tokens,
                 pool1_active_pt_usd=0.0,
                 pool2_waterfill_pt_usd=0.0,
-                pool2_unutilized_idle_usd=idle_usd_total,
+                pool2_unutilized_idle_usd=ledger.idle_usd,
                 pool3_involuntary_spillover_usd=0.0,
                 pool3_tenant_burst_spillover_usd=0.0,
-                total_allocated_usd=idle_usd_total,
+                total_allocated_usd=ledger.idle_usd,
             )
         )
 
@@ -213,19 +247,16 @@ def allocate_focus_three_pool_hourly_chargeback(  # noqa: C901, PLR0912, PLR0913
         r.pool3_involuntary_spillover_usd + r.pool3_tenant_burst_spillover_usd for r in rows
     )
     total_allocated = sum(r.total_allocated_usd for r in rows)
-    expected_total = reserved_pt_fixed_cost_usd + total_paygo
-    drift = abs(total_allocated - expected_total)
-
     return ThreePoolChargebackSummary(
         rows=tuple(rows),
         reserved_pt_fixed_cost_usd=reserved_pt_fixed_cost_usd,
         total_paygo_spillover_usd=total_paygo,
         total_allocated_usd=total_allocated,
-        reconciliation_drift_usd=drift,
-        prod_total_usd=prod_sum,
-        eval_total_usd=eval_sum,
-        optimize_total_usd=opt_sum,
-        platform_idle_usd=idle_usd_total,
+        reconciliation_drift_usd=abs(total_allocated - (reserved_pt_fixed_cost_usd + total_paygo)),
+        prod_total_usd=lane_totals["prod"],
+        eval_total_usd=lane_totals["eval"],
+        optimize_total_usd=lane_totals["optimize"],
+        platform_idle_usd=ledger.idle_usd,
     )
 
 

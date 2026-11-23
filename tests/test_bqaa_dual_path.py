@@ -106,7 +106,7 @@ def test_bqaa_mode_a_and_mode_c_transpile_to_sqlite_with_null_shadow_outcome_and
     None
 ):
     """Transpile `v_bqaa_otel_spans` (Mode A) and `v_otel_allspans_only` + Hybrid `UNION ALL` (Mode C) in SQLite."""
-    from tests.test_sql_contracts import (
+    from tests.sql_helpers import (
         _extract_view_sql_text,
         _new_sqlite_bq_conn,
         _transpile_bq_view_to_sqlite,

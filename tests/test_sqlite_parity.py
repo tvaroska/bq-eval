@@ -15,7 +15,7 @@ from bq_eval.core.contract.results import ConfusionMatrix
 from bq_eval.core.engine.sql_eval import evaluate_all_rubrics_in_sqlite, evaluate_traces_in_sqlite
 from bq_eval.finops.engine.spend import diagnose_prefix_cache_dilution
 from tests.conftest import make_span
-from tests.test_sql_contracts import (
+from tests.sql_helpers import (
     ENTERPRISE_EVAL_RESULTS_BASE_INSERT,
     _create_enterprise_sqlite_fixture,
     _extract_view_sql_text,

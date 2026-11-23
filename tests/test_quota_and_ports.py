@@ -34,7 +34,7 @@ from bq_eval.core.engine.quota import (
 from bq_eval.demo.pipeline import run_showcase_pipeline
 from bq_eval.finops.engine.capacity_export import hourly_burndown_rows
 from scripts.bq_dry_run import split_sql_statements
-from tests.test_sql_contracts import (
+from tests.sql_helpers import (
     ENTERPRISE_EVAL_RESULTS_BASE_INSERT,
     ENTERPRISE_OTEL_SPANS_BASE_INSERT,
     SQL_DIR,

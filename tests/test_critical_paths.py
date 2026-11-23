@@ -462,7 +462,7 @@ def test_focus_chargeback_payg_overflow_and_removed_legacy_kwarg() -> None:
 
 def test_step3_paired_run_comparison_temporal_order_and_dedup() -> None:
     """Transpiled `v_step3_paired_run_comparison` orders `run_9` -> `run_10` temporally."""
-    from tests.test_sql_contracts import (
+    from tests.sql_helpers import (
         _extract_view_sql_text,
         _new_sqlite_bq_conn,
         _transpile_bq_view_to_sqlite,
@@ -631,7 +631,7 @@ def _build_stratppi_20_to_1_fixture() -> tuple[
 
 def test_stratppi_20_to_1_tail_sampling_sql_sqlite_python_parity() -> None:
     """`20:1` tail-skewed fixture proves `< 1e-12` SQL/SQLite/Python parity and unbiased `calibrated_pass_rate`."""
-    from tests.test_sql_contracts import (
+    from tests.sql_helpers import (
         ENTERPRISE_EVAL_RESULTS_BASE_INSERT,
         ENTERPRISE_OTEL_SPANS_BASE_INSERT,
         _create_enterprise_sqlite_fixture,

@@ -14,7 +14,7 @@ from bq_eval.core.engine import cost as finops_cost
 from bq_eval.demo.contract.results import ScenarioCorpusBundle
 from bq_eval.demo.golden_seeds import build_golden_seed_templates
 from bq_eval.finops.engine import spend as finops_spend
-from tests.test_sql_contracts import (
+from tests.sql_helpers import (
     ENTERPRISE_OTEL_SPANS_BASE_INSERT,
     REPO_ROOT,
     SQL_DIR,

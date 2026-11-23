@@ -29,7 +29,7 @@ from bq_eval.labs.engine.empirical_proof import (
     validate_blind_dual_human_labels,
 )
 from tests.conftest import make_span
-from tests.test_sql_contracts import (
+from tests.sql_helpers import (
     ENTERPRISE_EVAL_RESULTS_BASE_INSERT,
     REPO_ROOT,
     SQL_DIR,
