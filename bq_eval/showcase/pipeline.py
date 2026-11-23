@@ -559,7 +559,7 @@ def run_showcase_pipeline(
 
 
 def format_demo_json(artifacts: ShowcaseRunArtifacts) -> str:
-    """Serialize `ShowcaseRunArtifacts` + deterministic `README.md` KPI table JSON (`M7-2`)."""
+    """Serialize `ShowcaseRunArtifacts` + deterministic `README.md` KPI table JSON."""
     twin = artifacts.offline_twin_summaries or artifacts.summaries
     kpi_table: dict[str, Any] = {}
 
@@ -719,7 +719,7 @@ def _render_live_receipt_markdown(receipt: LiveFleetReceipt) -> str:
 
 
 def render_markdown_report(artifacts: ShowcaseRunArtifacts) -> str:
-    """Format a concise Markdown executive scorecard dynamically over `artifacts.summaries` (`F7`)."""
+    """Format a concise Markdown executive scorecard dynamically over `artifacts.summaries`."""
     summary_lines = "\n".join(
         f"| `{s.apphub_application_id}` | {s.total_traces} | {s.rule0_pass_rate * 100:.1f}% | "
         f"`{s.calibration_status}` | {format_raw_judge_pass(s)} | {format_calibrated_pass(s)} | "

@@ -1,4 +1,4 @@
-# Standalone & Co-Located Single-Project Terraform Module for BQ Eval & FinOps (M10-2).
+# Standalone & Co-Located Single-Project Terraform Module for BQ Eval & FinOps.
 # Defaults install standalone on a cold GCP project (create_* = true); setting
 # create_shared_bucket = false, create_eval_dataset = false, and
 # create_vertex_connection = false adopts existing co-located showcase resources.

@@ -3,7 +3,7 @@
 --   * Light Capture (BQAA): Maps `agent_events` (BigQueryAgentAnalyticsPlugin /
 --     BigQueryCallbackHandler / Conversational Analytics) onto `agent_eval.otel_spans`
 --     and `agent_eval.trace_payloads` with zero data copies and 0 external tables.
---   * Preserves ADR-003 / EVAL-P08 strict `'unregistered_app'` fallback: workloads
+--   * Preserves strict `'unregistered_app'` fallback: workloads
 --     without explicit `custom_metadata."apphub.application.id"` (or server-stamped
 --     `_AllSpans` join) resolve directly to `'unregistered_app'`, never collapsing
 --     into self-reported `adk.app_name` or `agent` strings.
@@ -68,7 +68,7 @@ SELECT
     agent,
     'unknown_service'
   ) AS service_name,
-  -- ADR-003 / EVAL-P08 strict App Hub resolution (NULL -> 'unregistered_app' downstream)
+  -- Strict App Hub resolution (NULL -> 'unregistered_app' downstream)
   COALESCE(
     JSON_VALUE(attributes, '$.custom_metadata."gcp.apphub.application.id"'),
     JSON_VALUE(attributes, '$.custom_metadata."apphub.application.id"'),
@@ -130,7 +130,7 @@ SELECT
   ) AS finops_traffic_type,
   -- Preserve NULL when outcome.id is absent so unattributed shadow workloads surface in v_attribution_coverage
   JSON_VALUE(attributes, '$.custom_metadata."outcome.id"') AS outcome_id,
-  -- Preserve strict ADR-003 fallback: never fall back outcome_owner to adk.app_name or agent
+  -- Preserve strict fallback: never fall back outcome_owner to adk.app_name or agent
   COALESCE(
     JSON_VALUE(attributes, '$.custom_metadata."outcome.owner"'),
     JSON_VALUE(attributes, '$.custom_metadata."gcp.apphub.application.id"'),
@@ -277,7 +277,7 @@ GROUP BY trace_id;
 -- 3. Step-1 Pre-Filtered Turn View for Engine B (`AI.EVALUATE_AGENT`)
 --   * Self-contained over `v_bqaa_otel_spans` so fresh Light Capture projects
 --     deploy `bqaa_adapter_views.sql` in one pass before `step1_trace_views.sql`.
---   * Matches ADR-004 routine Step-2 semantics (`step1_pass = TRUE` and
+--   * Matches routine Step-2 semantics (`step1_pass = TRUE` and
 --     `NOT has_tool_loop`) over BQAA's `{table}_eval_turn` (`AgentData` JSON)
 --     to skip $0 deterministic rejects before invoking `AI.EVALUATE_AGENT`.
 --   * Any optional diagnostic tail runs billed as `autorater_judge_usd` are still

@@ -1,4 +1,4 @@
-"""Single canonical data-driven specification of the 16 golden trace templates (`M9-4`)."""
+"""Single canonical data-driven specification of the 16 golden trace templates."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""Empirical P-L3b proof validation, INFORMATION_SCHEMA.JOBS cost attribution & wage sensitivity (`M10-3`)."""
+"""Empirical proof validation, INFORMATION_SCHEMA.JOBS cost attribution & wage sensitivity."""
 
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ _IDENT_RE = re.compile(r"^[a-zA-Z0-9_-]{2,64}$")
 
 @dataclass(frozen=True)
 class BlindHumanLabelRow:
-    """Single blind human SME annotation row for dual-rater calibration (`M10-3`)."""
+    """Single blind human SME annotation row for dual-rater calibration."""
 
     trace_id: str
     rater_id: str
@@ -55,7 +55,7 @@ class DualHumanCalibrationReport:
 
 @dataclass(frozen=True)
 class ContextCliffArmReport:
-    """Unconfounded single-model `<=200K` vs. `>200K` benchmark comparison (`M10-3`)."""
+    """Unconfounded single-model `<=200K` vs. `>200K` benchmark comparison."""
 
     model_name: str
     short_arm_count: int
@@ -244,7 +244,7 @@ def analyze_unconfounded_context_cliff_arms(
     min_per_arm: int = 30,
     threshold_tokens: int = LONG_CONTEXT_THRESHOLD_TOKENS,
 ) -> ContextCliffArmReport:
-    """Verify unconfounded single-model `<=200K` vs. `>200K` benchmark arms (`M10-3`)."""
+    """Verify unconfounded single-model `<=200K` vs. `>200K` benchmark arms."""
     if len(short_arm_spans) < min_per_arm or len(long_arm_spans) < min_per_arm:
         raise ValueError(
             f"Unconfounded cliff benchmark requires >= {min_per_arm} spans per arm "

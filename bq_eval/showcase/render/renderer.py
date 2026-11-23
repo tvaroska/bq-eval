@@ -1,4 +1,4 @@
-"""GM3 Light HTML Workbench Renderer with single-point XSS escaping (`M7-1` / `F7`).
+"""GM3 Light HTML Workbench Renderer with single-point XSS escaping.
 
 Imports zero calculation modules (`bq_eval.engine` is strictly forbidden here).
 """

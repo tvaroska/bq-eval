@@ -1,4 +1,4 @@
-"""M10 verification: `bq-eval bootstrap`, dual-schema `completions`, Terraform/Docker/Trivy & M10-3 plumbing."""
+"""`bq-eval bootstrap`, dual-schema `completions`, Terraform/Docker/Trivy & plumbing."""
 
 from __future__ import annotations
 
@@ -43,7 +43,7 @@ from tests.test_sql_contracts import (
 )
 
 
-def test_m10_1_bootstrap_offline_schema_all_modes_and_cli(
+def test_bootstrap_offline_schema_all_modes_and_cli(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -116,7 +116,7 @@ def test_m10_1_bootstrap_offline_schema_all_modes_and_cli(
         normalize_payload_prefix("../escape")
 
 
-def test_m10_1_dual_schema_completions_top_level_and_nested_json_payloads() -> None:
+def test_dual_schema_completions_top_level_and_nested_json_payloads() -> None:
     """`v_otel_logs_payloads_only` reads both top-level `completions` columns and nested `payload` JSON."""
     ddl_path = SQL_DIR / "ddl.sql"
     logs_view_sql = _transpile_bq_view_to_sqlite(
@@ -199,8 +199,8 @@ def test_m10_1_dual_schema_completions_top_level_and_nested_json_payloads() -> N
     assert rows["bbbb2222bbbb2222"]["final_response"] == "Nested JSON answer"
 
 
-def test_m10_2_terraform_dockerfile_and_cloudbuild_security_contracts() -> None:
-    """Verify M10-2 Terraform standalone/co-located layout, non-root Dockerfile & Trivy Cloud Build gate."""
+def test_terraform_dockerfile_and_cloudbuild_security_contracts() -> None:
+    """Verify Terraform standalone/co-located layout, non-root Dockerfile & Trivy Cloud Build gate."""
     tf_dir = REPO_ROOT / "terraform"
     for rel in (
         "versions.tf",
@@ -241,7 +241,7 @@ def test_m10_2_terraform_dockerfile_and_cloudbuild_security_contracts() -> None:
     assert re.search(r"--exit-code\s+1|--exit-code\",\s*\"1\"", cb_text)
 
 
-def test_m10_3_bq_query_cost_folded_into_cpvo_sql_sqlite_parity() -> None:
+def test_bq_query_cost_folded_into_cpvo_sql_sqlite_parity() -> None:
     """`INFORMATION_SCHEMA.JOBS` query cost folds into `total_spend_usd` and CPVO across BigQuery SQL & SQLite."""
     sync_sql = build_information_schema_jobs_sync_sql(
         project_id="demo-proj",
@@ -389,8 +389,8 @@ def test_m10_3_bq_query_cost_folded_into_cpvo_sql_sqlite_parity() -> None:
     assert twin.cost_per_verified_outcome_usd > 6.29
 
 
-def test_m10_3_dual_human_validation_unconfounded_cliff_and_wage_sensitivity() -> None:
-    """M10-3 validators reject synthetic raters/confounded arms and compute wage sensitivity cleanly."""
+def test_dual_human_validation_unconfounded_cliff_and_wage_sensitivity() -> None:
+    """Validators reject synthetic raters/confounded arms and compute wage sensitivity cleanly."""
     valid_rows: list[BlindHumanLabelRow] = []
     for i in range(100):
         human_score = 4 if i < 82 else 2

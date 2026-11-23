@@ -1,4 +1,4 @@
-"""Skill SQL recipe validation, EVAL.yaml execution, and `bq_dry_run.py` tests (`M8-4`)."""
+"""Skill SQL recipe validation, EVAL.yaml execution, and `bq_dry_run.py` tests."""
 
 from __future__ import annotations
 
@@ -140,7 +140,7 @@ def _parse_skill_eval_yaml(text: str) -> SkillEvalSpec:
 
 
 def test_skill_sql_recipes_parse_cleanly_as_bigquery_ast() -> None:
-    """M8-4: Every SQL block in `skills/bq-eval/references/sql_recipes.md` parses via `sqlglot`."""
+    """Every SQL block in `skills/bq-eval/references/sql_recipes.md` parses via `sqlglot`."""
     recipes_text = RECIPES_PATH.read_text(encoding="utf-8")
     sql_blocks = re.findall(r"```sql\n(.*?)```", recipes_text, flags=re.DOTALL)
     assert len(sql_blocks) >= 8
@@ -172,7 +172,7 @@ def test_skill_sql_recipes_parse_cleanly_as_bigquery_ast() -> None:
 
 
 def test_skill_eval_yaml_runs_and_passes_fail_closed() -> None:
-    """M8-4: Automated fail-closed execution of `skills/bq-eval/EVAL.yaml` against `SKILL.md` + recipes."""
+    """Automated fail-closed execution of `skills/bq-eval/EVAL.yaml` against `SKILL.md` + recipes."""
     spec = _parse_skill_eval_yaml(EVAL_YAML_PATH.read_text(encoding="utf-8"))
     assert spec.fail_closed_on_zero_scored is True
     assert spec.min_scored_cases >= 1
@@ -199,7 +199,7 @@ def test_skill_eval_yaml_runs_and_passes_fail_closed() -> None:
 
 
 def test_bq_dry_run_backref_comment_stripping_and_receipt_manifest(tmp_path: Path) -> None:
-    """M8-4: `bq_dry_run.py` survives `\\1` IDs, strips leading comments, and matches committed receipt."""
+    """`bq_dry_run.py` survives `\\1` IDs, strips leading comments, and matches committed receipt."""
     tricky_project = r"proj-\1-g<0>"
     qualified = bq_dry_run.qualify_project_datasets(
         "SELECT * FROM `agent_eval.otel_spans`", tricky_project
@@ -254,7 +254,7 @@ def test_bq_dry_run_backref_comment_stripping_and_receipt_manifest(tmp_path: Pat
 
 
 def test_generate_table_judge_sql_rule0_failure_mode() -> None:
-    """M8-3: `build_ai_generate_table_judge_sql(include_rule0_failures=False)` restricts to `t.rule0_pass`."""
+    """`build_ai_generate_table_judge_sql(include_rule0_failures=False)` restricts to `t.rule0_pass`."""
     default_sql = build_ai_generate_table_judge_sql(project_id="test-proj")
     routine_sql = build_ai_generate_table_judge_sql(
         project_id="test-proj",

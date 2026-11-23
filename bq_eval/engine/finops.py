@@ -109,7 +109,7 @@ def compute_span_cost_usd(
     span: OTelGenAISpanRecord,
     sku: ModelPricingSKU | None = None,
 ) -> float:
-    """Single canonical 1P/3P span USD cost formula (`F12`, `M11-1`).
+    """Single canonical 1P/3P span USD cost formula.
 
     Separates SKU burndown weights from PayGo billing multipliers (`1.8x` Priority / `0.5x` Flex)
     and prices 5m/1h ephemeral cache-write tokens on 3P models cleanly.
@@ -422,7 +422,7 @@ def allocate_focus_hourly_chargeback(  # noqa: PLR0913
     platform_owner_id: str = "platform-shared-reservation",
     platform_cost_center: str = "CC-PLATFORM-IDLE",
 ) -> list[FocusChargebackRow]:
-    """Hourly-clamped FOCUS 1.2 Two-Pool Chargeback aligned with `capacity` (`M7-3` / `BQ-G1`)."""
+    """Hourly-clamped FOCUS 1.2 Two-Pool Chargeback aligned with `capacity`."""
     _validate_chargeback_scalars(
         hourly_reserved_pt_capacity_tokens,
         reserved_pt_fixed_cost_usd,
@@ -505,7 +505,7 @@ def plan_off_peak_eval_schedule(
     total_batch_eval_tokens: float,
     payg_usd_per_1m_weighted: float = 0.15,
 ) -> OffPeakSchedulePlan:
-    """Water-fill batch evaluation workloads into the deepest off-peak PT valleys (`F21`)."""
+    """Water-fill batch evaluation workloads into the deepest off-peak PT valleys."""
     if not hourly_production_burndown:
         raise ValueError("hourly_production_burndown must be non-empty.")
     if (

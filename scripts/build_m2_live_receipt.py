@@ -4,7 +4,7 @@
 Constructs the sanitized `ScenarioCorpusBundle` for `m2-live-20261113b` (`343` labeled
 fleet cases across KYC, Benefits RFP, Meridian Loan Consolidation, and unregistered
 shadow workloads) and derives every `LiveFleetReceipt` summary metric directly from
-the bundle's `spans`, `outcome.closed` events, and `judge_outcomes` (`M8-2`).
+the bundle's `spans`, `outcome.closed` events, and `judge_outcomes`.
 """
 
 from __future__ import annotations

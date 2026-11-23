@@ -1,4 +1,4 @@
-"""Comprehensive tests for pure-SQLite statistical parity and CRITICAL.md invariants (`F18`)."""
+"""Comprehensive tests for pure-SQLite statistical parity and CRITICAL.md invariants."""
 
 from __future__ import annotations
 
@@ -239,7 +239,7 @@ def test_engine_b_and_cli_managed_metrics_and_judge_model_override(
 
 
 def test_bqaa_edge_cases_tool_error_classification_and_outcome_closed() -> None:
-    """Cover context-aware TOOL_ERROR status (`F21`), invalid traffic fallback, and OUTCOME_CLOSED."""
+    """Cover context-aware TOOL_ERROR status, invalid traffic fallback, and OUTCOME_CLOSED."""
     ts = datetime(2026, 11, 14, 12, 0, 0, tzinfo=UTC)
     events = [
         BQAAAgentEvent(
@@ -379,7 +379,7 @@ def test_bqaa_edge_cases_tool_error_classification_and_outcome_closed() -> None:
 
 
 def test_weighted_burndown_200k_cliff_boundary() -> None:
-    """Exact 200,000 input tokens stays standard; 200,001 crosses into >200K cliff (`F18`)."""
+    """Exact 200,000 input tokens stays standard; 200,001 crosses into >200K cliff."""
     bd_200k = compute_weighted_burndown_tokens(
         input_tokens=200_000, cached_input_tokens=0, output_tokens=0, thinking_tokens=0
     )
@@ -391,7 +391,7 @@ def test_weighted_burndown_200k_cliff_boundary() -> None:
 
 
 def test_compute_span_cost_usd_with_explicit_sku_cliff() -> None:
-    """`compute_span_cost_usd` switches from standard to long-context SKU rates at 200,001 tokens (`F18`)."""
+    """`compute_span_cost_usd` switches from standard to long-context SKU rates at 200,001 tokens."""
     sku = ModelPricingSKU(
         model_name="gemini-3.8-flash",
         effective_start=datetime(2026, 1, 1, tzinfo=UTC),
@@ -424,7 +424,7 @@ def test_compute_span_cost_usd_with_explicit_sku_cliff() -> None:
 
 
 def test_prefix_cache_dilution_long_context_recoverable_window_usd() -> None:
-    """`>200K` prefix-cache dilution computes 1.8x burndown delta and `recoverable_window_usd` (`F17`, `F18`)."""
+    """`>200K` prefix-cache dilution computes 1.8x burndown delta and `recoverable_window_usd`."""
     long_span = make_span(
         "trace-dil-001",
         "span-dil-001",
@@ -441,7 +441,7 @@ def test_prefix_cache_dilution_long_context_recoverable_window_usd() -> None:
 
 
 def test_focus_chargeback_payg_overflow_and_removed_legacy_kwarg() -> None:
-    """`allocate_focus_two_pool_chargeback` allocates PAYG overflow and rejects removed `reserved_pt_Fixed` (`F17`, `F18`)."""
+    """`allocate_focus_two_pool_chargeback` allocates PAYG overflow and rejects removed `reserved_pt_Fixed`."""
     overflow_rows = allocate_focus_two_pool_chargeback(
         app_burndown_tokens={"app-a": 100_000_000.0, "app-b": 50_000_000.0},
         app_cost_centers={"app-a": "CC-A", "app-b": "CC-B"},
@@ -463,7 +463,7 @@ def test_focus_chargeback_payg_overflow_and_removed_legacy_kwarg() -> None:
 
 
 def test_step3_paired_run_comparison_temporal_order_and_dedup() -> None:
-    """Transpiled `v_step3_paired_run_comparison` orders `run_9` -> `run_10` temporally (`F2`, `F3`, `M6-3`)."""
+    """Transpiled `v_step3_paired_run_comparison` orders `run_9` -> `run_10` temporally."""
     from tests.test_sql_contracts import (
         _extract_view_sql_text,
         _new_sqlite_bq_conn,
@@ -632,7 +632,7 @@ def _build_stratppi_20_to_1_fixture() -> tuple[
 
 
 def test_stratppi_20_to_1_tail_sampling_sql_sqlite_python_parity() -> None:
-    """`20:1` tail-skewed fixture proves `< 1e-12` SQL/SQLite/Python parity and unbiased `calibrated_pass_rate` (`M6-1`)."""
+    """`20:1` tail-skewed fixture proves `< 1e-12` SQL/SQLite/Python parity and unbiased `calibrated_pass_rate`."""
     from tests.test_sql_contracts import (
         ENTERPRISE_EVAL_RESULTS_BASE_INSERT,
         ENTERPRISE_OTEL_SPANS_BASE_INSERT,
@@ -699,7 +699,7 @@ def test_stratppi_20_to_1_tail_sampling_sql_sqlite_python_parity() -> None:
 
 
 def test_sqlite_multi_app_w3c_trace_per_app_sme_and_outcome_cpvo() -> None:
-    """Cross-app W3C trace stays 1 trace under root `outcome_owner`, SME keys isolate per app, and outcome CPVO computes (`M6-2`)."""
+    """Cross-app W3C trace stays 1 trace under root `outcome_owner`, SME keys isolate per app, and outcome CPVO computes."""
     base = datetime(2026, 11, 21, 12, 0, 0, tzinfo=UTC)
     spans = [
         make_span(
@@ -780,7 +780,7 @@ def test_sqlite_multi_app_w3c_trace_per_app_sme_and_outcome_cpvo() -> None:
 
 
 def test_numeric_gates_fail_closed_on_nan_negative_and_out_of_range() -> None:
-    """Numeric gates reject NaN/Inf/negative inputs and out-of-category AC2 scores (`F6`)."""
+    """Numeric gates reject NaN/Inf/negative inputs and out-of-category AC2 scores."""
     with pytest.raises(ValidationError):
         ModelOption(
             config_id="nan-opt",
@@ -817,7 +817,7 @@ def test_numeric_gates_fail_closed_on_nan_negative_and_out_of_range() -> None:
 
 
 def test_rfp_quote_accuracy_migration_hint() -> None:
-    """Removed legacy rubric name raises an explicit migration hint (`M6-4`)."""
+    """Removed legacy rubric name raises an explicit migration hint."""
     with pytest.raises(ValueError, match="rfp_quote_completeness_4pt_v1"):
         build_ai_generate_table_judge_sql(
             project_id="demo-proj",
@@ -841,7 +841,7 @@ def test_stratified_wilson_plugin_propagates_stratified_variance() -> None:
 
 
 def test_policy_sha256_and_amended_clause_ids_in_judge_sql_and_ddl() -> None:
-    """`M10` policy digest and amended clause IDs wire through DDL, Step-3, and judge SQL."""
+    """Policy digest and amended clause IDs wire through DDL, Step-3, and judge SQL."""
     digest = "a" * 64
     sql = build_ai_generate_table_judge_sql(
         project_id="demo-proj",
@@ -859,8 +859,8 @@ def test_policy_sha256_and_amended_clause_ids_in_judge_sql_and_ddl() -> None:
     assert "policy_sha256 STRING" in step3 and "policy_changed" in step3
 
 
-def test_f6_public_doc_hygiene_marks_evaluate_agent_preview() -> None:
-    """All public docs citing `AI.EVALUATE_AGENT` explicitly note preview/non-public status (`F6`)."""
+def test_public_doc_hygiene_marks_evaluate_agent_preview() -> None:
+    """All public docs citing `AI.EVALUATE_AGENT` explicitly note preview/non-public status."""
     files = (
         REPO_ROOT / "README.md",
         REPO_ROOT / "docs" / "architecture-and-sql.md",

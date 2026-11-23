@@ -5,7 +5,7 @@
 --     native BigQuery table seeded with the 8 canonical rubrics from step2_rubrics.csv)
 --   * 0 Result Tables Required: Static SQL queries run AI.GENERATE_TABLE on
 --     100% of traces or a 10% sample and return verdicts directly in the output
---   * Two-Mode Rule 0 Routing (ADR-004): Routine semantic scoring reads
+--   * Two-Mode Rule 0 Routing: Routine semantic scoring reads
 --     `v_step2_trace_rubric_prompts` (`step1_pass = TRUE`) to skip $0 Step-1
 --     rejects; optional diagnostic root-cause sweeps target `v_step2_all_trace_rubric_prompts`.
 -- =============================================================================

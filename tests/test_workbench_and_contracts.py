@@ -1,4 +1,4 @@
-"""M7 Workbench, Empirical Receipt, Cross-Repo Wire Contracts & F17/F21 Tests."""
+"""Workbench, Empirical Receipt, Cross-Repo Wire Contracts & Tests."""
 
 from __future__ import annotations
 
@@ -45,7 +45,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 def test_stitch_design_contract_and_gm3_light_tokens() -> None:
-    """M7-1: `.stitch/DESIGN.md` and rendered HTML enforce GM3 Light tokens, Pareto table, and reduced-motion."""
+    """`.stitch/DESIGN.md` and rendered HTML enforce GM3 Light tokens, Pareto table, and reduced-motion."""
     stitch_md = (REPO_ROOT / ".stitch" / "DESIGN.md").read_text(encoding="utf-8")
     assert "Tier 2: Reusable Showcase — GM3 Light" in stitch_md
     assert "## 5. Do Not Generate" in stitch_md
@@ -65,7 +65,7 @@ def test_stitch_design_contract_and_gm3_light_tokens() -> None:
 
 
 def test_html_renderer_escapes_hostile_xss_payloads() -> None:
-    """M7-1: Single-point `_esc()` neutralizes `<script>` and attribute breakouts in all dynamic strings."""
+    """Single-point `_esc()` neutralizes `<script>` and attribute breakouts in all dynamic strings."""
     base = run_showcase_pipeline(corpus="retail-2app")
     xss_app = '<script>alert("xss")</script>" onload="evil()'
     order_sum = base.summaries["order-support-agent"].model_copy(
@@ -106,7 +106,7 @@ def test_html_renderer_escapes_hostile_xss_payloads() -> None:
 
 
 def test_workbench_http_server_loopback_endpoints_via_proxy_bypass() -> None:
-    """M7-1: `bq-eval serve` HTTP server returns 200 on `/`, `/healthz`, and `/api/v1/demo` over loopback."""
+    """`bq-eval serve` HTTP server returns 200 on `/`, `/healthz`, and `/api/v1/demo` over loopback."""
     server = create_workbench_server(host="127.0.0.1", port=0, corpus="m2-live")
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -148,7 +148,7 @@ def test_m2_live_receipt_sha256_manifest_and_custom_scenario_replay(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """M7-2: `m2_live_receipt.json` verifies against `SHA256SUMS`, detects tampering, and replays `--scenario-file`."""
+    """`m2_live_receipt.json` verifies against `SHA256SUMS`, detects tampering, and replays `--scenario-file`."""
     digest = verify_receipt_sha256(DEFAULT_M2_RECEIPT_PATH, DEFAULT_M2_SHA256_PATH)
     assert len(digest) == 64
 
@@ -205,7 +205,7 @@ def test_m2_live_receipt_sha256_manifest_and_custom_scenario_replay(
 def test_capacity_wire_contract_hourly_burndown_jsonl_and_hourly_focus_chargeback(
     tmp_path: Path,
 ) -> None:
-    """M7-3: Verify `v_capacity_hourly_burndown_export`, `otel_spans.jsonl`, and `allocate_focus_hourly_chargeback`."""
+    """Verify `v_capacity_hourly_burndown_export`, `otel_spans.jsonl`, and `allocate_focus_hourly_chargeback`."""
     from tests.test_sql_contracts import (
         ENTERPRISE_OTEL_SPANS_BASE_INSERT,
         _create_enterprise_sqlite_fixture,
@@ -340,8 +340,8 @@ def test_capacity_wire_contract_hourly_burndown_jsonl_and_hourly_focus_chargebac
     )
 
 
-def test_docubridge_p10_5_canonical_select_views_contract() -> None:
-    """M7-3: Execute DocuBridge's 4 canonical `SELECT` queries against transpiled `bq-eval` views."""
+def test_docubridge_canonical_select_views_contract() -> None:
+    """Execute DocuBridge's 4 canonical `SELECT` queries against transpiled `bq-eval` views."""
     from tests.test_sql_contracts import (
         ENTERPRISE_OTEL_SPANS_BASE_INSERT,
         _create_enterprise_sqlite_fixture,
@@ -461,8 +461,8 @@ def test_docubridge_p10_5_canonical_select_views_contract() -> None:
     conn.close()
 
 
-def test_f17_rubric_temperature_mixed_app_rejection_and_root_span_order() -> None:
-    """F17: `RubricSpec.temperature` feeds prompt, mixed-app dilution fails, and child-first spans find root."""
+def test_rubric_temperature_mixed_app_rejection_and_root_span_order() -> None:
+    """`RubricSpec.temperature` feeds prompt, mixed-app dilution fails, and child-first spans find root."""
     base_rubric = CANONICAL_RUBRICS["groundedness_4pt_v1"]
     custom_temp_rubric = base_rubric.model_copy(update={"temperature": 0.25})
     prompt = build_autorater_system_prompt(custom_temp_rubric)
@@ -505,10 +505,10 @@ def test_f17_rubric_temperature_mixed_app_rejection_and_root_span_order() -> Non
     assert report.step1_rows[0].business_unit == "true_root_bu"
 
 
-def test_f21_true_valley_water_filling_cli_version_and_clean_error_exit(
+def test_true_valley_water_filling_cli_version_and_clean_error_exit(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """F21 + F17: Valley water-filling equalizes deepest slots, CLI `--version` & clean errors work, zero dead symbols."""
+    """Valley water-filling equalizes deepest slots, CLI `--version` & clean errors work, zero dead symbols."""
     plan = plan_off_peak_eval_schedule(
         hourly_production_burndown=[100.0, 200.0, 450.0],
         hourly_reserved_pt_capacity=500.0,

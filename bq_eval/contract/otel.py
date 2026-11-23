@@ -45,7 +45,7 @@ class FinOpsTrafficType(StrEnum):
 
 
 class ServingTrafficType(StrEnum):
-    """Serving capacity fulfillment tier returned in `usage_metadata.traffic_type` (`M11-1`)."""
+    """Serving capacity fulfillment tier returned in `usage_metadata.traffic_type`."""
 
     PROVISIONED_THROUGHPUT = "PROVISIONED_THROUGHPUT"
     PRIORITY = "PRIORITY"
@@ -86,7 +86,7 @@ def resolve_application_id(
     gcp_apphub_application_id: str | None = None,
     attributes: Mapping[str, Any] | None = None,
 ) -> str:
-    """Resolve portable application ID matching SQL COALESCE precedence (EVAL-P08 / ADR-003).
+    """Resolve portable application ID matching SQL COALESCE precedence.
 
     Order of precedence:
     1. Explicit `gcp_apphub_application_id` column

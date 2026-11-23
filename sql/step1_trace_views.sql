@@ -1,8 +1,8 @@
 -- =============================================================================
--- BQ Eval — Step 1: Static SQL Views & Queries Over Existing Traces (M1 EVAL-P11)
+-- BQ Eval — Step 1: Static SQL Views & Queries Over Existing Traces
 --   * 0 New Tables Required (runs directly over native _AllSpans via otel_spans)
 --   * No Agentic Skill Required (100% static, copy-paste SQL views & queries)
---   * Outcome attribution (EVAL-P11): outcome_id & outcome_owner via W3C baggage
+--   * Outcome attribution: outcome_id & outcome_owner via W3C baggage
 --   * Delivers Cost per Verified Outcome, Attribution Coverage, and Span Coverage
 -- =============================================================================
 
@@ -224,7 +224,7 @@ FROM `agent_eval.v_step1_trace_eval`
 GROUP BY apphub_application_id, business_unit, cost_center;
 
 -- -----------------------------------------------------------------------------
--- View 1D: Business Outcomes Closed (`v_outcomes` — EVAL-P11)
+-- View 1D: Business Outcomes Closed (`v_outcomes`)
 --   * Reads zero-duration spans where span_name = 'outcome.closed'
 --   * Domain-agnostic: verified when outcome.status = 'succeeded' and explicit
 --     outcome.verified (or Rule 0 pass when absent) is TRUE
@@ -318,7 +318,7 @@ FROM server_span_compute AS c;
 
 -- -----------------------------------------------------------------------------
 -- View 1F: Cost per Verified Outcome Across Multi-Agent Traces (`v_cost_per_verified_outcome`)
---   * EVAL-P11: Groups model spend by outcome_id (excluding external counterparty apps),
+--   * Groups model spend by outcome_id (excluding external counterparty apps),
 --     keeps failed/abandoned/escalated outcomes in numerator (no survivor bias),
 --     and proportionally allocates 1.0x outcome infra cost across multi-agent/mode slices.
 -- -----------------------------------------------------------------------------
@@ -393,7 +393,7 @@ GROUP BY
   os.agent_name;
 
 -- -----------------------------------------------------------------------------
--- View 1G: Outcome Attribution Coverage Gate (`v_attribution_coverage` — EVAL-P11)
+-- View 1G: Outcome Attribution Coverage Gate (`v_attribution_coverage`)
 --   * Reports attributed vs. unattributed (outcome_id IS NULL) model spend
 --   * Gate: attribution_coverage_pct >= 99.0 for registered applications
 -- -----------------------------------------------------------------------------
@@ -512,7 +512,7 @@ GROUP BY
   d.skill_version;
 
 -- -----------------------------------------------------------------------------
--- View 1I: Non-Null OTel Span Attribute Coverage (`v_otel_spans_coverage` — M1 Step 5)
+-- View 1I: Non-Null OTel Span Attribute Coverage (`v_otel_spans_coverage` — Step 5)
 --   * Reports per service_name the share (0..100%) of model-call spans (model_name != 'none')
 --     with non-default span_kind, agent_name, model_name, token columns, finops_traffic_type,
 --     and outcome_id.

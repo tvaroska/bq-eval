@@ -124,7 +124,7 @@ def build_ai_generate_table_judge_sql(  # noqa: PLR0913
     policy_sha256: str | None = None,
     amended_clause_ids: Sequence[str] | None = None,
 ) -> str:
-    """Build production BigQuery `AI.GENERATE_TABLE` SQL query (EVAL-P02, EVAL-P08)."""
+    """Build production BigQuery `AI.GENERATE_TABLE` SQL query."""
     valid_project = _validate_sql_identifier(project_id, "project_id", allow_hyphen=True)
     valid_dataset = _validate_sql_identifier(dataset_id, "dataset_id")
     valid_policy_sha256 = _validate_policy_sha256(policy_sha256)
@@ -264,7 +264,7 @@ def build_ai_evaluate_agent_sql(  # noqa: PLR0913
     run_id: str | None = None,
     persist_run_id: str | None = None,
 ) -> str:
-    """Build Step-1 pre-filtered BigQuery `AI.EVALUATE_AGENT` SQL query (Engine B, M5/M9-4)."""
+    """Build Step-1 pre-filtered BigQuery `AI.EVALUATE_AGENT` SQL query (Engine B)."""
     valid_project = _validate_sql_identifier(project_id, "project_id", allow_hyphen=True)
     valid_dataset = _validate_sql_identifier(dataset_id, "dataset_id")
     valid_view = _validate_sql_identifier(eval_view, "eval_view")
@@ -530,7 +530,7 @@ def evaluate_all_rubrics_in_sqlite(  # noqa: PLR0913
     external_apps: frozenset[str] = frozenset(),
     bq_query_jobs: Sequence[BqQueryCostRow] | None = None,
 ) -> dict[tuple[str, str], SQLTraceEvalSummary]:
-    """Execute pure-SQLite twin returning every `(apphub_application_id, rubric_id)` row (`M9-2`)."""
+    """Execute pure-SQLite twin returning every `(apphub_application_id, rubric_id)` row."""
     if not spans:
         return {}
 
@@ -649,7 +649,7 @@ def evaluate_traces_in_sqlite(  # noqa: PLR0913
 def evaluate_step1_traces_in_sqlite(
     spans: Sequence[OTelGenAISpanRecord],
 ) -> dict[str, dict[str, object]]:
-    """Return canonical Step-1 per-trace metrics from SQLite `v_trace_sql_evaluation` (`M9-4`)."""
+    """Return canonical Step-1 per-trace metrics from SQLite `v_trace_sql_evaluation`."""
     if not spans:
         return {}
     conn = open_sqlite_twin()

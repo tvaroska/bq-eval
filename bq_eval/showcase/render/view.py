@@ -1,4 +1,4 @@
-"""Typed, pure-view presentation models for the GM3 Light Workbench (`M7-1` / `F7`).
+"""Typed, pure-view presentation models for the GM3 Light Workbench.
 
 Separates view construction from HTML serialization so every numeric cell, calibration
 badge, and fail-closed `NULL` string is deterministically testable without engine imports.
@@ -118,14 +118,14 @@ class PageView(BaseModel):
 
 
 def format_raw_judge_pass(summary: SQLTraceEvalSummary) -> str:
-    """Format raw judge pass rate without coalescing `None` to `0.0%` (`F7`)."""
+    """Format raw judge pass rate without coalescing `None` to `0.0%`."""
     if summary.raw_judge_pass_rate is None:
         return "NULL"
     return f"{summary.raw_judge_pass_rate * 100:.1f}%"
 
 
 def format_calibrated_pass(summary: SQLTraceEvalSummary) -> str:
-    """Format Rogan-Gladen calibrated pass rate + 95% CI, failing closed on `None` (`F7`)."""
+    """Format Rogan-Gladen calibrated pass rate + 95% CI, failing closed on `None`."""
     if summary.calibrated_pass_rate is None:
         return "NULL (Fail-Closed)"
     if summary.calibrated_ci_95_lower is not None and summary.calibrated_ci_95_upper is not None:
@@ -137,7 +137,7 @@ def format_calibrated_pass(summary: SQLTraceEvalSummary) -> str:
 
 
 def format_cpvo_usd(cpvo_usd: float | None) -> str:
-    """Format Cost per Verified Outcome, failing closed on `None` (`F7`)."""
+    """Format Cost per Verified Outcome, failing closed on `None`."""
     if cpvo_usd is None:
         return "NULL (Fail-Closed)"
     return f"${cpvo_usd:.4f}"
@@ -147,7 +147,7 @@ def format_irr_gate_verdict(
     gwet_ac2: float | None,
     passes_irr_gate: bool | None = None,
 ) -> tuple[str, str, BadgeTone]:
-    """Derive IRR value, gate caption, and badge tone strictly from data (`F7`)."""
+    """Derive IRR value, gate caption, and badge tone strictly from data."""
     if gwet_ac2 is None:
         return ("NULL (Unjudged)", "UNJUDGED — no rater pairs evaluated (fail-closed)", "warn")
     passed = passes_irr_gate if passes_irr_gate is not None else (gwet_ac2 >= 0.80)
@@ -403,7 +403,7 @@ def _build_live_receipt_cards(receipt: LiveFleetReceipt) -> tuple[CardView, ...]
 
     attr_card = CardView(
         title="App Hub Attribution Coverage & Unregistered Shadow Isolation",
-        subtitle="ADR-003 fail-closed fallback isolates unregistered services to unregistered_app.",
+        subtitle="Fail-closed fallback isolates unregistered services to unregistered_app.",
         table=TableView(
             columns=(
                 ColumnHeaderView(label="App Hub Application ID"),

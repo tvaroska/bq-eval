@@ -1,4 +1,4 @@
-"""Failure loss-bank clustering, `ATIF-v1.8` trajectory export & clause-scoped `EVAL-P09` contracts (`M11-4`)."""
+"""Failure loss-bank clustering, `ATIF-v1.8` trajectory export & clause-scoped contracts."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ LossBankStatus = Literal["NEW", "RECURRING", "RESOLVED"]
 
 
 class PairedEvalOutcome(BaseModel):
-    """Paired baseline vs. candidate evaluation verdict for clause-scoped `EVAL-P09` & loss-bank clustering."""
+    """Paired baseline vs. candidate evaluation verdict for clause-scoped NFR gating & loss-bank clustering."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -31,7 +31,7 @@ class PairedEvalOutcome(BaseModel):
 
 
 class FailureLossBankCluster(BaseModel):
-    """Failure cluster categorized as `NEW`, `RECURRING`, or `RESOLVED` across paired runs (`M11-4`)."""
+    """Failure cluster categorized as `NEW`, `RECURRING`, or `RESOLVED` across paired runs."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -47,7 +47,7 @@ class FailureLossBankCluster(BaseModel):
 
 
 class AtifTrajectoryStep(BaseModel):
-    """Single sanitized execution step inside an `ATIF-v1.8` trajectory export (`M11-4`)."""
+    """Single sanitized execution step inside an `ATIF-v1.8` trajectory export."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -87,7 +87,7 @@ class AtifV18Trajectory(BaseModel):
 
 
 class ClauseScopedNfrGateResult(BaseModel):
-    """`EVAL-P09` clause-scoped `policy_sha256` `NFR == 0.0%` gate evaluation (`M11-4`)."""
+    """Clause-scoped `policy_sha256` `NFR == 0.0%` gate evaluation."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 

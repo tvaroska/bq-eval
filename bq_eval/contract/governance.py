@@ -1,4 +1,4 @@
-"""Bootstrap, Risk-Tier Governance (`RL-1`-`RL-5`), 3-Pool FOCUS 1.2 & Capacity Wire Contracts (`M10`, `M11`)."""
+"""Bootstrap, Risk-Tier Governance (`RL-1`-`RL-5`), 3-Pool FOCUS 1.2 & Capacity Wire Contracts."""
 
 from __future__ import annotations
 
@@ -86,7 +86,7 @@ class GovernanceEvaluationResult(BaseModel):
 
 
 class BootstrapValidationReport(BaseModel):
-    """Deterministic result of `bq-eval bootstrap --offline-schema` or `--dry-run` (`M10-1`)."""
+    """Deterministic result of `bq-eval bootstrap --offline-schema` or `--dry-run`."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -110,7 +110,7 @@ class BootstrapValidationReport(BaseModel):
 
 
 class ThreePoolFocusRow(BaseModel):
-    """3-Pool Hourly FOCUS 1.2 + Spillover (`Involuntary` vs. `TenantBurst`) chargeback row (`M11-2`)."""
+    """3-Pool Hourly FOCUS 1.2 + Spillover (`Involuntary` vs. `TenantBurst`) chargeback row."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -127,7 +127,7 @@ class ThreePoolFocusRow(BaseModel):
 
 
 class ThreePoolChargebackSummary(BaseModel):
-    """Reconciled 3-Pool Hourly FOCUS 1.2 report with zero-drift accounting (`M11-2`)."""
+    """Reconciled 3-Pool Hourly FOCUS 1.2 report with zero-drift accounting."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -154,7 +154,7 @@ class CapacityDeadlineJobPayload(BaseModel):
 
 
 class CapacityResidualSchedulePayload(BaseModel):
-    """Wire-compatible payload matching `capacity.contract.requests.ResidualScheduleRequest` (`M11-2`)."""
+    """Wire-compatible payload matching `capacity.contract.requests.ResidualScheduleRequest`."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -168,7 +168,7 @@ class CapacityResidualSchedulePayload(BaseModel):
 
 
 class BqQueryCostRow(BaseModel):
-    """Attributed BigQuery `INFORMATION_SCHEMA.JOBS` bytes-scanned / slot query cost (`M10-3`)."""
+    """Attributed BigQuery `INFORMATION_SCHEMA.JOBS` bytes-scanned / slot query cost."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -182,7 +182,7 @@ class BqQueryCostRow(BaseModel):
 
 
 class WageSensitivityPoint(BaseModel):
-    """Escalation wage sensitivity point across human-review hourly rates (`M10-3`)."""
+    """Escalation wage sensitivity point across human-review hourly rates."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 

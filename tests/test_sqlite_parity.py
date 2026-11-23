@@ -1,4 +1,4 @@
-"""M9-2 Dual-Path, SQLite Twin Parity, Strict Judge Pricing & Value-Level View Tests."""
+"""Dual-Path, SQLite Twin Parity, Strict Judge Pricing & Value-Level View Tests."""
 
 from __future__ import annotations
 
@@ -36,8 +36,8 @@ def _insert_bq_span(conn: sqlite3.Connection, span: OTelGenAISpanRecord) -> None
     insert_enterprise_sqlite_span(conn, span)
 
 
-def test_m9_2_zero_token_cache_hit_ratio_and_unclassified_traffic_priority_parity() -> None:
-    """M9-2: `0`-token traces don't dilute `avg_cache_hit_ratio` and `'unclassified'` never drops `production_traces`."""
+def test_zero_token_cache_hit_ratio_and_unclassified_traffic_priority_parity() -> None:
+    """`0`-token traces don't dilute `avg_cache_hit_ratio` and `'unclassified'` never drops `production_traces`."""
     base = datetime(2026, 11, 21, 12, 0, 0, tzinfo=UTC)
     spans = [
         # Trace 1: 50% cache hit + production_inference root + unclassified child span
@@ -135,8 +135,8 @@ def test_m9_2_zero_token_cache_hit_ratio_and_unclassified_traffic_priority_parit
     assert twin["zero-only-app"].avg_cache_hit_ratio == pytest.approx(0.0, abs=1e-12)
 
 
-def test_m9_2_sqlite_v_outcomes_ordering_step2_all_pass_counterparty_and_multi_rubric() -> None:
-    """M9-2: Latest `end_time` ordering in `v_outcomes`, `step2_all_pass`, counterparty filter & multi-rubric parity."""
+def test_sqlite_v_outcomes_ordering_step2_all_pass_counterparty_and_multi_rubric() -> None:
+    """Latest `end_time` ordering in `v_outcomes`, `step2_all_pass`, counterparty filter & multi-rubric parity."""
     base = datetime(2026, 11, 21, 12, 0, 0, tzinfo=UTC)
     spans = [
         # Outcome 1: earlier succeeded close + later escalated close -> latest wins (not alphabetical MAX)
@@ -300,8 +300,8 @@ def test_m9_2_sqlite_v_outcomes_ordering_step2_all_pass_counterparty_and_multi_r
     assert ext_sum.outcome_cost_per_verified_usd is None
 
 
-def test_m9_2_real_p95_and_latest_array_agg_plus_strict_judge_pricing() -> None:
-    """M9-2: Transpiled `APPROX_QUANTILES` computes real P95 (not MAX), `ARRAY_AGG DESC` picks latest, and unknown judge returns NULL."""
+def test_real_p95_and_latest_array_agg_plus_strict_judge_pricing() -> None:
+    """Transpiled `APPROX_QUANTILES` computes real P95 (not MAX), `ARRAY_AGG DESC` picks latest, and unknown judge returns NULL."""
     views_sql = (SQL_DIR / "views.sql").read_text(encoding="utf-8")
     assert "ELSE 0.15" not in views_sql
     assert "ELSE 0.60" not in views_sql
@@ -386,8 +386,8 @@ def test_m9_2_real_p95_and_latest_array_agg_plus_strict_judge_pricing() -> None:
     assert int(outcome_row["is_verified"]) == 0
 
 
-def test_m9_2_prefix_cache_dilution_direction_and_wif_collector_attribute() -> None:
-    """M9-2: `diagnose_prefix_cache_dilution` triggers only when `observed <= ceiling`; WIF uses `finops.traffic_type`."""
+def test_prefix_cache_dilution_direction_and_wif_collector_attribute() -> None:
+    """`diagnose_prefix_cache_dilution` triggers only when `observed <= ceiling`; WIF uses `finops.traffic_type`."""
     high_hit_spans = [
         make_span(
             f"trace-hi-{i:03d}",
@@ -430,8 +430,8 @@ def test_m9_2_prefix_cache_dilution_direction_and_wif_collector_attribute() -> N
     assert re.search(r"replacement:\s*finops\.traffic_type", wif_text)
 
 
-def test_m9_2_value_parity_step1_step2_xml_escaping_step3_runs_and_ddl_views() -> None:
-    """M9-2: Execute transpiled `v_step1_trace_eval`, `v_step2_all_trace_rubric_prompts`, `v_step3_eval_runs`, and `sql/ddl.sql` views."""
+def test_value_parity_step1_step2_xml_escaping_step3_runs_and_ddl_views() -> None:
+    """Execute transpiled `v_step1_trace_eval`, `v_step2_all_trace_rubric_prompts`, `v_step3_eval_runs`, and `sql/ddl.sql` views."""
     ddl_path = SQL_DIR / "ddl.sql"
     step1_path = SQL_DIR / "step1_trace_views.sql"
     step2_path = SQL_DIR / "step2_stateless_eval.sql"

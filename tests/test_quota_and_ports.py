@@ -1,4 +1,4 @@
-"""M9-3 verification: Day-2 Quota Guard Procedure, EvalBackend Ports, and `bq-eval bqaa` CLI."""
+"""Day-2 Quota Guard Procedure, EvalBackend Ports, and `bq-eval bqaa` CLI."""
 
 from __future__ import annotations
 
@@ -50,7 +50,7 @@ def _sqlite_bq_query_runner(conn: sqlite3.Connection) -> QueryRunner:
 
 
 def test_quota_guard_headroom_per_app_subcaps_non_deduped_and_retry_storm() -> None:
-    """M9-3: Output/thinking headroom, per-app sub-caps, non-deduped burn, and FAILED_BILLED lock."""
+    """Output/thinking headroom, per-app sub-caps, non-deduped burn, and FAILED_BILLED lock."""
     assert thinking_level_headroom_tokens("NONE") == 0
     assert thinking_level_headroom_tokens("HIGH") == 8192
     with pytest.raises(ValueError, match="Unsupported thinking_level"):
@@ -163,7 +163,7 @@ def test_quota_guard_headroom_per_app_subcaps_non_deduped_and_retry_storm() -> N
 
 
 def test_quota_guard_concurrent_reservations_prevent_toctou_and_sql_app_view_parity() -> None:
-    """M9-3: Atomic reservation stops concurrent TOCTOU overspend; SQL app view & splitter match."""
+    """Atomic reservation stops concurrent TOCTOU overspend; SQL app view & splitter match."""
     guard = DailyQuotaGuard(
         daily_judge_token_cap=10_000,
         per_app_default_token_cap=10_000,
@@ -472,7 +472,7 @@ def _seed_port_parity_fixture(
 
 @pytest.mark.port
 def test_eval_backend_port_local_sqlite_vs_cloud_bigquery_parity() -> None:
-    """M9-3: `SQLiteEvalBackend` and `BigQueryEvalBackend` match to <1e-12 across both methods."""
+    """`SQLiteEvalBackend` and `BigQueryEvalBackend` match to <1e-12 across both methods."""
     local_backend = SQLiteEvalBackend()
     conn = _new_sqlite_bq_conn()
     _create_enterprise_sqlite_fixture(conn)
@@ -544,7 +544,7 @@ def test_pipeline_accepts_injected_eval_backend_and_bqaa_cli_end_to_end(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """M9-3: Pipeline accepts injected `EvalBackend` and `bq-eval bqaa` runs end-to-end."""
+    """Pipeline accepts injected `EvalBackend` and `bq-eval bqaa` runs end-to-end."""
     artifacts = run_showcase_pipeline(corpus="retail-2app", backend=SQLiteEvalBackend())
     assert "order-support-agent" in artifacts.summaries
 

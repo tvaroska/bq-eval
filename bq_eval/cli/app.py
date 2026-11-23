@@ -1,4 +1,4 @@
-"""Command-Line Interface (`bq-eval`) for BigQuery Agent Evaluation & FinOps (`M7-1`, `F17`, `F21`)."""
+"""Command-Line Interface (`bq-eval`) for BigQuery Agent Evaluation & FinOps."""
 
 from __future__ import annotations
 

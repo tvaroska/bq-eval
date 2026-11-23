@@ -3,7 +3,6 @@
 --   * Joins `model_pricing_catalog`, `v_default_model_pricing`, `app_registry`,
 --     `eval_results`, `sme_labels`, `inference_request_logs`, and `bq_query_jobs`
 --   * Domain-agnostic core: per-app storage overrides live in `app_registry.storage_usd_per_outcome`
--- Standard: EVAL-P01, EVAL-P03, EVAL-P04, EVAL-P05, EVAL-P08, EVAL-P09, EVAL-P11 (v2026.11.3)
 
 -- View 1: Span-Level Waterfall with Effective-Dated 1P/3P Pricing, Burndown Weights & PayGo Multipliers
 CREATE OR REPLACE VIEW `agent_eval.v_trace_waterfall` AS
@@ -224,7 +223,7 @@ LEFT JOIN `agent_eval.app_registry` AS r
   ON t.apphub_application_id = r.apphub_application_id;
 
 -- -----------------------------------------------------------------------------
--- View 2B: Attributed BigQuery INFORMATION_SCHEMA.JOBS Query Cost (`M10-3`)
+-- View 2B: Attributed BigQuery INFORMATION_SCHEMA.JOBS Query Cost
 --   * Rolls up on-demand bytes-billed ($6.25/TiB) and slot-ms query costs per app
 -- -----------------------------------------------------------------------------
 CREATE OR REPLACE VIEW `agent_eval.v_bq_query_cost_attribution` AS
@@ -249,7 +248,7 @@ GROUP BY apphub_application_id;
 -- View 3: Enterprise Cost per Verified Outcome (`v_enterprise_cost_per_verified_outcome`)
 --   * Extends Step-1 `v_cost_per_verified_outcome` with effective-dated pricing,
 --     Step-2 `eval_results` judge verdicts & spend, and `INFORMATION_SCHEMA.JOBS`
---     BigQuery query cost folded cleanly into `CPVO` (`M10-3`).
+--     BigQuery query cost folded cleanly into `CPVO`.
 -- -----------------------------------------------------------------------------
 CREATE OR REPLACE VIEW `agent_eval.v_enterprise_cost_per_verified_outcome` AS
 WITH deduped_eval_runs AS (
@@ -398,7 +397,7 @@ GROUP BY
   os.agent_name;
 
 -- -----------------------------------------------------------------------------
--- View 4: External Counterparty Telemetry & Spend (`v_counterparty_spend` — EVAL-P11)
+-- View 4: External Counterparty Telemetry & Spend (`v_counterparty_spend`)
 -- -----------------------------------------------------------------------------
 CREATE OR REPLACE VIEW `agent_eval.v_counterparty_spend` AS
 SELECT
@@ -774,7 +773,7 @@ SELECT
 FROM calibrated AS c;
 
 -- -----------------------------------------------------------------------------
--- View 6: Hourly Weighted Burndown Export for Provisioned Throughput & `capacity` BQ-G1 (`M11-2`)
+-- View 6: Hourly Weighted Burndown Export for Provisioned Throughput & `capacity` handoff
 -- -----------------------------------------------------------------------------
 CREATE OR REPLACE VIEW `agent_eval.v_capacity_hourly_burndown_export` AS
 SELECT
@@ -815,7 +814,7 @@ GROUP BY
   w.serving_traffic_type;
 
 -- -----------------------------------------------------------------------------
--- View 7: Client OTel vs. Server-Side `inference_request` Reconciliation (`M11-1`)
+-- View 7: Client OTel vs. Server-Side `inference_request` Reconciliation
 --   * Detects telemetry-vs-billing drift, 429 drops, and involuntary PT spillover
 -- -----------------------------------------------------------------------------
 CREATE OR REPLACE VIEW `agent_eval.v_inference_request_reconciliation` AS
@@ -890,7 +889,7 @@ FULL OUTER JOIN server_hourly AS s
   AND o.model_name = s.model_name;
 
 -- -----------------------------------------------------------------------------
--- View 8: `RL-1`-`RL-5` Application Governance & PT Lifecycle Gate (`M11-1`)
+-- View 8: `RL-1`-`RL-5` Application Governance & PT Lifecycle Gate
 --   * Blocks long-term PT commitments on short_term_ga / preview / legacy_sunset models
 --   * Enforces tiered AC2 IRR gates (0.85 RL-1/2, 0.80 RL-3a/3b, 0.75 RL-4/5)
 -- -----------------------------------------------------------------------------
@@ -949,7 +948,7 @@ LEFT JOIN `agent_eval.v_agent_eval_and_finops_summary` AS s
   ON r.apphub_application_id = s.apphub_application_id;
 
 -- -----------------------------------------------------------------------------
--- View 9: 3-Pool Hourly FOCUS 1.2 & Spillover Attribution (`M11-2`)
+-- View 9: 3-Pool Hourly FOCUS 1.2 & Spillover Attribution
 --   * Isolates prod | eval | optimize lanes and separates Involuntary vs. TenantBurst
 --     overflow using app_registry.funded_gsus entitlement share.
 -- -----------------------------------------------------------------------------
@@ -1014,7 +1013,7 @@ SELECT
 FROM hourly_totals;
 
 -- -----------------------------------------------------------------------------
--- View 10: Stateful `/interactions` Session & Turn Lineage (`M11-4`)
+-- View 10: Stateful `/interactions` Session & Turn Lineage
 -- -----------------------------------------------------------------------------
 CREATE OR REPLACE VIEW `agent_eval.v_interaction_session_lineage` AS
 WITH session_spans AS (
@@ -1054,7 +1053,7 @@ FROM session_spans
 GROUP BY apphub_application_id, session_id;
 
 -- -----------------------------------------------------------------------------
--- View 11: 5-Minute Streaming SLO Latency & HTTP 429 Breach Monitor (`M11-4`)
+-- View 11: 5-Minute Streaming SLO Latency & HTTP 429 Breach Monitor
 -- -----------------------------------------------------------------------------
 CREATE OR REPLACE VIEW `agent_eval.v_live_slo_and_429_breaches` AS
 WITH bucketed AS (

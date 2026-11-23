@@ -1,4 +1,4 @@
-"""`RL-1`-`RL-5` application risk governance and inference_request reconciliation engine (`M11-1`)."""
+"""`RL-1`-`RL-5` application risk governance and inference_request reconciliation engine."""
 
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ _NON_LONG_TERM_TRACKS: frozenset[str] = frozenset({"short_term_ga", "preview", "
 
 @dataclass(frozen=True)
 class InferenceRequestLogRecord:
-    """Server-side `inference_request` log entry for OTel-vs-billing reconciliation (`M11-1`)."""
+    """Server-side `inference_request` log entry for OTel-vs-billing reconciliation."""
 
     request_id: str
     apphub_application_id: str
@@ -142,7 +142,7 @@ def reconcile_inference_requests(
     otel_spans: Sequence[OTelGenAISpanRecord],
     server_logs: Sequence[InferenceRequestLogRecord],
 ) -> list[InferenceReconciliationRow]:
-    """Deterministic Python twin of `agent_eval.v_inference_request_reconciliation` (`M11-1`)."""
+    """Deterministic Python twin of `agent_eval.v_inference_request_reconciliation`."""
     otel_buckets: dict[tuple[str, str, str], dict[str, int]] = {}
     for sp in otel_spans:
         if not sp.model_name or sp.model_name == "none":

@@ -1,4 +1,4 @@
-"""Extended SQLite twin queries for hourly burndown (`BQ-G1`), `/interactions` lineage, and 5m breaches."""
+"""Extended SQLite twin queries for hourly burndown, `/interactions` lineage, and 5m breaches."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ from bq_eval.engine.sqlite_views import SQLITE_TABLES_DDL, SQLITE_VIEWS_DDL
 
 @dataclass(frozen=True)
 class InteractionSessionLineageRow:
-    """SQLite twin row mirroring `agent_eval.v_interaction_session_lineage` (`M11-4`)."""
+    """SQLite twin row mirroring `agent_eval.v_interaction_session_lineage`."""
 
     apphub_application_id: str
     session_id: str
@@ -34,7 +34,7 @@ class InteractionSessionLineageRow:
 
 @dataclass(frozen=True)
 class LiveSloBreachRow:
-    """SQLite twin row mirroring `agent_eval.v_live_slo_and_429_breaches` (`M11-4`)."""
+    """SQLite twin row mirroring `agent_eval.v_live_slo_and_429_breaches`."""
 
     window_5m_epoch_ms: int
     apphub_application_id: str
@@ -171,7 +171,7 @@ def insert_sqlite_bq_query_jobs(
     cur: sqlite3.Cursor,
     query_jobs: Sequence[BqQueryCostRow] | None,
 ) -> None:
-    """Seed `bq_query_jobs` rows into the SQLite twin (`M10-3`)."""
+    """Seed `bq_query_jobs` rows into the SQLite twin."""
     if not query_jobs:
         return
     cur.executemany(
@@ -194,7 +194,7 @@ def insert_sqlite_bq_query_jobs(
 def evaluate_hourly_burndown_in_sqlite(
     spans: Sequence[OTelGenAISpanRecord],
 ) -> list[HourlyBurndownExportRow]:
-    """Execute SQLite twin of `v_capacity_hourly_burndown_export` (`M7-3` / `M11-2` / `BQ-G1`)."""
+    """Execute SQLite twin of `v_capacity_hourly_burndown_export`."""
     if not spans:
         return []
     conn = open_sqlite_twin()
@@ -244,7 +244,7 @@ def evaluate_hourly_burndown_in_sqlite(
 def evaluate_interaction_lineage_in_sqlite(
     spans: Sequence[OTelGenAISpanRecord],
 ) -> list[InteractionSessionLineageRow]:
-    """Execute SQLite twin of `v_interaction_session_lineage` (`M11-4`)."""
+    """Execute SQLite twin of `v_interaction_session_lineage`."""
     if not spans:
         return []
     conn = open_sqlite_twin()
@@ -284,7 +284,7 @@ def evaluate_5m_breaches_in_sqlite(
     *,
     sla_latency_ms: float = 5000.0,
 ) -> list[LiveSloBreachRow]:
-    """Execute SQLite twin of `v_live_slo_and_429_breaches` (`M11-4`)."""
+    """Execute SQLite twin of `v_live_slo_and_429_breaches`."""
     if not spans:
         return []
     conn = open_sqlite_twin()

@@ -404,7 +404,7 @@ def test_bqaa_sql_adapter_matches_python_custom_metadata_and_outcome_closed() ->
         )
 
 
-def test_demo_loadgen_sql_and_jsonl_emit_all_step1_m1_columns(tmp_path: Path) -> None:
+def test_demo_loadgen_sql_and_jsonl_emit_all_step1_columns(tmp_path: Path) -> None:
     """`demo_time_shift_loadgen.sql` & `export_time_shifted_jsonl` emit every column Step 1 selects."""
     wf_sql = _extract_view_sql_text(
         SQL_DIR / "step1_trace_views.sql", "agent_eval.v_step1_trace_waterfall"
@@ -436,7 +436,7 @@ def test_demo_loadgen_sql_and_jsonl_emit_all_step1_m1_columns(tmp_path: Path) ->
 
     missing_sql_cols = sorted(required_span_cols - ctas_cols)
     assert not missing_sql_cols, (
-        f"demo_time_shift_loadgen.sql agent_eval_seed.otel_spans missing M1 columns: {missing_sql_cols}"
+        f"demo_time_shift_loadgen.sql agent_eval_seed.otel_spans missing columns: {missing_sql_cols}"
     )
 
     spans, payloads, _ = generate_time_shifted_corpus(
@@ -448,7 +448,7 @@ def test_demo_loadgen_sql_and_jsonl_emit_all_step1_m1_columns(tmp_path: Path) ->
     first_row = json.loads(spans_path.read_text(encoding="utf-8").splitlines()[0])
     missing_jsonl_cols = sorted(required_span_cols - set(first_row))
     assert not missing_jsonl_cols, (
-        f"export_time_shifted_jsonl missing M1 columns: {missing_jsonl_cols}"
+        f"export_time_shifted_jsonl missing columns: {missing_jsonl_cols}"
     )
 
 
@@ -1397,7 +1397,7 @@ def _install_enterprise_views(conn: sqlite3.Connection) -> None:
 
 
 def test_pricing_empty_catalog_fallback_suffix_stripping_and_ddl_seed() -> None:
-    """`v_trace_waterfall` with an empty catalog prices Argon/suffixed Argon at $0.175 and marks unknown NULL (`F1`)."""
+    """`v_trace_waterfall` with an empty catalog prices Argon/suffixed Argon at $0.175 and marks unknown NULL."""
     ddl_text = (SQL_DIR / "ddl.sql").read_text(encoding="utf-8")
     assert "MERGE INTO `agent_eval.model_pricing_catalog`" in ddl_text
     for sku in (
@@ -1546,7 +1546,7 @@ def test_pricing_empty_catalog_fallback_suffix_stripping_and_ddl_seed() -> None:
 
 
 def test_shipped_enterprise_views_value_parity_dedup_and_latest_verdict() -> None:
-    """Transpiled `sql/views.sql` matches Python Rogan-Gladen & SQLite twin (`F3`), dedups (`M6-3`), and uses latest verdict (`F15`)."""
+    """Transpiled `sql/views.sql` matches Python Rogan-Gladen & SQLite twin, dedups, and uses latest verdict."""
     conn = _new_sqlite_bq_conn()
     _create_enterprise_sqlite_fixture(conn)
     _install_enterprise_views(conn)
@@ -1676,7 +1676,7 @@ def test_shipped_enterprise_views_value_parity_dedup_and_latest_verdict() -> Non
                     "2026-11-21T12:10:00+00:00",
                 ),
             )
-            # Duplicate append of the same (eval_run_id, trace_id, rubric_id) must be deduplicated (`M6-3`).
+            # Duplicate append of the same (eval_run_id, trace_id, rubric_id) must be deduplicated.
             if i == 0:
                 conn.execute(
                     ENTERPRISE_EVAL_RESULTS_BASE_INSERT,
@@ -1699,7 +1699,7 @@ def test_shipped_enterprise_views_value_parity_dedup_and_latest_verdict() -> Non
                         "2026-11-21T12:05:00+00:00",
                     ),
                 )
-                # Older failing run for out-f3-000 must be superseded by newer passing run-1 (`F15`).
+                # Older failing run for out-f3-000 must be superseded by newer passing run-1.
                 conn.execute(
                     ENTERPRISE_EVAL_RESULTS_BASE_INSERT,
                     (
@@ -1753,8 +1753,8 @@ def test_shipped_enterprise_views_value_parity_dedup_and_latest_verdict() -> Non
     assert float(bq_row["calibrated_ci_95_lower"]) == pytest.approx(py_rg.ci_95_lower, abs=1e-12)
     assert float(bq_row["calibrated_ci_95_upper"]) == pytest.approx(py_rg.ci_95_upper, abs=1e-12)
 
-    # F15: out-f3-000 had an older failing verdict in run-0-old and a newer passing verdict in run-1 -> verified!
-    # M6-3: duplicate ev-0-dup-older in run-1 was deduplicated (21 rows total across 20 outcomes, not 22).
+    # Out-f3-000 had an older failing verdict in run-0-old and a newer passing verdict in run-1 -> verified!
+    # Duplicate ev-0-dup-older in run-1 was deduplicated (21 rows total across 20 outcomes, not 22).
     cpvo_row = conn.execute(
         "SELECT verified_outcomes, measured_judge_cost_usd FROM v_enterprise_cost_per_verified_outcome WHERE apphub_application_id = 'cal-app'"
     ).fetchone()
@@ -1767,7 +1767,7 @@ def test_shipped_enterprise_views_value_parity_dedup_and_latest_verdict() -> Non
 
 
 def test_unclassified_traffic_type_included_in_total_spend_and_coverage() -> None:
-    """An unrecognised `finops_traffic_type` lands in `unclassified_usd`, `total_spend_usd`, and `v_attribution_coverage` (`F5`)."""
+    """An unrecognised `finops_traffic_type` lands in `unclassified_usd`, `total_spend_usd`, and `v_attribution_coverage`."""
     conn = _new_sqlite_bq_conn()
     _create_enterprise_sqlite_fixture(conn)
     _install_enterprise_views(conn)
@@ -1827,7 +1827,7 @@ def test_unclassified_traffic_type_included_in_total_spend_and_coverage() -> Non
 
 
 def test_daily_quota_guard_no_config_fanout_and_engine_b_quota_trip() -> None:
-    """`v_step2_daily_quota_status` ignores extra config rows (`F10`), retains billed retries, and trips on Engine B (`M9-3`)."""
+    """`v_step2_daily_quota_status` ignores extra config rows, retains billed retries, and trips on Engine B."""
     quota_path = SQL_DIR / "step3_daily_quota_guard.sql"
     quota_sql = quota_path.read_text(encoding="utf-8")
     assert "CREATE OR REPLACE PROCEDURE `agent_eval.run_daily_quota_guarded_judge`" in quota_sql
@@ -1923,7 +1923,7 @@ def test_daily_quota_guard_no_config_fanout_and_engine_b_quota_trip() -> None:
                 0,
                 "2026-11-21T08:00:00+00:00",
             ),
-            # M9-3 non-deduped burn accounting: billed retries still count against daily quota.
+            # Non-deduped burn accounting: billed retries still count against daily quota.
             (
                 "e1-retry",
                 "run-a",
@@ -1998,8 +1998,8 @@ def test_daily_quota_guard_no_config_fanout_and_engine_b_quota_trip() -> None:
     conn.close()
 
 
-def test_f11_deterministic_traffic_type_unjudged_rubric_and_multi_rubric_filter() -> None:
-    """F11 + M9-2: Explicit `finops_traffic_type` priority, `'groundedness_4pt_v1'` unjudged label, and multi-rubric parity."""
+def test_deterministic_traffic_type_unjudged_rubric_and_multi_rubric_filter() -> None:
+    """Explicit `finops_traffic_type` priority, `'groundedness_4pt_v1'` unjudged label, and multi-rubric parity."""
     views_text = (SQL_DIR / "views.sql").read_text(encoding="utf-8")
     assert "ANY_VALUE(w.finops_traffic_type)" not in views_text
     assert "MAX(w.finops_traffic_type) AS primary_traffic_type" not in views_text
@@ -2170,8 +2170,8 @@ def test_f11_deterministic_traffic_type_unjudged_rubric_and_multi_rubric_filter(
     assert twin_esc["multi-rubric-app"].raw_judge_pass_rate == pytest.approx(0.0)
 
 
-def test_f12_sql_pricing_constants_match_python_default_model_skus() -> None:
-    """F12: Parse SQL pricing constants across `sql/*.sql` and verify single Python cost implementation."""
+def test_sql_pricing_constants_match_python_default_model_skus() -> None:
+    """Parse SQL pricing constants across `sql/*.sql` and verify single Python cost implementation."""
     cost_defs = [
         p.relative_to(REPO_ROOT).as_posix()
         for p in sorted((REPO_ROOT / "bq_eval").rglob("*.py"))
@@ -2326,8 +2326,8 @@ def test_f12_sql_pricing_constants_match_python_default_model_skus() -> None:
     conn.close()
 
 
-def test_f14_counterparty_classification_uses_explicit_flag_not_app_id_substring() -> None:
-    """F14: An internal app named `external-facing-chat` stays in CPVO; explicit flags route to `v_counterparty_spend`."""
+def test_counterparty_classification_uses_explicit_flag_not_app_id_substring() -> None:
+    """An internal app named `external-facing-chat` stays in CPVO; explicit flags route to `v_counterparty_spend`."""
     views_text = (SQL_DIR / "views.sql").read_text(encoding="utf-8")
     assert "LIKE '%external%'" not in views_text
 
@@ -2435,8 +2435,8 @@ def test_f14_counterparty_classification_uses_explicit_flag_not_app_id_substring
     assert counterparty_apps == {"partner-carrier-hub", "attr-marked-partner"}
 
 
-def test_f21_bq_dry_run_sqlglot_splitter_and_bqaa_chronological_app_id() -> None:
-    """F21: `split_sql_statements` handles block comments/double quotes; `v_bqaa_trace_payloads` matches Python chronological app ID."""
+def test_bq_dry_run_sqlglot_splitter_and_bqaa_chronological_app_id() -> None:
+    """`split_sql_statements` handles block comments/double quotes; `v_bqaa_trace_payloads` matches Python chronological app ID."""
     tricky_sql = (
         "/* block comment with ; inside */\n"
         "SELECT \"col;semi\" AS c1, 'single;semi' AS c2 FROM `proj.ds.tbl`;\n"

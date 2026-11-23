@@ -1,4 +1,4 @@
-"""M9-4 verification: Dark-LOC removal, parameterized app_registry storage, and dynamic `--scenario-file` FinOps."""
+"""Dark-LOC removal, parameterized app_registry storage, and dynamic `--scenario-file` FinOps."""
 
 from __future__ import annotations
 
@@ -110,7 +110,7 @@ def test_dynamic_scenario_file_computes_roi_pareto_pt_valley_and_hourly_chargeba
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """M9-4: Changing `--scenario-file` input traces dynamically updates ROI, Pareto, PT-valley, and hourly chargeback."""
+    """Changing `--scenario-file` input traces dynamically updates ROI, Pareto, PT-valley, and hourly chargeback."""
     b_low = _build_custom_scenario_bundle(
         corpus_id="scen-low",
         n_flash_traces=20,
@@ -163,7 +163,7 @@ def test_dynamic_scenario_file_computes_roi_pareto_pt_valley_and_hourly_chargeba
 
 
 def test_app_registry_worm_storage_parameterization_and_dark_loc_removals() -> None:
-    """M9-4: `app_registry.storage_usd_per_outcome` parameterizes WORM storage; deleted dark artifacts stay gone."""
+    """`app_registry.storage_usd_per_outcome` parameterizes WORM storage; deleted dark artifacts stay gone."""
     assert not hasattr(finops, "compute_default_span_cost_usd")
     assert not (SQL_DIR / "demo_docubridge_extensions.sql").exists()
     assert not (REPO_ROOT / "bq_eval" / "showcase" / "seeds_banking.py").exists()

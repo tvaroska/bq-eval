@@ -2,7 +2,6 @@
 -- BQ Eval & FinOps (bq-eval) — Dual-Path Compatibility Views + Physical DDL
 --   * Full Capture (default here): Native OTel `_AllSpans` + `_AllLogs` + BigLake `completions`
 --   * Light Capture (`BQAA`) & Hybrid Dual-Path: see `sql/bqaa_adapter_views.sql`
--- Standard: EVAL-P01, EVAL-P02, EVAL-P03, EVAL-P04, EVAL-P05, EVAL-P08, EVAL-P11 (v2026.11.3)
 -- =============================================================================
 
 CREATE SCHEMA IF NOT EXISTS `agent_eval`
@@ -313,7 +312,7 @@ CREATE TABLE IF NOT EXISTS `agent_eval.eval_results` (
   eval_id STRING NOT NULL OPTIONS (description = 'Unique evaluation execution record ID.'),
   eval_run_id STRING OPTIONS (description = 'Logical evaluation batch or experiment run identifier.'),
   trace_id STRING NOT NULL OPTIONS (description = 'Evaluated W3C trace identifier.'),
-  outcome_id STRING OPTIONS (description = 'Business outcome identifier (EVAL-P11 outcome.id).'),
+  outcome_id STRING OPTIONS (description = 'Business outcome identifier (outcome.id).'),
   apphub_application_id STRING NOT NULL OPTIONS (description = 'Resolved application identifier.'),
   rubric_id STRING NOT NULL OPTIONS (description = 'Rubric identifier (e.g., groundedness_4pt_v1).'),
   judge_model STRING NOT NULL OPTIONS (description = 'Autorater model identifier (gemini-3.8-flash or gemini-4-argon).'),
@@ -327,7 +326,7 @@ CREATE TABLE IF NOT EXISTS `agent_eval.eval_results` (
   judge_thinking_tokens INT64 NOT NULL OPTIONS (description = 'Reasoning tokens consumed by the judge call.'),
   policy_sha256 STRING OPTIONS (description = 'SHA-256 hash of active policy text for zero-day drift tracking.'),
   amended_clause_ids STRING OPTIONS (description = 'Comma-separated clause IDs modified under the active policy revision.'),
-  target_clause_id STRING OPTIONS (description = 'Optional clause identifier evaluated by this trace/rubric pair for clause-scoped EVAL-P09 NFR gating.'),
+  target_clause_id STRING OPTIONS (description = 'Optional clause identifier evaluated by this trace/rubric pair for clause-scoped NFR gating.'),
   evaluated_at TIMESTAMP NOT NULL OPTIONS (description = 'UTC judge execution timestamp.')
 )
 PARTITION BY DATE(evaluated_at)
@@ -337,10 +336,10 @@ OPTIONS (
 );
 
 ALTER TABLE `agent_eval.eval_results`
-  ADD COLUMN IF NOT EXISTS outcome_id STRING OPTIONS (description = 'Business outcome identifier (EVAL-P11 outcome.id).'),
+  ADD COLUMN IF NOT EXISTS outcome_id STRING OPTIONS (description = 'Business outcome identifier (outcome.id).'),
   ADD COLUMN IF NOT EXISTS policy_sha256 STRING OPTIONS (description = 'SHA-256 hash of active policy text.'),
   ADD COLUMN IF NOT EXISTS amended_clause_ids STRING OPTIONS (description = 'Comma-separated clause IDs modified under active policy.'),
-  ADD COLUMN IF NOT EXISTS target_clause_id STRING OPTIONS (description = 'Optional clause identifier evaluated for clause-scoped EVAL-P09 NFR gating.');
+  ADD COLUMN IF NOT EXISTS target_clause_id STRING OPTIONS (description = 'Optional clause identifier evaluated for clause-scoped NFR gating.');
 
 -- -----------------------------------------------------------------------------
 -- 6. Stratified SME Calibration Audit Labels (agent_eval.sme_labels)
@@ -348,7 +347,7 @@ ALTER TABLE `agent_eval.eval_results`
 CREATE TABLE IF NOT EXISTS `agent_eval.sme_labels` (
   label_id STRING NOT NULL OPTIONS (description = 'Unique SME calibration label identifier.'),
   trace_id STRING NOT NULL OPTIONS (description = 'Audited trace identifier.'),
-  outcome_id STRING OPTIONS (description = 'Business outcome identifier (EVAL-P11 outcome.id).'),
+  outcome_id STRING OPTIONS (description = 'Business outcome identifier (outcome.id).'),
   apphub_application_id STRING NOT NULL OPTIONS (description = 'Application identifier.'),
   rubric_id STRING NOT NULL OPTIONS (description = 'Calibrated rubric identifier.'),
   rater_id STRING NOT NULL OPTIONS (description = 'Anonymized SME rater identifier.'),
@@ -366,7 +365,7 @@ OPTIONS (
 );
 
 ALTER TABLE `agent_eval.sme_labels`
-  ADD COLUMN IF NOT EXISTS outcome_id STRING OPTIONS (description = 'Business outcome identifier (EVAL-P11 outcome.id).');
+  ADD COLUMN IF NOT EXISTS outcome_id STRING OPTIONS (description = 'Business outcome identifier (outcome.id).');
 
 -- -----------------------------------------------------------------------------
 -- 7. Effective-Dated 1P & 3P Model Pricing & Burndown Catalog (agent_eval.model_pricing_catalog)
@@ -483,7 +482,7 @@ OPTIONS (
 );
 
 -- -----------------------------------------------------------------------------
--- 7C. BigQuery INFORMATION_SCHEMA.JOBS Query Cost Ledger (M10-3)
+-- 7C. BigQuery INFORMATION_SCHEMA.JOBS Query Cost Ledger
 -- -----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS `agent_eval.bq_query_jobs` (
   job_id STRING NOT NULL OPTIONS (description = 'BigQuery job_id from INFORMATION_SCHEMA.JOBS_BY_PROJECT.'),
@@ -502,7 +501,7 @@ OPTIONS (
 );
 
 -- -----------------------------------------------------------------------------
--- 7D. Multi-Cloud BigQuery Omni Remote Trace Slice Rollups (M11-3)
+-- 7D. Multi-Cloud BigQuery Omni Remote Trace Slice Rollups
 -- -----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS `agent_eval.remote_trace_slices` (
   cloud_provider STRING NOT NULL OPTIONS (description = 'Origin cloud spoke: aws, azure, or on_prem.'),
@@ -527,7 +526,7 @@ OPTIONS (
 );
 
 -- -----------------------------------------------------------------------------
--- 8. M2 Multi-Agent Fleet Ground-Truth Labels, Outcomes & Run Manifests
+-- 8. Multi-Agent Fleet Ground-Truth Labels, Outcomes & Run Manifests
 -- -----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS `agent_eval.fleet_labels` (
   run_id STRING NOT NULL OPTIONS (description = 'Fleet evaluation run identifier.'),
@@ -552,7 +551,7 @@ CREATE TABLE IF NOT EXISTS `agent_eval.fleet_case_outcomes` (
   case_id STRING NOT NULL OPTIONS (description = 'Test case identifier joining 1:1 to agent_eval.fleet_labels.'),
   app STRING NOT NULL OPTIONS (description = 'Target App Hub application identifier.'),
   case_type STRING NOT NULL OPTIONS (description = 'Cohort slice from fleet_labels.'),
-  outcome_id STRING OPTIONS (description = 'EVAL-P11 outcome.id returned via x-outcome-id header (NULL for unregistered shadow workload).'),
+  outcome_id STRING OPTIONS (description = 'outcome.id returned via x-outcome-id header (NULL for unregistered shadow workload).'),
   trace_id STRING OPTIONS (description = 'Root W3C trace_id returned via x-trace-id header.'),
   observed_status STRING NOT NULL OPTIONS (description = 'Observed outcome status returned by the live service.'),
   http_status INT64 NOT NULL OPTIONS (description = 'HTTP response status code.'),
@@ -560,7 +559,7 @@ CREATE TABLE IF NOT EXISTS `agent_eval.fleet_case_outcomes` (
 )
 CLUSTER BY run_id, app, outcome_id
 OPTIONS (
-  description = '1:1 live execution mapping between fleet_labels cases and EVAL-P11 outcome_id values.'
+  description = '1:1 live execution mapping between fleet_labels cases and outcome_id values.'
 );
 
 CREATE TABLE IF NOT EXISTS `agent_eval.fleet_runs` (
@@ -570,7 +569,7 @@ CREATE TABLE IF NOT EXISTS `agent_eval.fleet_runs` (
   rfp_cases INT64 NOT NULL OPTIONS (description = 'Benefits RFP cases executed.'),
   meridian_cases INT64 NOT NULL OPTIONS (description = 'Meridian consolidation deals executed.'),
   shadow_cases INT64 NOT NULL OPTIONS (description = 'Unregistered shadow attempts executed.'),
-  attributed_outcomes INT64 NOT NULL OPTIONS (description = 'Cases returning a non-null EVAL-P11 outcome_id.'),
+  attributed_outcomes INT64 NOT NULL OPTIONS (description = 'Cases returning a non-null outcome_id.'),
   promoted_skill_revision_id STRING OPTIONS (description = 'SkillRevision ID promoted between Day-1 and Day-2 deals.'),
   concurrency INT64 NOT NULL OPTIONS (description = 'Max bounded HTTP concurrency used by the runner.'),
   elapsed_seconds FLOAT64 NOT NULL OPTIONS (description = 'Total wall-clock fleet execution time in seconds.'),

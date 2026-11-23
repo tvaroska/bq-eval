@@ -1,4 +1,4 @@
-"""Day-2 Judge Token Quota Guard twin mirroring `sql/step3_daily_quota_guard.sql` (`M9-3`)."""
+"""Day-2 Judge Token Quota Guard twin mirroring `sql/step3_daily_quota_guard.sql`."""
 
 from __future__ import annotations
 
@@ -93,7 +93,7 @@ def estimate_judge_call_tokens(
 
 
 class DailyQuotaGuard:
-    """SQLite-backed atomic twin of `agent_eval.run_daily_quota_guarded_judge` (`M9-3`)."""
+    """SQLite-backed atomic twin of `agent_eval.run_daily_quota_guarded_judge`."""
 
     def __init__(
         self,

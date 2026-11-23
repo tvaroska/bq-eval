@@ -1,4 +1,4 @@
-"""Zero-manual-edit SQL bootstrap renderer and offline schema validator (`M10-1`)."""
+"""Zero-manual-edit SQL bootstrap renderer and offline schema validator."""
 
 from __future__ import annotations
 

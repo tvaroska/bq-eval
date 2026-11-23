@@ -1,4 +1,4 @@
-"""Light Capture (`BQAA`) deterministic Python adapter twin (`M5`, `F13`, `F17`, `F21`)."""
+"""Light Capture (`BQAA`) deterministic Python adapter twin."""
 
 from __future__ import annotations
 
@@ -97,7 +97,7 @@ def _resolve_traffic_type(meta: dict[str, Any]) -> FinOpsTrafficType:
 
 
 def _resolve_tool_call_status(ev: BQAAAgentEvent) -> str | None:
-    """Classify `TOOL_COMPLETED` / `TOOL_ERROR` matching `sql/bqaa_adapter_views.sql` (`F21`)."""
+    """Classify `TOOL_COMPLETED` / `TOOL_ERROR` matching `sql/bqaa_adapter_views.sql`."""
     if ev.event_type == "TOOL_COMPLETED":
         return "SUCCESS"
     if ev.event_type != "TOOL_ERROR":

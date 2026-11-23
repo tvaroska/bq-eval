@@ -1,4 +1,4 @@
-"""BigQuery Omni cloud-agnostic zero-egress spoke utilities & multi-cloud CPVO reconciliation (`M11-3`)."""
+"""BigQuery Omni cloud-agnostic zero-egress spoke utilities & multi-cloud CPVO reconciliation."""
 
 from __future__ import annotations
 
@@ -48,7 +48,7 @@ class RemoteTraceSliceRecord:
 
 @dataclass(frozen=True)
 class UnifiedMultiCloudCpvoRow:
-    """Unified multi-cloud CPVO row mirroring `agent_eval.v_unified_multicloud_cpvo` (`M11-3`)."""
+    """Unified multi-cloud CPVO row mirroring `agent_eval.v_unified_multicloud_cpvo`."""
 
     apphub_application_id: str
     active_clouds: int
@@ -63,7 +63,7 @@ def normalize_workload_principal(
     *,
     cloud_provider: Literal["aws", "azure", "on_prem"] = "aws",
 ) -> str:
-    """Normalize `principal://` / `spiffe://` URIs matching `sql/omni_spoke_views.sql` (`M11-3`)."""
+    """Normalize `principal://` / `spiffe://` URIs matching `sql/omni_spoke_views.sql`."""
     cleaned = (raw_identity or "").strip()
     if not cleaned:
         return "principal://unattributed/unknown"
@@ -73,7 +73,7 @@ def normalize_workload_principal(
 
 
 def normalize_omni_application_id(gcp_apphub_application_id: str | None) -> str:
-    """Enforce strict `ADR-003` `'unregistered_app'` fallback on BigQuery Omni spoke spans."""
+    """Enforce strict `'unregistered_app'` fallback on BigQuery Omni spoke spans."""
     cleaned = (gcp_apphub_application_id or "").strip()
     return cleaned if cleaned else "unregistered_app"
 

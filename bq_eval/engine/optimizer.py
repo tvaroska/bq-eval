@@ -1,4 +1,4 @@
-"""Failure loss-bank clustering, sanitized `ATIF-v1.8` export & clause-scoped `EVAL-P09` NFR gate (`M11-4`)."""
+"""Failure loss-bank clustering, sanitized `ATIF-v1.8` export & clause-scoped NFR gate."""
 
 from __future__ import annotations
 
@@ -46,7 +46,7 @@ def _is_clause_amended(outcome: PairedEvalOutcome) -> bool:
 def evaluate_clause_scoped_nfr_gate(
     outcomes: Sequence[PairedEvalOutcome],
 ) -> dict[tuple[str, str], ClauseScopedNfrGateResult]:
-    """Enforce `EVAL-P09` clause-scoped `policy_sha256` `NFR == 0.0%` gate (`v_step3_policy_nfr_gate`)."""
+    """Enforce clause-scoped `policy_sha256` `NFR == 0.0%` gate (`v_step3_policy_nfr_gate`)."""
     grouped: dict[tuple[str, str], list[PairedEvalOutcome]] = {}
     for item in outcomes:
         grouped.setdefault((item.apphub_application_id, item.rubric_id), []).append(item)

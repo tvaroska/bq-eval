@@ -1,4 +1,4 @@
-"""M9 Security Hardening, Port Adapters, Parity, Quota Guard & Dynamic FinOps Tests."""
+"""Security Hardening, Port Adapters, Parity, Quota Guard & Dynamic FinOps Tests."""
 
 from __future__ import annotations
 
@@ -33,8 +33,8 @@ from bq_eval.showcase.render.renderer import (
 from bq_eval.showcase.render.view import TabView, build_showcase_page_view
 
 
-def test_m9_1_single_pass_template_blocks_placeholder_and_inline_handler_injection() -> None:
-    """M9-1: Untrusted `__SCRIPT_BLOCK__` / `__STYLESHEET__` never re-expand and inline handlers are gone."""
+def test_single_pass_template_blocks_placeholder_and_inline_handler_injection() -> None:
+    """Untrusted `__SCRIPT_BLOCK__` / `__STYLESHEET__` never re-expand and inline handlers are gone."""
     base = run_showcase_pipeline(corpus="retail-2app")
     hostile_app = "__SCRIPT_BLOCK__ __STYLESHEET__"
     order_sum = base.summaries["order-support-agent"].model_copy(
@@ -73,8 +73,8 @@ def test_m9_1_single_pass_template_blocks_placeholder_and_inline_handler_injecti
     assert "&quot; autofocus onfocus=&quot;alert(2)" in evil_html
 
 
-def test_m9_1_sql_and_xml_input_guards_reject_bool_and_injection() -> None:
-    """M9-1: Reject `bool` canary pct, unsafe `column_expr`, and unsafe XML `tag`."""
+def test_sql_and_xml_input_guards_reject_bool_and_injection() -> None:
+    """Reject `bool` canary pct, unsafe `column_expr`, and unsafe XML `tag`."""
     with pytest.raises(ValueError, match="not bool"):
         build_ai_generate_table_judge_sql(project_id="demo-proj", canary_sample_pct=True)
     with pytest.raises(ValueError, match="not bool"):
@@ -91,8 +91,8 @@ def test_m9_1_sql_and_xml_input_guards_reject_bool_and_injection() -> None:
             wrap_untrusted_text("hello", tag=bad_tag)
 
 
-def test_m9_1_non_loopback_host_guard(capsys: pytest.CaptureFixture[str]) -> None:
-    """M9-1: Non-loopback host bind fails closed unless explicitly opted in."""
+def test_non_loopback_host_guard(capsys: pytest.CaptureFixture[str]) -> None:
+    """Non-loopback host bind fails closed unless explicitly opted in."""
     all_ifaces = ".".join(("0", "0", "0", "0"))
     for host in (all_ifaces, "192.0.2.10", "::"):
         with pytest.raises(ValueError, match="non-loopback"):
@@ -123,10 +123,10 @@ def _server_base_url(server: cli_server.WorkbenchHTTPServer) -> str:
 
 
 @pytest.mark.port
-def test_m9_1_workbench_http_port_routes_headers_and_caching(
+def test_workbench_http_port_routes_headers_and_caching(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """M9-1: `@pytest.mark.port` verifies `/index.html`, `/api/v1/demo`, `404`, CSP/XFO headers, and cache."""
+    """`@pytest.mark.port` verifies `/index.html`, `/api/v1/demo`, `404`, CSP/XFO headers, and cache."""
     expected_csp = workbench_csp_header()
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
@@ -176,8 +176,8 @@ def test_m9_1_workbench_http_port_routes_headers_and_caching(
 
 
 @pytest.mark.port
-def test_m9_1_workbench_http_port_scenario_file_route(tmp_path: Path) -> None:
-    """M9-1: `@pytest.mark.port` verifies `--scenario-file` loopback routes and static-mode headers."""
+def test_workbench_http_port_scenario_file_route(tmp_path: Path) -> None:
+    """`@pytest.mark.port` verifies `--scenario-file` loopback routes and static-mode headers."""
     expected_csp = workbench_csp_header()
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 

@@ -45,7 +45,7 @@ class ConfusionMatrix(BaseModel):
 
 
 class RoganGladenResult(BaseModel):
-    """Bias-corrected true pass rate and 95% confidence interval (EVAL-P04)."""
+    """Bias-corrected true pass rate and 95% confidence interval."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -180,7 +180,7 @@ class FocusChargebackRow(BaseModel):
 
 
 class HourlyBurndownExportRow(BaseModel):
-    """Wire contract row for `agent_eval.v_capacity_hourly_burndown_export` (`M7-3` / `BQ-G1`)."""
+    """Wire contract row for `agent_eval.v_capacity_hourly_burndown_export`."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -401,7 +401,7 @@ class LiveFleetReceipt(BaseModel):
 
 
 class ScenarioCorpusBundle(BaseModel):
-    """Portable scenario/corpus file contract for `bq-eval demo --scenario-file` (`M7-2`)."""
+    """Portable scenario/corpus file contract for `bq-eval demo --scenario-file`."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 

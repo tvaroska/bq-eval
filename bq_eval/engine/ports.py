@@ -1,4 +1,4 @@
-"""Evaluation Backend Ports & Adapters (`EvalBackend` `Protocol`, SQLite local + BigQuery cloud, `M9-3`)."""
+"""Evaluation Backend Ports & Adapters (`EvalBackend` `Protocol`, SQLite local + BigQuery cloud)."""
 
 from __future__ import annotations
 

@@ -75,7 +75,7 @@
     "name": "gcp_apphub_application_id",
     "type": "STRING",
     "mode": "NULLABLE",
-    "description": "Server-stamped or collector-stamped App Hub Application ID (ADR-003: NULL for unregistered workloads, resolved downstream via COALESCE(..., 'unregistered_app'))."
+    "description": "Server-stamped or collector-stamped App Hub Application ID (NULL for unregistered workloads, resolved downstream via COALESCE(..., 'unregistered_app'))."
   },
   {
     "name": "gcp_apphub_service_id",
@@ -141,7 +141,7 @@
     "name": "rule0_pass",
     "type": "BOOL",
     "mode": "REQUIRED",
-    "description": "Deterministic Rule 0 schema, citation-anchor, and math verification outcome (EVAL-P01)."
+    "description": "Deterministic Rule 0 schema, citation-anchor, and math verification outcome."
   },
   {
     "name": "finops_traffic_type",
@@ -153,13 +153,13 @@
     "name": "outcome_id",
     "type": "STRING",
     "mode": "NULLABLE",
-    "description": "EVAL-P11 business outcome identifier propagated via W3C baggage (outcome.id)."
+    "description": "business outcome identifier propagated via W3C baggage (outcome.id)."
   },
   {
     "name": "outcome_owner",
     "type": "STRING",
     "mode": "NULLABLE",
-    "description": "EVAL-P11 owning App Hub application ID propagated via W3C baggage (outcome.owner)."
+    "description": "owning App Hub application ID propagated via W3C baggage (outcome.owner)."
   },
   {
     "name": "source_mode",

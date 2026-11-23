@@ -128,7 +128,7 @@ def generate_time_shifted_corpus(
 
 
 def _select_root_span(trace_spans: Sequence[OTelGenAISpanRecord]) -> OTelGenAISpanRecord:
-    """Select the root span (`parent_span_id is None`), falling back to earliest start (`F17`)."""
+    """Select the root span (`parent_span_id is None`), falling back to earliest start."""
     roots = [s for s in trace_spans if s.parent_span_id is None]
     candidates = roots if roots else trace_spans
     return min(candidates, key=lambda s: (s.start_time, s.span_id))
@@ -169,7 +169,7 @@ def evaluate_time_shifted_corpus(
     spans: Sequence[OTelGenAISpanRecord],
     reference_time: datetime,
 ) -> TimeShiftLoadgenReport:
-    """Evaluate Step 1 Cost per App/BU/Outcome via canonical SQLite Step-1 views (`M9-4`)."""
+    """Evaluate Step 1 Cost per App/BU/Outcome via canonical SQLite Step-1 views."""
     if not spans:
         raise ValueError("spans must be non-empty.")
 
@@ -298,7 +298,7 @@ bq query --project_id=YOUR_PROJECT --use_legacy_sql=false < sql/demo_time_shift_
 
 
 def _http_status_from_span(span: OTelGenAISpanRecord) -> int:
-    """Map OTel/tool status strings to integer HTTP status codes for `capacity` wire parity (`M7-3`)."""
+    """Map OTel/tool status strings to integer HTTP status codes for `capacity` wire parity."""
     if span.tool_call_status == "RATE_LIMITED" or span.status_code == "RATE_LIMITED":
         return 429
     if span.tool_call_status == "TIMEOUT":
@@ -313,7 +313,7 @@ def export_time_shifted_jsonl(
     payloads: Sequence[TracePayloadRecord],
     output_dir: Path,
 ) -> tuple[Path, Path]:
-    """Write time-shifted `otel_spans.jsonl` and `trace_payloads.jsonl` (`M7-3` wire-aligned)."""
+    """Write time-shifted `otel_spans.jsonl` and `trace_payloads.jsonl` (wire-aligned)."""
     output_dir.mkdir(parents=True, exist_ok=True)
     spans_path = output_dir / "otel_spans.jsonl"
     payloads_path = output_dir / "trace_payloads.jsonl"

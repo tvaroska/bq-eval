@@ -1,4 +1,4 @@
-"""Documentation-to-code contract tests (`F19`, `M6-4`, `M6-5`, `M7-2`)."""
+"""Documentation-to-code contract tests."""
 
 from __future__ import annotations
 
@@ -65,7 +65,7 @@ def _assert_live_receipt_recomputes_from_spans(
     lr: LiveFleetReceipt,
     artifacts: ShowcaseRunArtifacts,
 ) -> None:
-    """Recompute KYC, RFP, Skill, and attribution metrics directly from bundle spans (`M8-2`)."""
+    """Recompute KYC, RFP, Skill, and attribution metrics directly from bundle spans."""
     assert lr.summary_provenance == "reconstructed_from_bundle_spans"
     assert lr.labeled_fleet_cases == len({s.trace_id for s in bundle.spans}) == 343
     assert lr.cumulative_allspans_count == len(bundle.spans) == 676
@@ -255,7 +255,7 @@ def test_rubric_count_and_names_match_docs_csv_and_code() -> None:
 
 
 def test_license_and_skill_eval_yaml_fail_closed_contract() -> None:
-    """Repo ships Apache-2.0 `LICENSE` and fail-closed `skills/bq-eval/EVAL.yaml` (`F16`, `M6-4`)."""
+    """Repo ships Apache-2.0 `LICENSE` and fail-closed `skills/bq-eval/EVAL.yaml`."""
     license_path = REPO_ROOT / "LICENSE"
     assert license_path.is_file()
     assert "Apache License" in license_path.read_text(encoding="utf-8")
@@ -271,7 +271,7 @@ def test_license_and_skill_eval_yaml_fail_closed_contract() -> None:
 
 
 def test_documented_test_count_matches_pytest_collection() -> None:
-    """Test count cited in `README.md` and `AGENTS.md` matches actual collected pytest items (`F19`)."""
+    """Test count cited in `README.md` and `AGENTS.md` matches actual collected pytest items."""
     res = subprocess.run(
         [sys.executable, "-m", "pytest", "--collect-only", "-q", "-p", "no:cacheprovider"],
         cwd=REPO_ROOT,

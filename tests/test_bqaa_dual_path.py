@@ -1,4 +1,4 @@
-"""M5 Dual-Path (`Light Capture BQAA` + `Full Capture OTel`) verification tests."""
+"""Dual-Path (`Light Capture BQAA` + `Full Capture OTel`) verification tests."""
 
 from __future__ import annotations
 
@@ -38,8 +38,8 @@ def _projected_columns_of_view(sql_text: str, view_name: str) -> list[str]:
     raise AssertionError(f"View {view_name!r} not found")
 
 
-def test_bqaa_adapter_sql_contract_and_strict_adr003_fallback() -> None:
-    """Verify `sql/bqaa_adapter_views.sql` 39/39 ordered column parity, live Mode A/C views, dedup, and strict ADR-003 fallback (`M9-2`, `M10-1`, `M11-1`)."""
+def test_bqaa_adapter_sql_contract_and_strict_fallback() -> None:
+    """Verify `sql/bqaa_adapter_views.sql` 39/39 ordered column parity, live Mode A/C views, dedup, and strict fallback."""
     adapter_sql = (REPO_ROOT / "sql" / "bqaa_adapter_views.sql").read_text(encoding="utf-8")
     ddl_sql = (REPO_ROOT / "sql" / "ddl.sql").read_text(encoding="utf-8")
     schema_cols = tuple(
@@ -106,7 +106,7 @@ def test_bqaa_adapter_sql_contract_and_strict_adr003_fallback() -> None:
 def test_bqaa_mode_a_and_mode_c_transpile_to_sqlite_with_null_shadow_outcome_and_tool_error() -> (
     None
 ):
-    """M9-2: Transpile `v_bqaa_otel_spans` (Mode A) and `v_otel_allspans_only` + Hybrid `UNION ALL` (Mode C) in SQLite."""
+    """Transpile `v_bqaa_otel_spans` (Mode A) and `v_otel_allspans_only` + Hybrid `UNION ALL` (Mode C) in SQLite."""
     from tests.test_sql_contracts import (
         _extract_view_sql_text,
         _new_sqlite_bq_conn,
@@ -457,7 +457,7 @@ def test_bqaa_python_twin_dedup_strict_fallback_and_sqlite_eval() -> None:
 def test_ai_evaluate_agent_sql_builder_and_cli_engine_b_default_canary(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Verify Engine B (`AI.EVALUATE_AGENT`) SQL builder and CLI default canary (`10%`, `F17`)."""
+    """Verify Engine B (`AI.EVALUATE_AGENT`) SQL builder and CLI default canary (`10%`)."""
     sql = build_ai_evaluate_agent_sql(
         project_id="demo-proj",
         dataset_id="agent_eval",

@@ -1,4 +1,4 @@
-"""Zero-extra-dependency GM3 Light Workbench HTTP Server (`bq-eval serve`, `M7-1`, `M9-1`)."""
+"""Zero-extra-dependency GM3 Light Workbench HTTP Server (`bq-eval serve`)."""
 
 from __future__ import annotations
 

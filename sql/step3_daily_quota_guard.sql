@@ -1,5 +1,5 @@
 -- =============================================================================
--- BQ Eval — Step 3 Day-2 Judge Token Quota Guard & Executable Procedure (M9-3)
+-- BQ Eval — Step 3 Day-2 Judge Token Quota Guard & Executable Procedure
 --   * Enforces global + per-application daily judge token sub-caps so a single
 --     noisy application cannot starve the rest of the fleet.
 --   * Accounts for pre-flight `max_output_tokens` + `thinking_level` headroom

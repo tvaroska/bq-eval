@@ -128,7 +128,7 @@ def _advance_block_depths(
 
 
 def split_sql_statements(sql: str) -> list[str]:
-    """Split a multi-statement BigQuery SQL script via `sqlglot`'s BigQuery lexer (`F21`, `M9-3`).
+    """Split a multi-statement BigQuery SQL script via `sqlglot`'s BigQuery lexer.
 
     Preserves `BEGIN ... END;` procedure blocks as single statements while stripping leading
     `--`/`#` and `/* ... */` comments so statements begin cleanly at their SQL keyword.

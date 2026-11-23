@@ -1,4 +1,4 @@
-"""CLI handler for `bq-eval bootstrap --mode light|full|hybrid [--dry-run|--offline-schema]` (`M10-1`)."""
+"""CLI handler for `bq-eval bootstrap --mode light|full|hybrid [--dry-run|--offline-schema]`."""
 
 from __future__ import annotations
 

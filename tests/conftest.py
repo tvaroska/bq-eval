@@ -1,4 +1,4 @@
-"""Shared test fixtures, span factories, and view column contracts (`F18`)."""
+"""Shared test fixtures, span factories, and view column contracts."""
 
 from __future__ import annotations
 
@@ -92,7 +92,7 @@ def make_span(  # noqa: PLR0913
     attributes: dict[str, str] | None = None,
     base_time: datetime | None = None,
 ) -> OTelGenAISpanRecord:
-    """Canonical `OTelGenAISpanRecord` test factory shared across the test suite (`F18`)."""
+    """Canonical `OTelGenAISpanRecord` test factory shared across the test suite."""
     anchor = base_time or datetime(2026, 11, 14, 12, 0, 0, tzinfo=UTC)
     start = anchor + timedelta(seconds=offset_s, milliseconds=offset_ms)
     return OTelGenAISpanRecord(

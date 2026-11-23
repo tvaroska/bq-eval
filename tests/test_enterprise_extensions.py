@@ -1,4 +1,4 @@
-"""M11 verification: 3P/PayGo/Governance, 3-Pool FOCUS & `capacity` BQ-G1, Omni zero-egress & Optimizer/ATIF."""
+"""3P/PayGo/Governance, 3-Pool FOCUS & `capacity` handoff, Omni zero-egress & Optimizer/ATIF."""
 
 from __future__ import annotations
 
@@ -87,8 +87,8 @@ def _install_extra_views(conn: sqlite3.Connection, file_name: str, views: tuple[
         conn.execute(f"CREATE VIEW {short} AS {sql}")
 
 
-def test_m11_1_3p_claude_cache_write_paygo_multipliers_sql_sqlite_python_parity() -> None:
-    """M11-1: 3P Claude cache-write (`1.25x` 5m / `2.0x` 1h), `5.0x` output & PayGo (`1.8x` / `0.5x`) match `< 1e-12`."""
+def test_3p_claude_cache_write_paygo_multipliers_sql_sqlite_python_parity() -> None:
+    """3P Claude cache-write (`1.25x` 5m / `2.0x` 1h), `5.0x` output & PayGo (`1.8x` / `0.5x`) match `< 1e-12`."""
     assert normalize_serving_traffic_type("PROVISIONED_THROUGHPUT") == (
         ServingTrafficType.PROVISIONED_THROUGHPUT
     )
@@ -189,8 +189,8 @@ def test_m11_1_3p_claude_cache_write_paygo_multipliers_sql_sqlite_python_parity(
         )
 
 
-def test_m11_1_inference_reconciliation_and_rl1_rl5_governance_parity() -> None:
-    """M11-1: `v_inference_request_reconciliation` & `v_app_risk_governance` match Python twins."""
+def test_inference_reconciliation_and_rl1_rl5_governance_parity() -> None:
+    """`v_inference_request_reconciliation` & `v_app_risk_governance` match Python twins."""
     base = datetime(2026, 11, 22, 14, 15, 0, tzinfo=UTC)
     otel_spans = [
         make_span(
@@ -363,8 +363,8 @@ def test_m11_1_inference_reconciliation_and_rl1_rl5_governance_parity() -> None:
     assert bool(sql_gov["gov-rl4-app"]["pt_commitment_allowed"]) is True
 
 
-def test_m11_2_three_pool_focus_chargeback_and_capacity_bq_g1_wire_contract() -> None:
-    """M11-2: 3-Pool FOCUS (`prod|eval|optimize`, `< 1e-12` drift, Involuntary vs TenantBurst) & `capacity` BQ-G1 payload."""
+def test_three_pool_focus_chargeback_and_capacity_bq_g1_wire_contract() -> None:
+    """3-Pool FOCUS (`prod|eval|optimize`, `< 1e-12` drift, Involuntary vs TenantBurst) & `capacity` payload."""
     summary = allocate_focus_three_pool_hourly_chargeback(
         hourly_demand_by_app_lane={
             ("app-funded", "prod"): [40_000.0, 20_000.0],
@@ -478,8 +478,8 @@ def test_m11_2_three_pool_focus_chargeback_and_capacity_bq_g1_wire_contract() ->
     assert ("app-funded", "optimize") in by_app_lane
 
 
-def test_m11_3_bigquery_omni_zero_egress_ast_proof_and_multicloud_cpvo() -> None:
-    """M11-3: `sql/omni_spoke_views.sql` proves zero raw prompt egress, strict fallback, and unified CPVO."""
+def test_bigquery_omni_zero_egress_ast_proof_and_multicloud_cpvo() -> None:
+    """`sql/omni_spoke_views.sql` proves zero raw prompt egress, strict fallback, and unified CPVO."""
     omni_sql = (SQL_DIR / "omni_spoke_views.sql").read_text(encoding="utf-8")
     stmts = _parse_bigquery_statements(omni_sql, "omni_spoke_views.sql")
     ok, violations = verify_zero_raw_payload_egress(omni_sql)
@@ -549,8 +549,8 @@ def test_m11_3_bigquery_omni_zero_egress_ast_proof_and_multicloud_cpvo() -> None
     assert unified["unregistered_app"].unified_cost_per_verified_outcome_usd is None
 
 
-def test_m11_4_sessions_5m_breaches_optimize_lane_and_ring_buffer() -> None:
-    """M11-4: Session lineage, 5m SLO/429 breaches, `optimize` lane, and `<2s` RingBuffer export."""
+def test_sessions_5m_breaches_optimize_lane_and_ring_buffer() -> None:
+    """Session lineage, 5m SLO/429 breaches, `optimize` lane, and `<2s` RingBuffer export."""
     base = datetime(2026, 11, 22, 16, 1, 0, tzinfo=UTC)
     spans = [
         make_span(
@@ -651,8 +651,8 @@ def test_m11_4_sessions_5m_breaches_optimize_lane_and_ring_buffer() -> None:
     assert json.loads(json.dumps({"ok": True}))["ok"] is True
 
 
-def test_m11_4_clause_scoped_nfr_gate_loss_bank_and_atif_export() -> None:
-    """M11-4: Clause-scoped `EVAL-P09` `policy_sha256` `NFR == 0.0%` gate, loss-bank clustering & `ATIF-v1.8` export."""
+def test_clause_scoped_nfr_gate_loss_bank_and_atif_export() -> None:
+    """Clause-scoped `policy_sha256` `NFR == 0.0%` gate, loss-bank clustering & `ATIF-v1.8` export."""
     conn = _new_sqlite_bq_conn()
     _create_enterprise_sqlite_fixture(conn)
     _install_extra_views(

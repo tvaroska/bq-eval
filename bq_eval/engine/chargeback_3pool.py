@@ -1,4 +1,4 @@
-"""3-Pool Hourly FOCUS 1.2 Chargeback (`prod|eval|optimize`) & `capacity` BQ-G1 wire sync (`M11-2`)."""
+"""3-Pool Hourly FOCUS 1.2 Chargeback (`prod|eval|optimize`) & `capacity` wire sync."""
 
 from __future__ import annotations
 
@@ -77,7 +77,7 @@ def allocate_focus_three_pool_hourly_chargeback(  # noqa: C901, PLR0912, PLR0913
     platform_owner_id: str = "platform-shared-reservation",
     platform_cost_center: str = "CC-PLATFORM-IDLE",
 ) -> ThreePoolChargebackSummary:
-    """Compute 3-Pool Hourly FOCUS 1.2 Chargeback with `prod|eval|optimize` isolation (`M11-2`).
+    """Compute 3-Pool Hourly FOCUS 1.2 Chargeback with `prod|eval|optimize` isolation.
 
     * Pool 1 (Active PT): Interactive `prod` share of committed hourly PT capacity.
     * Pool 2 (Water-Fill / Idle PT): `eval` and `optimize` valley reclamation plus central idle tax.

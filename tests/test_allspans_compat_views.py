@@ -1,4 +1,4 @@
-"""M1 compatibility-view contract tests.
+"""Compatibility-view contract tests.
 
 Asserts the Step-5 and Step-8 BigQuery SQL contract for native Telemetry API +
 Observability Analytics linked datasets (`obs_traces._AllSpans` and
@@ -8,7 +8,7 @@ Observability Analytics linked datasets (`obs_traces._AllSpans` and
    `sql/ddl.sql` as `CREATE OR REPLACE VIEW` over the linked datasets rather than
    custom-ingested physical tables.
 2. `agent_eval.otel_spans` projects all 25 mapped columns required by Step-1/Step-2
-   views plus M1 outcome attribution (`span_name` <- `name`, `outcome_id` <-
+   views plus outcome attribution (`span_name` <- `name`, `outcome_id` <-
    `outcome.id` baggage, `rule0_pass`, `finops_traffic_type`, `thinking_tokens`, `gcp_apphub_*`).
 3. Outcome and attribution views (`v_outcomes` reading `span_name = 'outcome.closed'`,
    `v_cost_per_verified_outcome`, `v_attribution_coverage`, and
@@ -60,7 +60,7 @@ def test_otel_spans_and_trace_payloads_are_views_over_linked_datasets() -> None:
     )
 
 
-def test_otel_spans_compat_view_projects_all_m1_columns() -> None:
+def test_otel_spans_compat_view_projects_all_columns() -> None:
     """`agent_eval.v_otel_allspans_only` & `agent_eval.otel_spans` map all required `_AllSpans` columns."""
     ddl = (SQL_DIR / "ddl.sql").read_text(encoding="utf-8")
 
@@ -100,8 +100,8 @@ def test_otel_spans_compat_view_projects_all_m1_columns() -> None:
         )
 
 
-def test_m1_outcome_and_coverage_views_defined() -> None:
-    """M1 defines `v_outcomes`, `v_cost_per_verified_outcome`, `v_attribution_coverage`, and `v_otel_spans_coverage`."""
+def test_outcome_and_coverage_views_defined() -> None:
+    """Defines `v_outcomes`, `v_cost_per_verified_outcome`, `v_attribution_coverage`, and `v_otel_spans_coverage`."""
     sql_text = _all_sql_text()
 
     for view_name in (
@@ -114,7 +114,7 @@ def test_m1_outcome_and_coverage_views_defined() -> None:
             rf"CREATE\s+OR\s+REPLACE\s+VIEW\s+`?(?:[a-zA-Z0-9_.-]+\.)?agent_eval\.{re.escape(view_name)}`?",
             sql_text,
             re.IGNORECASE,
-        ), f"Missing required M1 BigQuery view agent_eval.{view_name}"
+        ), f"Missing required BigQuery view agent_eval.{view_name}"
 
     assert "outcome.closed" in sql_text, (
         "v_outcomes must read zero-duration spans where span_name = 'outcome.closed'"

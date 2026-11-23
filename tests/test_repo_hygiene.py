@@ -1,4 +1,4 @@
-"""Repository hygiene & link integrity tests (`ADR-005` / `CRITICAL.md`).
+"""Repository hygiene & link integrity tests (`CRITICAL.md`).
 
 Verifies that `bq-eval` remains 100% portable and free of:
 1. Internal codenames, internal shortlinks, Buganizer IDs, and internal monorepo paths.

@@ -197,7 +197,7 @@ def compute_gwet_ac2(
     rater_b: Sequence[int],
     categories: Sequence[int] = (1, 2, 3, 4),
 ) -> float:
-    """Compute quadratic-weighted Gwet's AC2 inter-rater reliability (EVAL-P03)."""
+    """Compute quadratic-weighted Gwet's AC2 inter-rater reliability."""
     if len(rater_a) != len(rater_b) or not rater_a:
         raise ValueError("Rater sequences must be non-empty and equal length.")
 

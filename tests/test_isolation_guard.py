@@ -1,4 +1,4 @@
-"""Folder-level AST Import & Layer Isolation Guard (`Rule 0`, `M7-1`, `F13`, `M9-1`).
+"""Folder-level AST Import & Layer Isolation Guard (`Rule 0`).
 
 Enforces strict folder-level Ports, Adapters and Contracts across every `bq_eval/**/*.py` file:
 - `__init__.py` (`root`): imports nothing from `bq_eval.*` or third-party libraries.
@@ -213,7 +213,7 @@ def test_every_folder_has_one_rule_and_zero_violations() -> None:
 
 
 def test_unlisted_module_and_leaked_import_positive_controls(tmp_path: Path) -> None:
-    """F13 positive control: an unlisted root module `bq_eval/extra_core.py` cannot slip past the guard."""
+    """An unlisted root module `bq_eval/extra_core.py` cannot slip past the guard."""
     pkg = tmp_path / "bq_eval"
     (pkg / "engine").mkdir(parents=True)
     (pkg / "__init__.py").write_text("__version__ = '0.3.0'\n", encoding="utf-8")
@@ -369,7 +369,7 @@ def test_importing_contract_and_engine_loads_no_showcase_or_cli() -> None:
 
 
 def test_all_production_modules_and_seed_files_respect_loc_ceilings() -> None:
-    """All `bq_eval/**/*.py` stay <= 800 LOC and split `seeds_*.py` stay < 500 LOC (`M7-1`)."""
+    """All `bq_eval/**/*.py` stay <= 800 LOC and split `seeds_*.py` stay < 500 LOC."""
     oversized: list[str] = []
     for py_path in _all_package_modules():
         loc = sum(

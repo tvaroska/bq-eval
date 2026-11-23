@@ -12,7 +12,7 @@ CREATE TABLE IF NOT EXISTS `agent_eval.eval_results` (
   eval_id STRING NOT NULL OPTIONS (description = 'Unique evaluation record ID.'),
   eval_run_id STRING OPTIONS (description = 'Logical run identifier grouping traces evaluated in one batch or experiment.'),
   trace_id STRING NOT NULL OPTIONS (description = 'Evaluated W3C trace identifier.'),
-  outcome_id STRING OPTIONS (description = 'Business outcome identifier (EVAL-P11 outcome.id).'),
+  outcome_id STRING OPTIONS (description = 'Business outcome identifier (outcome.id).'),
   apphub_application_id STRING NOT NULL OPTIONS (description = 'Resolved application identifier.'),
   rubric_id STRING NOT NULL OPTIONS (description = 'Rubric identifier from agent_eval.rubrics.'),
   judge_model STRING NOT NULL OPTIONS (description = 'Autorater model identifier (gemini-3.8-flash or gemini-4-argon).'),
@@ -26,7 +26,7 @@ CREATE TABLE IF NOT EXISTS `agent_eval.eval_results` (
   judge_thinking_tokens INT64 NOT NULL OPTIONS (description = 'Reasoning tokens consumed by the judge call.'),
   policy_sha256 STRING OPTIONS (description = 'SHA-256 hash of active policy text for zero-day amendment drift tracking.'),
   amended_clause_ids STRING OPTIONS (description = 'Comma-separated clause IDs modified under the active policy revision.'),
-  target_clause_id STRING OPTIONS (description = 'Optional clause identifier evaluated by this trace/rubric pair for clause-scoped EVAL-P09 NFR gating.'),
+  target_clause_id STRING OPTIONS (description = 'Optional clause identifier evaluated by this trace/rubric pair for clause-scoped NFR gating.'),
   evaluated_at TIMESTAMP NOT NULL OPTIONS (description = 'UTC judge execution timestamp.')
 )
 PARTITION BY DATE(evaluated_at)
@@ -166,7 +166,7 @@ WHERE base_start.run_started_at < cand_start.run_started_at
   );
 
 -- -----------------------------------------------------------------------------
--- 5. View 3C: Clause-Scoped EVAL-P09 Policy NFR == 0.0% Gate (`v_step3_policy_nfr_gate`)
+-- 5. View 3C: Clause-Scoped Policy NFR == 0.0% Gate (`v_step3_policy_nfr_gate`)
 --    * Enforces strict NFR == 0.0% across unamended policy clauses while isolating
 --      flips on explicitly amended clauses under a new `policy_sha256`.
 -- -----------------------------------------------------------------------------

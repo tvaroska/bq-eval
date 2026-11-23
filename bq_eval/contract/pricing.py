@@ -1,4 +1,4 @@
-"""Single canonical 1P & 3P model pricing SKU catalog and version-suffix normalizer (`F12`, `M11-1`)."""
+"""Single canonical 1P & 3P model pricing SKU catalog and version-suffix normalizer."""
 
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ FLEX_PAYGO_MULTIPLIER: float = 0.5
 
 
 class ModelPricingSKU(BaseModel):
-    """Effective-dated 1P/3P model pricing, PayGo multipliers, and GSU burndown weights (`M11-1`)."""
+    """Effective-dated 1P/3P model pricing, PayGo multipliers, and GSU burndown weights."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 

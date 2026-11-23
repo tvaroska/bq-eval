@@ -1,4 +1,4 @@
-"""In-memory `RingBufferSpanExporter` and W3C trace context parity with `agent-evals` (`M11-4`)."""
+"""In-memory `RingBufferSpanExporter` and W3C trace context parity with `agent-evals`."""
 
 from __future__ import annotations
 

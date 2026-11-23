@@ -1,10 +1,10 @@
 -- =============================================================================
--- BQ Eval & FinOps (bq-eval) — BigQuery Omni Cloud-Agnostic Zero-Egress Spokes (M11-3)
+-- BQ Eval & FinOps (bq-eval) — BigQuery Omni Cloud-Agnostic Zero-Egress Spokes
 --   * Zero raw prompt/context/completion egress: Hive-partitioned AWS S3 and Azure
 --     ADLS BigLake tables project strictly metadata, token counts, Rule 0 status,
 --     and pushed-down FARM_FINGERPRINT sampling indicators in-region.
 --   * Normalizes `principal://` and `spiffe://` workload identities while preserving
---     strict ADR-003 `'unregistered_app'` fallback when App Hub metadata is absent.
+--     strict `'unregistered_app'` fallback when App Hub metadata is absent.
 --   * Reconciles remote spoke rollups (`agent_eval.remote_trace_slices`) with local
 --     GCP enterprise outcomes into unified multi-cloud CPVO.
 -- =============================================================================
