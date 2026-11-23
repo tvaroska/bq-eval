@@ -7,7 +7,7 @@ Raw token counts (`input_tokens + output_tokens`) fail to reflect accelerator co
 - **Autoregressive Decoding & Reasoning (`4.0x` / `7.5x`):** Output tokens and internal `<thought>` (`thinking_tokens`) are memory-bandwidth bound during decoding and billed at the output multiplier.
 - **`>200K` Context Cliff:** Spans whose total prompt context (`input_tokens`, inclusive of `cached_input_tokens`) exceeds `200,000` tokens trigger higher attention memory footprint and long-context pricing tiers.
 
-Both [`sql/core/views.sql`](../sql/core/views.sql), [`bq_eval/core/contract/otel.py`](../bq_eval/core/contract/otel.py) (`compute_weighted_burndown_tokens()`), and [`bq_eval/core/engine/cost.py`](../bq_eval/core/engine/cost.py) (`compute_span_cost_usd()`) compute weighted burndown and cliff-aware USD cost at the **individual span level** before aggregating to the trace:
+[`sql/core/views.sql`](../sql/core/views.sql), [`bq_eval/core/contract/otel.py`](../bq_eval/core/contract/otel.py) (`compute_weighted_burndown_tokens()`), and [`bq_eval/core/engine/cost.py`](../bq_eval/core/engine/cost.py) (`compute_span_cost_usd()`) compute weighted burndown and cliff-aware USD cost at the **individual span level** before aggregating to the trace:
 
 $$
 W_{\text{span}} = \begin{cases}
@@ -20,9 +20,9 @@ where $T_{\text{uncached}} = \max(0, T_{\text{in}} - T_{\text{cached}})$.
 
 ---
 
-## 2. 4-Bucket USD FinOps Attribution (`EVAL-P08`)
+## 2. 6-Bucket USD FinOps Attribution (`EVAL-P08`)
 
-Every OTel span is tagged with `finops.traffic_type` (`FinOpsTrafficType`) and joined against `agent_eval.model_pricing_catalog` so platform teams separate production spend from evaluation and escalation overhead:
+Every OTel span is tagged with `finops.traffic_type` (`FinOpsTrafficType`) and joined against `agent_eval.model_pricing_catalog` so platform teams separate production spend from evaluation, optimization, and untagged overhead:
 
 | Traffic Bucket (`finops.traffic_type`) | Source Spans | Optimization Lever |
 | :--- | :--- | :--- |
@@ -30,6 +30,8 @@ Every OTel span is tagged with `finops.traffic_type` (`FinOpsTrafficType`) and j
 | **`conflict_escalation`** | High-reasoning fallback turns (`gemini-4-argon`) triggered when deterministic `Rule 0` or tool verification fails | Improve tool schemas and `Rule 0` pre-checks to reduce escalation rate. |
 | **`agent_gym_eval`** | Synthetic pre-production regression suites and stress tests | Schedule batch runs into off-peak Provisioned Throughput (PT) valleys. |
 | **`autorater_judge`** | Tier 2 `AI.GENERATE_TABLE` LLM-as-a-Judge scoring (`gemini-3.8-flash` workhorse / `gemini-4-argon` calibration) | Stratified 3-Tier funnel (`5%`–`10%` canary + `100%` error/SLA-tail) saves `90–95%` vs. 100% LLM judging. |
+| **`optimize`** | Automated prompt/rubric optimization and offline tuning sweeps | Schedule into off-peak idle PT capacity valleys alongside batch evaluation workloads. |
+| **`unclassified`** | Untagged spans falling outside declared traffic buckets | Enforce `finops.traffic_type` tagging so unattributed workloads surface separately. |
 
 ---
 
@@ -37,13 +39,13 @@ Every OTel span is tagged with `finops.traffic_type` (`FinOpsTrafficType`) and j
 
 Traditional dashboards report **Cost per Trace**, which rewards cheap models even when they hallucinate or violate schemas. `bq-eval` establishes **Cost per Verified Outcome (`CPVO`)** as the primary North Star metric across two complementary BigQuery views:
 
-1. **Trace-Level Rogan-Gladen Calibrated CPVO (`v_agent_eval_and_finops_summary`, `EVAL-P04`):**
+1. **Trace-Level Rogan-Gladen Calibrated CPVO (`v_agent_eval_and_finops_summary` in [`sql/core/summary_views.sql`](../sql/core/summary_views.sql), `EVAL-P04`):**
 
 $$
-\text{CPVO}_{\text{calibrated}} = \frac{\text{Total Spend USD (4 Buckets)}}{\text{Production Traces} \times \hat{P}(\text{Rule 0 Pass}) \times \hat{\theta}_{\text{RG}}(\text{Semantic Pass} \mid \text{Rule 0 Pass})}
+\text{CPVO}_{\text{calibrated}} = \frac{\text{Total Spend USD (6 Buckets + BQ Query Cost)}}{\text{Production Traces} \times \hat{P}(\text{Rule 0 Pass}) \times \hat{\theta}_{\text{RG}}(\text{Semantic Pass} \mid \text{Rule 0 Pass})}
 $$
 
-2. **Multi-Agent Outcome-Level CPVO (`v_cost_per_verified_outcome` & `v_enterprise_cost_per_verified_outcome`, `EVAL-P11`):** Groups spans across traces, agents, and human pauses by `outcome.id`, proportionally allocating `1.0x` outcome-level compute/storage infra (`v_infra_cost_estimate`) and table-only Step-2 judge spend across multi-agent slices without fanout duplication, while keeping failed/abandoned/escalated outcomes in the numerator (no survivor bias).
+2. **Multi-Agent Outcome-Level CPVO (`v_cost_per_verified_outcome` in [`sql/core/step1_trace_views.sql`](../sql/core/step1_trace_views.sql) & `v_enterprise_cost_per_verified_outcome` in [`sql/core/views.sql`](../sql/core/views.sql), `EVAL-P11`):** Groups spans across traces, agents, and human pauses by `outcome.id`, proportionally allocating `1.0x` outcome-level compute/storage infra (`v_infra_cost_estimate`) and table-only Step-2 judge spend across multi-agent slices without fanout duplication, while keeping failed/abandoned/escalated outcomes in the numerator (no survivor bias).
 
 Alongside `CPVO`, `compute_eval_finops_roi()` quantifies the **Eval FinOps Savings** of the 3-Tier funnel:
 - **Baseline (`100%` LLM Judge):** Every production trace is evaluated by an LLM judge.
