@@ -10,7 +10,7 @@
 
 Before editing this repository, read:
 1. [`CRITICAL.md`](CRITICAL.md) — Non-negotiable engineering, calibration, FinOps, and hygiene invariants.
-2. [`DECISIONS.md`](DECISIONS.md) — Architectural Decision Records (`ADR-001` through `ADR-009`).
+2. [`DECISIONS.md`](DECISIONS.md) — Architectural Decision Records (`ADR-001` through `ADR-011`).
 3. [`docs/roadmap.md`](docs/roadmap.md) — Showcase milestones and roadmap.
 
 ---
@@ -19,6 +19,8 @@ Before editing this repository, read:
 
 | File / Module | Responsibility |
 | :--- | :--- |
+| [`spec/`](spec/layers.md) | **The what**, status-free: the Bronze, Silver and Gold layers ([`layers.md`](spec/layers.md)), the Silver objects and their rules ([`silver.md`](spec/silver.md)), the three telemetry shapes Silver accepts and the setup per framework ([`shapes.md`](spec/shapes.md)), target workload use cases ([`use-cases.md`](spec/use-cases.md) and [`use-cases/`](spec/use-cases/corporate-self-service.md)), and what is still undecided ([`open-questions.md`](spec/open-questions.md)). |
+| [`design/`](design/bq-eval.md) | **The how**, status-free: root note ([`bq-eval.md`](design/bq-eval.md)), layers and dependency rule ([`layers.md`](design/layers.md)), how Silver is produced ([`silver.md`](design/silver.md)), and more than one cloud ([`clouds.md`](design/clouds.md)). Status lives only in [`docs/roadmap.md`](docs/roadmap.md). |
 | [`README.md`](README.md) | Dual-path pitch, progressive `Step 1 -> Step 2 -> Step 2.5 -> Step 3` onboarding guide, measured live receipts, and runnable `bq-eval demo` quickstart. |
 | [`.stitch/DESIGN.md`](.stitch/DESIGN.md) | Tier-2 GM3 Light visual contract (`--surface` tokens, `tabular-nums`, `prefers-reduced-motion`, 4-tab workbench layout, and `Do Not Generate` guards). |
 | [`docs/bqaa-and-dual-path-architecture.md`](docs/bqaa-and-dual-path-architecture.md) | **Dual-Path Capture -> Single Engine Reference**: **Light Capture (`BQAA` `agent_events`)** vs. **Full Capture (`OTel` `_AllSpans`)**, App Hub linkage, `Agent Runtime` / `Cloud Run` / `Non-GCP` matrix, and `AI.EVALUATE_AGENT` integration. |
@@ -49,6 +51,13 @@ Before editing this repository, read:
 | [`bq_eval/demo/`](bq_eval/demo/__init__.py) | Corpus replay and workbench: [`bundles.py`](bq_eval/demo/bundles.py), [`pipeline.py`](bq_eval/demo/pipeline.py), [`loadgen.py`](bq_eval/demo/loadgen.py), [`golden_seeds.py`](bq_eval/demo/golden_seeds.py), and the HTML renderer in [`render/`](bq_eval/demo/render/__init__.py). Built on `core` and `finops`. |
 | [`bq_eval/cli/`](bq_eval/cli/__init__.py) | Driving CLI ([`app.py`](bq_eval/cli/app.py), [`bootstrap_cmd.py`](bq_eval/cli/bootstrap_cmd.py), [`capacity_cmd.py`](bq_eval/cli/capacity_cmd.py): `--version`, `demo`, `serve`, `loadgen`, `judge-sql`, `bqaa`, `bootstrap --mode light\|full\|hybrid`, `capacity-export`) and loopback HTTP server ([`server.py`](bq_eval/cli/server.py)). |
 | [`tests/`](tests/conftest.py) | `184` tests across [`conftest.py`](tests/conftest.py), SQL AST/SQLite parity ([`sql_helpers.py`](tests/sql_helpers.py), [`sqlite_bq_transpiler.py`](tests/sqlite_bq_transpiler.py), `test_sql_parse_and_dag.py`, `test_sql_pricing.py`, `test_sql_enterprise_views.py`, `test_sql_quota_and_counterparty_views.py`, `test_sql_boundary_guards.py`, `test_sql_outcome_fanout.py`, `test_sql_harness_and_views.py`), critical paths (`test_critical_paths.py`, `test_critical_paths_finops_and_stratppi.py`), edge-case guards (`test_edge_case_guards.py`), end-to-end pins, workbench/wire contracts (`test_workbench_and_contracts.py`), skill & dry-run contract, security hardening, SQLite parity, ports & SQL quota views (`test_quota_and_ports.py`, `test_quota_guard.py`), dynamic FinOps, bootstrap/wheel/Terraform/query-cost (`test_bootstrap_and_infra.py`, `test_m16_m17_preflight.py`), 3P/3-pool/Omni/session/governance SQL views (`test_enterprise_extensions.py`, `test_enterprise_governance_and_sessions.py`), doc contract, folder AST isolation (`test_isolation_guard.py`), and `800`-line source + test hygiene (`standards_debt.json = 0`). |
+
+### Recording decisions
+
+- A design decision confirmed in conversation is written in the same turn: the requirement in `spec/`, the way it is met in `design/`, and an entry in `DECISIONS.md`.
+- What is still undecided goes to `spec/open-questions.md`, with the current leaning.
+- `docs/roadmap.md` changes only with explicit approval.
+- Leave the changes uncommitted unless asked, and run the gate.
 
 ---
 
