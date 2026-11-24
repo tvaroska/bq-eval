@@ -307,7 +307,7 @@ def test_bq_dry_run_sqlglot_splitter_and_bqaa_chronological_app_id() -> None:
     assert "CREATE OR REPLACE VIEW" in parts[1]
 
     bqaa_sql = (SQL_DIR / "core" / "bqaa_adapter_views.sql").read_text(encoding="utf-8")
-    assert "IGNORE NULLS ORDER BY timestamp ASC, event_id ASC LIMIT 1" in bqaa_sql
+    assert "IGNORE NULLS ORDER BY e.timestamp ASC, e.event_id ASC LIMIT 1" in bqaa_sql
     assert (
         "REGEXP_CONTAINS(LOWER(COALESCE(error_message, '')), r'timeout|timed\\s*out|503|504')"
         in bqaa_sql

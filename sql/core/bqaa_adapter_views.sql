@@ -27,16 +27,16 @@ WITH deduped_events AS (
 )
 SELECT
   COALESCE(
-    JSON_VALUE(attributes, '$.otel.trace_id'),
-    trace_id,
-    invocation_id
+    JSON_VALUE(e.attributes, '$.otel.trace_id'),
+    e.trace_id,
+    e.invocation_id
   ) AS trace_id,
   COALESCE(
-    JSON_VALUE(attributes, '$.otel.span_id'),
-    span_id,
-    event_id
+    JSON_VALUE(e.attributes, '$.otel.span_id'),
+    e.span_id,
+    e.event_id
   ) AS span_id,
-  parent_span_id,
+  e.parent_span_id,
   CASE
     WHEN event_type = 'OUTCOME_CLOSED'
       OR JSON_VALUE(attributes, '$.custom_metadata."outcome.closed"') = 'true'
@@ -180,34 +180,34 @@ SELECT
     0
   ) AS cache_write_1h_tokens,
   COALESCE(
-    JSON_VALUE(attributes, '$.custom_metadata."interaction.session_id"'),
-    session_id
+    JSON_VALUE(e.attributes, '$.custom_metadata."interaction.session_id"'),
+    e.session_id
   ) AS session_id,
   SAFE_CAST(
     COALESCE(
-      JSON_VALUE(attributes, '$.custom_metadata."interaction.turn_index"'),
-      JSON_VALUE(attributes, '$.turn_index')
+      JSON_VALUE(e.attributes, '$.custom_metadata."interaction.turn_index"'),
+      JSON_VALUE(e.attributes, '$.turn_index')
     ) AS INT64
   ) AS turn_index,
   JSON_SET(
-    COALESCE(attributes, JSON '{}'),
-    '$."business_unit"', COALESCE(JSON_VALUE(attributes, '$."business_unit"'), JSON_VALUE(attributes, '$.custom_metadata."business_unit"')),
-    '$."cost_center"', COALESCE(JSON_VALUE(attributes, '$."cost_center"'), JSON_VALUE(attributes, '$.custom_metadata."cost_center"')),
-    '$."outcome.status"', COALESCE(JSON_VALUE(attributes, '$."outcome.status"'), JSON_VALUE(attributes, '$.custom_metadata."outcome.status"')),
-    '$."outcome.verified"', COALESCE(JSON_VALUE(attributes, '$."outcome.verified"'), JSON_VALUE(attributes, '$.custom_metadata."outcome.verified"')),
-    '$."outcome.subject"', COALESCE(JSON_VALUE(attributes, '$."outcome.subject"'), JSON_VALUE(attributes, '$.custom_metadata."outcome.subject"')),
-    '$."outcome.parent_id"', COALESCE(JSON_VALUE(attributes, '$."outcome.parent_id"'), JSON_VALUE(attributes, '$.custom_metadata."outcome.parent_id"')),
-    '$."hitl.review"', COALESCE(JSON_VALUE(attributes, '$."hitl.review"'), JSON_VALUE(attributes, '$.custom_metadata."hitl.review"')),
-    '$."apphub.external"', COALESCE(JSON_VALUE(attributes, '$."apphub.external"'), JSON_VALUE(attributes, '$.custom_metadata."apphub.external"'))
+    COALESCE(e.attributes, JSON '{}'),
+    '$."business_unit"', COALESCE(JSON_VALUE(e.attributes, '$."business_unit"'), JSON_VALUE(e.attributes, '$.custom_metadata."business_unit"')),
+    '$."cost_center"', COALESCE(JSON_VALUE(e.attributes, '$."cost_center"'), JSON_VALUE(e.attributes, '$.custom_metadata."cost_center"')),
+    '$."outcome.status"', COALESCE(JSON_VALUE(e.attributes, '$."outcome.status"'), JSON_VALUE(e.attributes, '$.custom_metadata."outcome.status"')),
+    '$."outcome.verified"', COALESCE(JSON_VALUE(e.attributes, '$."outcome.verified"'), JSON_VALUE(e.attributes, '$.custom_metadata."outcome.verified"')),
+    '$."outcome.subject"', COALESCE(JSON_VALUE(e.attributes, '$."outcome.subject"'), JSON_VALUE(e.attributes, '$.custom_metadata."outcome.subject"')),
+    '$."outcome.parent_id"', COALESCE(JSON_VALUE(e.attributes, '$."outcome.parent_id"'), JSON_VALUE(e.attributes, '$.custom_metadata."outcome.parent_id"')),
+    '$."hitl.review"', COALESCE(JSON_VALUE(e.attributes, '$."hitl.review"'), JSON_VALUE(e.attributes, '$.custom_metadata."hitl.review"')),
+    '$."apphub.external"', COALESCE(JSON_VALUE(e.attributes, '$."apphub.external"'), JSON_VALUE(e.attributes, '$.custom_metadata."apphub.external"'))
   ) AS attributes
-FROM deduped_events
-WHERE event_type IN (
+FROM deduped_events AS e
+WHERE e.event_type IN (
   'LLM_RESPONSE', 'LLM_ERROR',
   'TOOL_COMPLETED', 'TOOL_ERROR',
   'AGENT_COMPLETED', 'AGENT_ERROR',
   'OUTCOME_CLOSED'
 )
-OR JSON_VALUE(attributes, '$.custom_metadata."outcome.closed"') = 'true';
+OR JSON_VALUE(e.attributes, '$.custom_metadata."outcome.closed"') = 'true';
 
 -- -----------------------------------------------------------------------------
 -- 2. Zero-Copy Trace Payloads Adapter (`agent_events` -> `v_bqaa_trace_payloads`)
@@ -221,57 +221,57 @@ WITH deduped_events AS (
 )
 SELECT
   COALESCE(
-    JSON_VALUE(attributes, '$.otel.trace_id'),
-    trace_id,
-    invocation_id
+    JSON_VALUE(e.attributes, '$.otel.trace_id'),
+    e.trace_id,
+    e.invocation_id
   ) AS trace_id,
   COALESCE(
     ARRAY_AGG(
       COALESCE(
-        JSON_VALUE(attributes, '$.custom_metadata."gcp.apphub.application.id"'),
-        JSON_VALUE(attributes, '$.custom_metadata."apphub.application.id"'),
-        JSON_VALUE(attributes, '$.custom_metadata.apphub_application_id')
+        JSON_VALUE(e.attributes, '$.custom_metadata."gcp.apphub.application.id"'),
+        JSON_VALUE(e.attributes, '$.custom_metadata."apphub.application.id"'),
+        JSON_VALUE(e.attributes, '$.custom_metadata.apphub_application_id')
       )
-      IGNORE NULLS ORDER BY timestamp ASC, event_id ASC LIMIT 1
+      IGNORE NULLS ORDER BY e.timestamp ASC, e.event_id ASC LIMIT 1
     )[SAFE_OFFSET(0)],
     'unregistered_app'
   ) AS apphub_application_id,
-  MAX(timestamp) AS ingested_at,
+  MAX(e.timestamp) AS ingested_at,
   COALESCE(
     STRING_AGG(
       IF(
-        event_type = 'USER_MESSAGE_RECEIVED',
-        COALESCE(JSON_VALUE(content, '$.text'), TO_JSON_STRING(content)),
+        e.event_type = 'USER_MESSAGE_RECEIVED',
+        COALESCE(JSON_VALUE(e.content, '$.text'), TO_JSON_STRING(e.content)),
         NULL
       ),
-      '\n' ORDER BY timestamp
+      '\n' ORDER BY e.timestamp
     ),
     ''
   ) AS user_prompt,
   COALESCE(
     STRING_AGG(
       IF(
-        event_type = 'TOOL_COMPLETED',
-        COALESCE(JSON_VALUE(content, '$.response'), TO_JSON_STRING(content)),
+        e.event_type = 'TOOL_COMPLETED',
+        COALESCE(JSON_VALUE(e.content, '$.response'), TO_JSON_STRING(e.content)),
         NULL
       ),
-      '\n' ORDER BY timestamp
+      '\n' ORDER BY e.timestamp
     ),
     ''
   ) AS retrieved_context,
   COALESCE(
     ARRAY_AGG(
       IF(
-        event_type = 'AGENT_RESPONSE',
-        COALESCE(JSON_VALUE(content, '$.text'), TO_JSON_STRING(content)),
+        e.event_type = 'AGENT_RESPONSE',
+        COALESCE(JSON_VALUE(e.content, '$.text'), TO_JSON_STRING(e.content)),
         NULL
       )
-      IGNORE NULLS ORDER BY timestamp DESC LIMIT 1
+      IGNORE NULLS ORDER BY e.timestamp DESC LIMIT 1
     )[SAFE_OFFSET(0)],
     ''
   ) AS final_response
-FROM deduped_events
-GROUP BY trace_id;
+FROM deduped_events AS e
+GROUP BY 1;
 
 -- -----------------------------------------------------------------------------
 -- 3. Step-1 Pre-Filtered Turn View for Engine B (`AI.EVALUATE_AGENT`)

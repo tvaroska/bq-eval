@@ -50,6 +50,11 @@ run "standalone_cold_project_defaults" {
     condition     = google_bigquery_data_transfer_config.daily_quota_guarded_judge[0].disabled == true && output.scheduled_judge_disabled == true
     error_message = "Scheduled judge query must pause automatically under power_policy = hibernate."
   }
+
+  assert {
+    condition     = length(google_logging_linked_dataset.obs_logs) == 1
+    error_message = "Standalone mode must provision the obs_logs Cloud Logging linked dataset."
+  }
 }
 
 run "standalone_active_enables_scheduled_judge" {

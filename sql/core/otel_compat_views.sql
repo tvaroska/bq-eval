@@ -217,7 +217,7 @@ LEFT JOIN `agent_eval.completions` AS c
     JSON_VALUE(l.json_payload, '$."upload_uri"')
   )
 WHERE COALESCE(l.trace, JSON_VALUE(l.json_payload, '$."trace_id"')) IS NOT NULL
-GROUP BY trace_id;
+GROUP BY 1;
 
 CREATE OR REPLACE VIEW `agent_eval.trace_payloads` AS
 SELECT * FROM `agent_eval.v_otel_logs_payloads_only`;

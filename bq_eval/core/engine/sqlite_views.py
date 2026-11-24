@@ -216,19 +216,31 @@ LEFT JOIN outcome_step1 AS os1 ON l.outcome_id = os1.outcome_id;
 
 CREATE VIEW v_infra_cost_estimate AS
 SELECT
-    outcome_id,
+    w.outcome_id,
     SUM(
-        (latency_ms / 1000.0) * (service_vcpu * 0.00002400 + service_gib * 0.00000250)
+        (w.latency_ms / 1000.0) * (w.service_vcpu * 0.00002400 + w.service_gib * 0.00000250)
     ) AS estimated_compute_usd,
-    COALESCE(MAX(outcome_storage_usd), 0.000020) AS estimated_storage_usd,
+    COALESCE(MAX(w.outcome_storage_usd), 0.000020) AS estimated_storage_usd,
     SUM(
-        (latency_ms / 1000.0) * (service_vcpu * 0.00002400 + service_gib * 0.00000250)
-    ) + COALESCE(MAX(outcome_storage_usd), 0.000020) AS estimated_infra_cost_usd
-FROM otel_spans
-WHERE outcome_id IS NOT NULL
-    AND otel_span_kind IN ('2', 'SPAN_KIND_SERVER', 'SPAN_KIND_INTERNAL')
-    AND is_external_counterparty = 0
-GROUP BY outcome_id;
+        (w.latency_ms / 1000.0) * (w.service_vcpu * 0.00002400 + w.service_gib * 0.00000250)
+    ) + COALESCE(MAX(w.outcome_storage_usd), 0.000020) AS estimated_infra_cost_usd
+FROM otel_spans AS w
+WHERE w.outcome_id IS NOT NULL
+    AND w.otel_span_kind IN ('2', 'SPAN_KIND_SERVER', 'SPAN_KIND_INTERNAL')
+    AND (
+        w.otel_span_kind IN ('2', 'SPAN_KIND_SERVER')
+        OR w.parent_span_id IS NULL
+        OR NOT EXISTS (
+            SELECT 1
+            FROM otel_spans AS p
+            WHERE p.trace_id = w.trace_id
+                AND p.span_id = w.parent_span_id
+                AND p.service_name = w.service_name
+                AND p.apphub_application_id = w.apphub_application_id
+        )
+    )
+    AND w.is_external_counterparty = 0
+GROUP BY w.outcome_id;
 
 CREATE VIEW v_cost_per_verified_outcome AS
 WITH step2_by_outcome AS (

@@ -1,0 +1,157 @@
+{
+  "apphub_fleet_export": {
+    "apphub_attribution_coverage": [
+      {
+        "apphub_application_id": "benefits-rfp-procurement",
+        "attributed_spend_usd": 7.231085,
+        "attributed_traces": 41,
+        "attribution_coverage_pct": 100.0,
+        "total_traces": 1043,
+        "unattributed_spend_usd": 0.0
+      },
+      {
+        "apphub_application_id": "external-counterparty-agents",
+        "attributed_spend_usd": 0.0,
+        "attributed_traces": 0,
+        "attribution_coverage_pct": 0.0,
+        "total_traces": 2526,
+        "unattributed_spend_usd": 0.0
+      },
+      {
+        "apphub_application_id": "kyc-address-verification",
+        "attributed_spend_usd": 0.625699,
+        "attributed_traces": 356,
+        "attribution_coverage_pct": 100.0,
+        "total_traces": 2324,
+        "unattributed_spend_usd": 0.0
+      },
+      {
+        "apphub_application_id": "meridian-loan-consolidation",
+        "attributed_spend_usd": 0.663861,
+        "attributed_traces": 91,
+        "attribution_coverage_pct": 100.0,
+        "total_traces": 1128,
+        "unattributed_spend_usd": 0.0
+      },
+      {
+        "apphub_application_id": "unregistered_app",
+        "attributed_spend_usd": 0.0,
+        "attributed_traces": 0,
+        "attribution_coverage_pct": 0.0,
+        "total_traces": 2048,
+        "unattributed_spend_usd": 0.00018
+      }
+    ],
+    "exported_trace_count": 100,
+    "traces_sha256": "7fccf5ada2ef6d9b9369310686a404b9cb7cc5255f83fc3aeb4eaa28fa92007d"
+  },
+  "captured_date_utc": "2026-11-24",
+  "infrastructure_bootstrap": {
+    "bootstrap_apply_passed": true,
+    "bootstrap_dry_run_passed": true,
+    "power_policy": "hibernate",
+    "terraform_applied": true
+  },
+  "live_otlp_ingestion": {
+    "payload_count": 60,
+    "span_count": 120
+  },
+  "s15_views_and_job_costs": {
+    "bq_query_cost_attribution": [
+      {
+        "apphub_application_id": "cliff-benchmark-app",
+        "bq_query_cost_usd": "0.028192996978759766",
+        "query_job_count": "200",
+        "total_bytes_billed": "4959764480",
+        "total_slot_ms": "1008903"
+      },
+      {
+        "apphub_application_id": "unregistered_app",
+        "bq_query_cost_usd": "1.7881393432617188E-4",
+        "query_job_count": "138",
+        "total_bytes_billed": "31457280",
+        "total_slot_ms": "15295"
+      }
+    ],
+    "cliff_cpvo_by_arm": [
+      {
+        "apphub_application_id": "cliff-benchmark-app",
+        "cost_per_verified_outcome_ai_usd": "0.07252499999999996",
+        "cost_per_verified_outcome_usd": "0.07299374637806079",
+        "estimated_infra_cost_usd": "0.014062391341824",
+        "measured_model_cost_usd": "2.175749999999999",
+        "source_mode": "SINGLE_MODEL_LONG",
+        "total_outcomes": "30",
+        "verified_outcomes": "30"
+      },
+      {
+        "apphub_application_id": "cliff-benchmark-app",
+        "cost_per_verified_outcome_ai_usd": "3.615799999999999E-4",
+        "cost_per_verified_outcome_usd": "4.8120848890879995E-4",
+        "estimated_infra_cost_usd": "0.0035888546672639995",
+        "measured_model_cost_usd": "0.010847399999999997",
+        "source_mode": "SINGLE_MODEL_SHORT",
+        "total_outcomes": "30",
+        "verified_outcomes": "30"
+      }
+    ],
+    "deployed_view_count": 37,
+    "queried_view_row_counts": {
+      "v_agent_eval_and_finops_summary": 2,
+      "v_bq_query_cost_attribution": 2,
+      "v_cost_per_verified_outcome": 2,
+      "v_focus_three_pool_hourly_chargeback": 9,
+      "v_infra_cost_estimate": 60,
+      "v_outcomes": 60,
+      "v_step1_trace_eval": 816
+    }
+  },
+  "s5_concurrent_quota_lock": {
+    "cap_tokens": 35000,
+    "concurrent_calls": [
+      {
+        "detail": "CREATE OR REPLACE TEMP TABLE _quota_selected_candidates AS\n    WITH global_quota AS (\n      SELECT\n        tokens_remaining_today AS global_remaining_today,\n        per_app_default_token_cap\n      FROM `showcase-project.agent_eval.v_step2_daily_quota_status`\n    ),\n    recent_scored ",
+        "duration_s": 28.686,
+        "returncode": 0,
+        "tag": "call_a"
+      },
+      {
+        "detail": "CREATE OR REPLACE TEMP TABLE _quota_selected_candidates AS\n    WITH global_quota AS (\n      SELECT\n        tokens_remaining_today AS global_remaining_today,\n        per_app_default_token_cap\n      FROM `showcase-project.agent_eval.v_step2_daily_quota_status`\n    ),\n    recent_scored ",
+        "duration_s": 28.976,
+        "returncode": 0,
+        "tag": "call_b"
+      }
+    ],
+    "quota_status_snapshot": {
+      "daily_judge_token_cap": "35000",
+      "per_app_default_token_cap": "35000",
+      "tokens_burned_and_reserved_today": "23869",
+      "tokens_reserved_today": "0",
+      "tokens_used_today": "23869"
+    },
+    "reservations_by_status": [
+      {
+        "batch_count": "1",
+        "reserved_tokens": "34215",
+        "status": "COMMITTED"
+      }
+    ],
+    "scored_rows_committed": 14,
+    "tokens_burned_and_reserved_today": 23869,
+    "total_reserved_tokens": 34215,
+    "zero_overspend": true
+  },
+  "schema_version": "m16-live-proof-v1",
+  "target_environment": "showcases-standalone-bigquery",
+  "unconfounded_context_cliff": {
+    "burndown_multiplier": 200.23369655401294,
+    "cost_multiplier": 200.5780186957243,
+    "long_arm_count": 30,
+    "long_mean_burndown_tokens": 482670.0,
+    "long_mean_cost_usd": 0.07252499999999999,
+    "model_name": "gemini-3.8-flash",
+    "short_arm_count": 30,
+    "short_mean_burndown_tokens": 2410.5333333333333,
+    "short_mean_cost_usd": 0.00036158
+  }
+}

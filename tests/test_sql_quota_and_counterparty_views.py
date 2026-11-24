@@ -481,7 +481,8 @@ def _assert_quota_views_and_procedure_sql_guards() -> None:
     """Guard `FAILED_BILLED`, exact cap boundary, and transpiled procedure candidate-selection SQL."""
     quota_path = SQL_DIR / "core" / "step3_daily_quota_guard.sql"
     quota_text = quota_path.read_text(encoding="utf-8")
-    assert "IF v_batch_tokens > COALESCE(" in quota_text
+    assert "IF COALESCE(v_quota_exceeded, TRUE) THEN" in quota_text
+    assert "UNNEST(v_app_batches)" in quota_text
     assert "MERGE INTO `agent_eval.eval_daily_quota_state`" in quota_text
     assert "UPDATE `agent_eval.eval_daily_quota_state`" in quota_text
     assert "COALESCE(status, '') = ''" in quota_text
@@ -679,8 +680,8 @@ def _assert_quota_views_and_procedure_sql_guards() -> None:
             ),
         ],
     )
-    start_marker = "CREATE TEMP TABLE _quota_selected_candidates AS\n"
-    end_marker = ";\n\n  SET v_selected_count"
+    start_marker = "CREATE OR REPLACE TEMP TABLE _quota_selected_candidates AS\n"
+    end_marker = ";\n\n    SET v_selected_count"
     inner_sql = quota_text.split(start_marker, maxsplit=1)[1].split(end_marker, maxsplit=1)[0]
     inner_sql = (
         inner_sql.replace("p_rubric_id", "'groundedness_4pt_v1'")

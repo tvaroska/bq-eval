@@ -91,6 +91,18 @@ variable "create_shared_bucket_lister_role" {
   default     = true
 }
 
+variable "create_logging_link" {
+  description = "Enable _Default log analytics and create the obs_logs linked BigQuery dataset when true (set false when co-located stack already manages obs_logs)."
+  type        = bool
+  default     = true
+}
+
+variable "judge_transfer_service_account_email" {
+  description = "Optional service account email used by BigQuery Data Transfer scheduled judge runs in non-interactive environments."
+  type        = string
+  default     = ""
+}
+
 variable "shared_bucket_lister_role_name" {
   description = "Existing custom storage.objects.list role resource name when create_shared_bucket_lister_role = false."
   type        = string

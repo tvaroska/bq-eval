@@ -14,6 +14,7 @@ run "colocated_showcase_adopts_existing_resources" {
     create_eval_dataset                     = false
     create_vertex_connection                = false
     create_shared_bucket_lister_role        = false
+    create_logging_link                     = false
     shared_bucket_lister_role_name          = "projects/demo-colocated-showcase/roles/shared_bucket_lister"
     vertex_connection_service_account_email = "bqcx-123456-test@gcp-sa-bigquery-condel.iam.gserviceaccount.com"
     power_policy                            = "hibernate"

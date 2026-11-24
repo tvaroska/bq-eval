@@ -20,7 +20,9 @@ locals {
     "bigquerydatatransfer.googleapis.com",
     "aiplatform.googleapis.com",
     "storage.googleapis.com",
+    "logging.googleapis.com",
     "observability.googleapis.com",
+    "telemetry.googleapis.com",
   ])
 
   resolved_bucket_name = var.shared_bucket_name != "" ? var.shared_bucket_name : var.project_id
@@ -118,6 +120,8 @@ resource "google_bigquery_dataset" "agent_eval" {
   location                   = var.dataset_location
   delete_contents_on_destroy = !var.deletion_protection
   labels                     = local.effective_labels
+
+  depends_on = [google_project_service.apis]
 }
 
 data "google_bigquery_dataset" "agent_eval" {
@@ -137,6 +141,8 @@ resource "google_bigquery_connection" "vertex_ai" {
   description   = "Cloud Resource connection for BigLake completion tables and AI.GENERATE_TABLE judges."
 
   cloud_resource {}
+
+  depends_on = [google_project_service.apis]
 }
 
 resource "google_project_iam_member" "vertex_ai_user" {
@@ -211,6 +217,28 @@ resource "google_bigquery_table" "completions" {
   ]
 }
 
+resource "google_logging_project_bucket_config" "default_analytics" {
+  count = var.create_logging_link ? 1 : 0
+
+  project          = var.project_id
+  location         = "global"
+  bucket_id        = "_Default"
+  enable_analytics = true
+  retention_days   = 30
+
+  depends_on = [google_project_service.apis]
+}
+
+resource "google_logging_linked_dataset" "obs_logs" {
+  count = var.create_logging_link ? 1 : 0
+
+  parent      = "projects/${var.project_id}"
+  location    = "global"
+  bucket      = google_logging_project_bucket_config.default_analytics[0].bucket_id
+  link_id     = "obs_logs"
+  description = "Cloud Logging _Default analytics linked dataset (_AllLogs) for GenAI completion events."
+}
+
 resource "google_bigquery_data_transfer_config" "daily_quota_guarded_judge" {
   count = var.enable_scheduled_judge ? 1 : 0
 
@@ -221,6 +249,7 @@ resource "google_bigquery_data_transfer_config" "daily_quota_guarded_judge" {
   schedule               = var.judge_schedule
   disabled               = local.scheduled_judge_disabled
   destination_dataset_id = local.effective_eval_dataset_id
+  service_account_name   = var.judge_transfer_service_account_email != "" ? var.judge_transfer_service_account_email : null
 
   params = {
     query = "CALL `${var.project_id}.${local.effective_eval_dataset_id}.run_daily_quota_guarded_judge`('${var.judge_rubric_id}', ${var.judge_canary_sample_pct}, ${var.judge_max_output_tokens}, '${var.judge_thinking_level}', 24, '');"

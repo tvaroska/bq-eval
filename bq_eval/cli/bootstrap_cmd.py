@@ -1,4 +1,4 @@
-"""CLI handler for `bq-eval bootstrap --mode light|full|hybrid [--dry-run]`."""
+"""CLI handler for `bq-eval bootstrap --mode light|full|hybrid [--dry-run|--apply]`."""
 
 from __future__ import annotations
 
@@ -15,13 +15,14 @@ from bq_eval.deploy.engine.bootstrap import (
     should_skip_dry_run_statement,
     validate_bootstrap_offline,
 )
+from bq_eval.deploy.engine.bq_client import apply_bootstrap_statements, format_bq_job_labels
 
 
 def register_bootstrap_subparser(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     """Attach the `bootstrap` subcommand to the root `bq-eval` CLI parser."""
     boot_p = sub.add_parser(
         "bootstrap",
-        help="Render and validate cold-start BigQuery SQL for light, full, or hybrid capture modes.",
+        help="Render, validate, or apply cold-start BigQuery SQL for light, full, or hybrid modes.",
     )
     boot_p.add_argument(
         "--mode",
@@ -32,7 +33,7 @@ def register_bootstrap_subparser(sub: argparse._SubParsersAction[argparse.Argume
     boot_p.add_argument(
         "--project-id",
         default=None,
-        help="Target GCP project ID (required for --dry-run; defaults to showcase-project offline).",
+        help="Target GCP project ID (required for --dry-run or --apply; defaults to showcase-project offline).",
     )
     boot_p.add_argument(
         "--dataset-id",
@@ -84,10 +85,16 @@ def register_bootstrap_subparser(sub: argparse._SubParsersAction[argparse.Argume
         default=None,
         help="Azure Blob/ADLS container name (required with --include-omni).",
     )
-    boot_p.add_argument(
+    exec_group = boot_p.add_mutually_exclusive_group()
+    exec_group.add_argument(
         "--dry-run",
         action="store_true",
         help="Validate checkable statements against live GCP via `bq query --dry_run` (requires --project-id).",
+    )
+    exec_group.add_argument(
+        "--apply",
+        action="store_true",
+        help="Execute rendered DDL, seeds, procedures, and views on live BigQuery (requires --project-id).",
     )
     boot_p.add_argument(
         "--sql-out",
@@ -110,12 +117,20 @@ def _run_gcp_dry_run(project_id: str, stmts: list[tuple[str, str]]) -> list[str]
         raise ValueError(
             "`bq` CLI not found on PATH; omit --dry-run for credential-free offline validation."
         )
+    label_flags = format_bq_job_labels()
     errors: list[str] = []
     for label, stmt in stmts:
         if should_skip_dry_run_statement(stmt):
             continue
         proc = subprocess.run(  # noqa: S603
-            [bq_bin, "query", f"--project_id={project_id}", "--use_legacy_sql=false", "--dry_run"],
+            [
+                bq_bin,
+                "query",
+                f"--project_id={project_id}",
+                "--use_legacy_sql=false",
+                "--dry_run",
+                *label_flags,
+            ],
             input=stmt,
             text=True,
             capture_output=True,
@@ -138,6 +153,7 @@ def _format_bootstrap_markdown(report: BootstrapValidationReport) -> str:
         f"- **Statements:** `{report.statement_count}` total (`{report.checked_count}` checkable, `{report.skipped_count}` DDL/proc skipped)",
         f"- **Span Schema Columns Verified:** `{report.schema_column_count}`",
         f"- **Live GCP `--dry_run` Executed:** `{report.live_dry_run_executed}`",
+        f"- **Live GCP `--apply` Executed:** `{report.live_apply_executed}`",
     ]
     if report.unresolved_placeholders:
         lines.append(
@@ -152,9 +168,10 @@ def _format_bootstrap_markdown(report: BootstrapValidationReport) -> str:
 
 
 def run_bootstrap_command(args: argparse.Namespace) -> int:
-    """Execute `bq-eval bootstrap` across offline schema validation, SQL rendering, and GCP `--dry_run`."""
-    if args.dry_run and not args.project_id:
-        raise ValueError("--dry-run requires an explicit --project-id.")
+    """Execute `bq-eval bootstrap` across offline validation, SQL rendering, `--dry-run`, or `--apply`."""
+    if (args.dry_run or args.apply) and not args.project_id:
+        flag_name = "--apply" if args.apply else "--dry-run"
+        raise ValueError(f"{flag_name} requires an explicit --project-id.")
     effective_project = args.project_id or "showcase-project"
     mode = cast(BootstrapMode, args.mode)
     report, stmts = validate_bootstrap_offline(
@@ -173,15 +190,20 @@ def run_bootstrap_command(args: argparse.Namespace) -> int:
     )
 
     extra_errors: list[str] = list(report.errors)
-    live_executed = False
-    if args.dry_run:
-        live_executed = True
+    live_dry_run = False
+    live_apply = False
+    if report.passed and args.dry_run:
+        live_dry_run = True
         extra_errors.extend(_run_gcp_dry_run(effective_project, stmts))
+    elif report.passed and args.apply:
+        live_apply = True
+        extra_errors.extend(apply_bootstrap_statements(effective_project, stmts, mode=mode))
 
     final_report = report.model_copy(
         update={
             "errors": tuple(extra_errors),
-            "live_dry_run_executed": live_executed,
+            "live_dry_run_executed": live_dry_run,
+            "live_apply_executed": live_apply,
         }
     )
 

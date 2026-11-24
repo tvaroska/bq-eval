@@ -56,8 +56,11 @@ ALLOWED_BQ_PREVIEW_COMMANDS = (
 
 
 _PROC_INNER_SQL_RE = re.compile(
-    r"(?is)\b(CREATE\s+TEMP\s+TABLE\s+.+?;|INSERT\s+INTO\s+.+?;|UPDATE\s+`?[\w.]+`?\s+SET\s+.+?;)"
+    r"(?is)\b(CREATE\s+(?:OR\s+REPLACE\s+)?TEMP\s+TABLE\s+.+?;|"
+    r"INSERT\s+INTO\s+.+?;|"
+    r"UPDATE\s+`?[\w.]+`?\s+SET\s+.+?;)"
 )
+_EXEC_IMMEDIATE_START_RE = re.compile(r"(?is)\bEXECUTE\s+IMMEDIATE\s+CONCAT\s*\(")
 
 
 def _normalize_bq_ai_tvf_for_sqlglot(sql: str) -> str:
@@ -137,9 +140,45 @@ def _find_unescaped_multiline_single_quoted_strings(sql: str) -> list[str]:
     return violations
 
 
+def _extract_one_concat_call(sql: str, pos: int) -> tuple[int, str]:
+    """Scan balanced `CONCAT(...)` args from `pos`, joining triple-quoted SQL chunks."""
+    depth = 1
+    n = len(sql)
+    segments: list[str] = []
+    while pos < n and depth > 0:
+        if sql[pos : pos + 3] in ('"""', "'''"):
+            end_q = _skip_triple_quoted(sql, pos, sql[pos : pos + 3])
+            segments.append(sql[pos + 3 : end_q - 3])
+            pos = end_q
+        elif sql[pos] == "'":
+            pos, _ = _scan_single_quoted(sql, pos)
+        else:
+            if sql[pos] == "(":
+                depth += 1
+            elif sql[pos] == ")":
+                depth -= 1
+            pos += 1
+    semi = sql.find(";", pos)
+    end_stmt = n if semi == -1 else semi + 1
+    return end_stmt, "512".join(segments)
+
+
+def _strip_and_render_exec_immediate(raw_proc_sql: str) -> tuple[str, list[str]]:
+    """Strip `EXECUTE IMMEDIATE CONCAT(...);` blocks and return rendered inner SQL strings."""
+    rendered: list[str] = []
+    remaining = raw_proc_sql
+    while match := _EXEC_IMMEDIATE_START_RE.search(remaining):
+        end_stmt, inner_sql = _extract_one_concat_call(remaining, match.end())
+        if inner_sql.strip():
+            rendered.append(inner_sql)
+        remaining = remaining[: match.start()] + remaining[end_stmt:]
+    return remaining, rendered
+
+
 def _validate_procedure_inner_sql(raw_proc_sql: str, label: str) -> None:
     """Parse DML and temp-table SQL statements inside a BigQuery stored procedure body."""
-    inner_stmts = _PROC_INNER_SQL_RE.findall(raw_proc_sql)
+    stripped_proc, dynamic_stmts = _strip_and_render_exec_immediate(raw_proc_sql)
+    inner_stmts = [*_PROC_INNER_SQL_RE.findall(stripped_proc), *dynamic_stmts]
     assert inner_stmts, f"{label} procedure contained no parseable inner SQL statements"
     for idx, inner in enumerate(inner_stmts):
         parsed = [

@@ -26,6 +26,7 @@ class BootstrapValidationReport(BaseModel):
     unresolved_placeholders: tuple[str, ...] = ()
     errors: tuple[str, ...] = ()
     live_dry_run_executed: bool = False
+    live_apply_executed: bool = False
 
     @property
     def passed(self) -> bool:

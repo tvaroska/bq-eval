@@ -278,7 +278,7 @@ closed_agg AS (
   FROM `agent_eval.otel_spans` AS s
   WHERE s.span_name = 'outcome.closed'
     AND COALESCE(s.outcome_id, JSON_VALUE(s.attributes, '$."outcome.id"')) IS NOT NULL
-  GROUP BY outcome_id
+  GROUP BY 1
 )
 SELECT
   c.outcome_id,
@@ -300,6 +300,8 @@ LEFT JOIN outcome_step1 AS os1
 -- View 1E: Estimated Compute & Storage Infra Cost per Outcome (`v_infra_cost_estimate`)
 --   * Strictly 1 row per outcome_id so downstream multi-agent/mode joins never fan out
 --   * Server-span duration * list price * configured vCPU/GiB + optional outcome.storage_usd
+--   * Counts service request entry spans (`SPAN_KIND_SERVER` or root `SPAN_KIND_INTERNAL`)
+--     to prevent nested child-span duration double-counting inside a single request.
 -- -----------------------------------------------------------------------------
 CREATE OR REPLACE VIEW `agent_eval.v_infra_cost_estimate` AS
 WITH server_span_compute AS (
@@ -353,6 +355,18 @@ WITH server_span_compute AS (
   FROM `agent_eval.v_step1_trace_waterfall` AS w
   WHERE w.outcome_id IS NOT NULL
     AND w.otel_span_kind IN ('2', 'SPAN_KIND_SERVER', 'SPAN_KIND_INTERNAL')
+    AND (
+      w.otel_span_kind IN ('2', 'SPAN_KIND_SERVER')
+      OR w.parent_span_id IS NULL
+      OR NOT EXISTS (
+        SELECT 1
+        FROM `agent_eval.v_step1_trace_waterfall` AS p
+        WHERE p.trace_id = w.trace_id
+          AND p.span_id = w.parent_span_id
+          AND p.service_name = w.service_name
+          AND p.apphub_application_id = w.apphub_application_id
+      )
+    )
     AND LOWER(COALESCE(JSON_VALUE(w.attributes, '$."apphub.external"'), 'false')) != 'true'
   GROUP BY w.outcome_id
 )

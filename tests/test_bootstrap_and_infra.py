@@ -331,6 +331,7 @@ def test_wheel_contains_sql_and_receipt(tmp_path: Path) -> None:
             "bq_eval/_bundled/sql/finops/capacity_views.sql",
             "bq_eval/_bundled/sql/finops/omni_spoke_views.sql",
             "bq_eval/_bundled/benchmarks/results/m2_live_receipt.json",
+            "bq_eval/_bundled/benchmarks/results/m16_live_cloud_proof.json",
             "bq_eval/_bundled/benchmarks/results/SHA256SUMS",
             "bq_eval/_bundled/benchmarks/results/bq_dry_run_receipt.json",
         ):

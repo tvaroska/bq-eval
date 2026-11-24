@@ -42,8 +42,10 @@ def test_multi_key_outcome_fanout_exact_1x_infra_and_judge_cost() -> None:
         CREATE TABLE v_step1_trace_waterfall (
             trace_id TEXT,
             span_id TEXT,
+            parent_span_id TEXT,
             span_name TEXT,
             apphub_application_id TEXT,
+            service_name TEXT,
             agent_name TEXT,
             otel_span_kind TEXT,
             model_name TEXT,
@@ -87,15 +89,19 @@ def test_multi_key_outcome_fanout_exact_1x_infra_and_judge_cost() -> None:
         )
         """
     )
-    # 4 server spans for the same outcome_id spanning 3 agents, 2 source_modes, 2 raw apps, 2 skills.
-    # Each span has latency_ms = 1000ms (1s) at 2 vCPU / 2 GiB ($0.000053/s) => compute = $0.000212
+    # 4 server spans for the same outcome_id spanning 3 agents, 2 source_modes, 2 raw apps, 2 skills,
+    # plus 1 nested child SPAN_KIND_INTERNAL span (`parent_span_id = 's1'`) whose duration must NOT
+    # be double-counted on top of `s1`'s wall-clock server duration.
+    # Each server span has latency_ms = 1000ms (1s) at 2 vCPU / 2 GiB ($0.000053/s) => compute = $0.000212
     # Plus default storage $0.000020 => exact 1.0x outcome infra cost = $0.000232.
     rows = [
         (
             "t1",
             "s1",
+            None,
             "invoke_agent",
             "app-sub-a",
+            "svc-a",
             "agent-intake",
             "SPAN_KIND_SERVER",
             "gemini-3.8-flash",
@@ -115,9 +121,35 @@ def test_multi_key_outcome_fanout_exact_1x_infra_and_judge_cost() -> None:
         ),
         (
             "t1",
+            "s1-child",
+            "s1",
+            "execute_tool",
+            "app-sub-a",
+            "svc-a",
+            "agent-intake",
+            "SPAN_KIND_INTERNAL",
+            "none",
+            "production_inference",
+            "out-multi-001",
+            "parent-app",
+            "A2A_PATH_A",
+            "skill-a",
+            "1.0.0",
+            900.0,
+            0,
+            0,
+            0,
+            0,
+            0.0,
+            "{}",
+        ),
+        (
+            "t1",
             "s2",
+            None,
             "invoke_agent",
             "app-sub-b",
+            "svc-b",
             "agent-extract",
             "SPAN_KIND_SERVER",
             "gemini-3.8-flash",
@@ -138,8 +170,10 @@ def test_multi_key_outcome_fanout_exact_1x_infra_and_judge_cost() -> None:
         (
             "t2",
             "s3",
+            None,
             "invoke_agent",
             "app-sub-a",
+            "svc-a",
             "agent-adjudicate",
             "SPAN_KIND_SERVER",
             "gemini-4-argon",
@@ -160,8 +194,10 @@ def test_multi_key_outcome_fanout_exact_1x_infra_and_judge_cost() -> None:
         (
             "t2",
             "s4",
+            None,
             "invoke_agent",
             "app-sub-b",
+            "svc-b",
             "agent-adjudicate",
             "SPAN_KIND_SERVER",
             "gemini-3.8-flash",
@@ -181,7 +217,7 @@ def test_multi_key_outcome_fanout_exact_1x_infra_and_judge_cost() -> None:
         ),
     ]
     cur.executemany(
-        "INSERT INTO v_step1_trace_waterfall VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO v_step1_trace_waterfall VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         rows,
     )
 
