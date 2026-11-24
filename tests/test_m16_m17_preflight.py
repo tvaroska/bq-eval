@@ -94,20 +94,60 @@ def test_bq_job_labels_and_bootstrap_apply_cli(
     _ = tmp_path
 
 
+def _assert_blind_pack_hygiene(
+    artifact_texts: tuple[str, ...],
+    html_texts: tuple[str, ...],
+) -> None:
+    leaked_markers = (
+        "SECRET_JUDGE_REASONING_DO_NOT_LEAK",
+        "judge_ordinal_score",
+        "kyc-s2trap",
+        "kyc-clean",
+        "kyc-pobox",
+        "kyc-ocr",
+        "kyc-struct",
+    )
+    for artifact_text in artifact_texts:
+        assert "kyc-address-verification" in artifact_text
+        assert "kyc-case-redacted" in artifact_text
+        for marker in leaked_markers:
+            assert marker not in artifact_text
+
+    for html_text in html_texts:
+        assert '<link rel="icon"' in html_text
+        assert "function safeGet(k)" in html_text
+        assert "function safeSet(k, v)" in html_text
+        assert "window.name" in html_text
+        assert "const state = JSON.parse(localStorage" not in html_text
+        assert html_text.count("window.localStorage.") == 2
+
+
 def test_blind_sme_kit_export_zero_leakage_and_import_validation(tmp_path: Path) -> None:
     """`blind_sme_kit.py` exports leak-free shuffled rater sheets and validates dual-human imports."""
     traces_jsonl = tmp_path / "traces.jsonl"
+    slug_variants = (
+        "kyc-s2trap-001",
+        "kyc-clean-pdf-002-b1",
+        "kyc-pobox-003",
+        "kyc-ocr-004",
+        "kyc-struct-005-t2",
+    )
     lines: list[str] = []
     for idx in range(100):
         j_score = 4 if idx < 80 else 1
+        slug = slug_variants[idx % len(slug_variants)]
         lines.append(
             json.dumps(
                 {
                     "trace_id": f"tr-sme-{idx:03d}",
                     "apphub_application_id": "kyc-address-verification",
-                    "user_prompt": f"Verify utility bill #{idx}",
-                    "retrieved_context": f"Street: {100 + idx} Main St, issued within 30 days.",
-                    "final_response": "Approved street proof." if idx < 80 else "PO Box rejected.",
+                    "user_prompt": f"Verify utility bill #{idx} (case={slug})",
+                    "retrieved_context": (
+                        f"doc={slug}-d1 Street: {100 + idx} Main St, uri=gs://b/{slug}-d1.pdf"
+                    ),
+                    "final_response": (
+                        f"Approved {slug} proof." if idx < 80 else f"PO Box rejected ({slug})."
+                    ),
                     "judge_ordinal_score": j_score,
                     "reasoning_trace": "SECRET_JUDGE_REASONING_DO_NOT_LEAK",
                 }
@@ -147,14 +187,15 @@ def test_blind_sme_kit_export_zero_leakage_and_import_validation(tmp_path: Path)
     html_a = (pack_dir / "rater_a_blind_workbench.html").read_text(encoding="utf-8")
     html_b = (pack_dir / "rater_b_blind_workbench.html").read_text(encoding="utf-8")
 
-    for artifact_text in (
-        csv_a.read_text(encoding="utf-8"),
-        csv_b.read_text(encoding="utf-8"),
-        html_a,
-        html_b,
-    ):
-        assert "SECRET_JUDGE_REASONING_DO_NOT_LEAK" not in artifact_text
-        assert "judge_ordinal_score" not in artifact_text
+    _assert_blind_pack_hygiene(
+        (
+            csv_a.read_text(encoding="utf-8"),
+            csv_b.read_text(encoding="utf-8"),
+            html_a,
+            html_b,
+        ),
+        (html_a, html_b),
+    )
 
     rows_a = list(csv.DictReader(csv_a.open("r", encoding="utf-8", newline="")))
     rows_b = list(csv.DictReader(csv_b.open("r", encoding="utf-8", newline="")))

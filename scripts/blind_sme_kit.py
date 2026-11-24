@@ -12,6 +12,7 @@ import csv
 import hashlib
 import html
 import json
+import re
 import sys
 from collections.abc import Sequence
 from dataclasses import asdict
@@ -38,6 +39,15 @@ BLIND_CSV_COLUMNS: tuple[str, ...] = (
     "human_ordinal_score",
     "rater_notes",
 )
+_TRAP_CASE_SLUG_RE = re.compile(
+    r"\bkyc-(?:s2trap|clean|pobox|ocr|struct)[a-z0-9-]*\b",
+    re.IGNORECASE,
+)
+
+
+def _scrub_blind_text(text: str) -> str:
+    """Mask synthetic scenario/trap slugs so human raters stay blind to seeded labels."""
+    return _TRAP_CASE_SLUG_RE.sub("kyc-case-redacted", text)
 
 
 def _deterministic_order(items: Sequence[dict[str, Any]], seed_tag: str) -> list[dict[str, Any]]:
@@ -78,6 +88,7 @@ def _render_blind_html_workbench(
 <html lang="en">
 <head>
   <meta charset="utf-8" />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%231a73e8'/%3E%3Cpath d='M9 17l5 5 9-11' fill='none' stroke='white' stroke-width='3.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E" />
   <title>Blind SME Calibration Workbench — {esc_slot}</title>
   <style>
     :root {{
@@ -100,7 +111,7 @@ def _render_blind_html_workbench(
     .scores label {{ border: 1px solid var(--border); border-radius: 6px; padding: 6px 12px; cursor: pointer; font-weight: 600; }}
     input[type="text"] {{ flex: 1; min-width: 220px; padding: 7px 10px; border: 1px solid var(--border); border-radius: 6px; }}
     button {{ background: var(--primary); color: #fff; border: none; border-radius: 6px; padding: 9px 14px; font-weight: 600; cursor: pointer; }}
-    .done {{ color: var(--ok); font-weight: 700; }}
+    .done {{ color: var(--ok); font-weight: 700; font-variant-numeric: tabular-nums; }}
   </style>
 </head>
 <body>
@@ -123,10 +134,37 @@ def _render_blind_html_workbench(
   </div>
   <script>
     const CASES = {cases_json};
-    const STORAGE_KEY = "bq_eval_blind_sme_{esc_slot}_{esc_rubric}";
-    const state = JSON.parse(localStorage.getItem(STORAGE_KEY) || "{{}}");
+    const STORAGE_KEY = {json.dumps(f"bq_eval_blind_sme_{rater_slot}_{rubric_id}")};
+    const MEM_STORE = {{}};
+    function safeGet(k) {{
+      try {{
+        const v = window.localStorage.getItem(k);
+        if (v !== null) return v;
+      }} catch (_err) {{}}
+      try {{
+        if (window.name && window.name.startsWith("BQ_EVAL_SME:")) {{
+          const bag = JSON.parse(window.name.slice(12));
+          if (bag && Object.prototype.hasOwnProperty.call(bag, k)) return bag[k];
+        }}
+      }} catch (_err) {{}}
+      return Object.prototype.hasOwnProperty.call(MEM_STORE, k) ? MEM_STORE[k] : null;
+    }}
+    function safeSet(k, v) {{
+      MEM_STORE[k] = v;
+      try {{ window.localStorage.setItem(k, v); }} catch (_err) {{}}
+      try {{
+        let bag = {{}};
+        if (window.name && window.name.startsWith("BQ_EVAL_SME:")) {{
+          bag = JSON.parse(window.name.slice(12)) || {{}};
+        }}
+        bag[k] = v;
+        window.name = "BQ_EVAL_SME:" + JSON.stringify(bag);
+      }} catch (_err) {{}}
+    }}
+    let state = {{}};
+    try {{ state = JSON.parse(safeGet(STORAGE_KEY) || "{{}}") || {{}}; }} catch (_err) {{ state = {{}}; }}
     function save() {{
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+      safeSet(STORAGE_KEY, JSON.stringify(state));
       const rated = CASES.filter(c => state[c.trace_id] && state[c.trace_id].score).length;
       document.getElementById("prog").textContent = rated + " / " + CASES.length;
     }}
@@ -200,7 +238,7 @@ def _render_blind_html_workbench(
       const blob = new Blob([lines.join("\\n") + "\\n"], {{ type: "text/csv;charset=utf-8" }});
       const a = document.createElement("a");
       a.href = URL.createObjectURL(blob);
-      a.download = "{esc_slot}_completed.csv";
+      a.download = {json.dumps(f"{rater_slot}_completed.csv")};
       a.click();
     }});
     save();
@@ -243,9 +281,11 @@ def _load_eligible_sme_cases(
                 ),
                 "rubric_id": rubric_id,
                 "passing_score": passing_score,
-                "user_prompt": prompt,
-                "retrieved_context": str(row.get("retrieved_context", "")).strip(),
-                "final_response": resp,
+                "user_prompt": _scrub_blind_text(prompt),
+                "retrieved_context": _scrub_blind_text(
+                    str(row.get("retrieved_context", "")).strip()
+                ),
+                "final_response": _scrub_blind_text(resp),
                 "judge_ordinal_score": score_int,
             }
         )
