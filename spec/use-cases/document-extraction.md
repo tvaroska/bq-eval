@@ -15,7 +15,7 @@ tags: [bq-eval, use-cases]
 |---|---|
 | **Purpose** | Pure document management and structured information extraction across large document corpora. |
 | **Inputs & format** | **Mostly PDFs**, spanning from a **few pages up to 250 pages** per document. |
-| **Scale & execution mode** | **Batch** processing at **massive volumes**; **total cost** is the most critical constraint (cloud/residency is not a distinguishing requirement). |
+| **Scale & execution mode** | **Agent batch** processing at **massive volumes** (offline/scheduled traced agent runs per document, optionally using discounted **Flex** serving tiers such as GCP Flex — not spanless Batch Prediction APIs); **total cost** is the most critical constraint (cloud/residency is not a distinguishing requirement). |
 | **Model cascade** | **Two-model fallback:**<br>1. **Primary model**: processes every document by default.<br>2. **Escalation model (more powerful)**: invoked when the primary model **fails** or reports **low confidence**. |
 | **Review & eval tiers** | **Stratified / tiered evaluation**: deterministic checks -> stratified LLM evaluation -> **human/user review gated by confidence** (low/uncertain extractions reviewed by users; high-confidence extractions auto-accepted). |
 | **Primary decision question** | **Can cheaper models lower total cost?** Continuously evaluate cheaper model options and confidence thresholds to minimize combined cost (primary + escalation + eval) while maintaining acceptable extraction accuracy. |

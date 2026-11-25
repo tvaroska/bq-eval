@@ -13,8 +13,6 @@ build/
 !.env.example
 .DS_Store
 out/
-.claude/*
-!.claude/skills
 terraform/.terraform/
 terraform/.terraform.lock.hcl
 *.tfstate

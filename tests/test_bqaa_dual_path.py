@@ -604,18 +604,9 @@ def test_ai_evaluate_agent_sql_builder_and_cli_engine_b_default_canary(
 
 
 def test_public_sql_and_terminology_hygiene() -> None:
-    """Ensure SQL files contain no scratchpad project IDs and docs avoid Path A/B collisions."""
+    """Ensure SQL files contain no scratchpad project IDs."""
     for sql_file in sorted((REPO_ROOT / "sql").rglob("*.sql")):
         content = sql_file.read_text(encoding="utf-8")
         assert "btv-scratch" not in content, (
             f"{sql_file.name} leaks scratchpad project ID into public SQL"
         )
-
-    dual_doc = (REPO_ROOT / "docs" / "bqaa-and-dual-path-architecture.md").read_text(
-        encoding="utf-8"
-    )
-    assert "Light Capture" in dual_doc
-    assert "Full Capture" in dual_doc
-    assert not re.search(r"\bPath A\b|\bPath B\b", dual_doc), (
-        "Use 'Light Capture (BQAA)' / 'Full Capture (OTel)' instead of 'Path A' / 'Path B'"
-    )

@@ -43,13 +43,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 def test_stitch_design_contract_and_gm3_light_tokens() -> None:
-    """`.stitch/DESIGN.md` and rendered HTML enforce GM3 Light tokens, Pareto table, and reduced-motion."""
-    stitch_md = (REPO_ROOT / ".stitch" / "DESIGN.md").read_text(encoding="utf-8")
-    assert "Tier 2: Reusable Showcase — GM3 Light" in stitch_md
-    assert "## 5. Do Not Generate" in stitch_md
-    assert "--surface" in stitch_md
-    assert "tabular-nums" in stitch_md
-
+    """Rendered HTML scorecard enforces GM3 Light tokens, Pareto table, and reduced-motion."""
     artifacts = run_showcase_pipeline(corpus="m2-live")
     html_doc = render_html_scorecard(artifacts, live_api=True)
     assert "--surface: #f8f9fa;" in html_doc

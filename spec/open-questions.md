@@ -3,40 +3,58 @@ type: atom
 related:
   - "layers.md"
   - "silver.md"
+  - "shapes.md"
+  - "clouds.md"
 tags: [bq-eval]
 ---
 
 # Open Questions
 
-> What is undecided. Settled decisions live in [silver.md](silver.md) and the design notes; this note tracks only what is still open, with the current leaning where one exists.
+> What is undecided or unverified. Settled decisions live in [silver.md](silver.md), [gold.md](gold.md) and the design notes; this note tracks only what is still open, with the current leaning where one exists.
 
 ## Column lists
 
 The objects and their rules are fixed in [silver.md](silver.md). The columns of each object are not. They come with the schema files.
 
-## Settle time and rebuild window
+- Whether `traces` also counts spans without a user id, an outcome id or a conversation id. The leaning is yes.
+- How `final_model_confidence`, `escalated` and `page_count` roll up from traces to an outcome. The leaning for confidence is the last trace that reports one.
+- Whether the open twins carry salted hashes of user and tenant ids in the core, or only in the [clouds extension](clouds.md). The leaning is in the core, so cost per user can be read without raw ids.
 
-How long a trace must be quiet before it counts as settled, and how many days each run rebuilds. Both are settings, not design. They need a measurement of how late spans arrive.
+## Tests on the trace store
 
-## Reading across clouds
+Five Cloud Trace (`_AllSpans` linked BigQuery dataset) behaviors were tested live:
 
-Per-trace rows, per-outcome rows and model-call usage may be read from the hub. How the hub reads them, and whether cross-cloud query limits allow it at real volume, is not verified. Model-call usage is one row per call, so it is the larger of the two.
+- **Access — verified for `_AllSpans`; BigLake required for Shape 3.** Both an authorized view and an authorized dataset (`targetTypes: ["VIEWS"]`) patch onto a linked `_AllSpans` dataset and allow a service account with zero read access on `_AllSpans` or Cloud Trace to query rows while direct queries to `_AllSpans` return `403`. Over Cloud Storage external tables (Shape 3), a plain external table **fails** (`HTTP 400 accessDenied`, requiring `storage.objects.list` on the caller), whereas a **BigLake table (`WITH CONNECTION`)** succeeds (`HTTP 200`) for a zero-privilege service account. **Still untested:** authorized views across VPC-SC / CMEK perimeters.
+- **Pruning & single-pass — verified with two traps.** Timestamp predicates on `start_time`, `receive_time`, and `end_time` prune both dry-run/executed bytes scanned and stage-0 records read (`18d` -> `3d` cut scanned bytes to `4.8%`, `24h` to `1.8%`, and `1h` to streaming buffer). Filtering `start_time` *inside* a horizon view cut scanned bytes **`37x`** compared to filtering `MIN(start_time)` *outside* a `GROUP BY trace_id` view (confirming zero pushdown past `GROUP BY`). **Trap:** expressing `spans` as a `UNION ALL` of two shape views over `_AllSpans` caused BigQuery to scan `_AllSpans` twice (`2x` rows/bytes), so shape routing over `_AllSpans` must run in one single `SELECT` pass.
+- **Arrival — verified.** Spans became queryable in `_AllSpans` in `13.8s–21.6s` after OTLP `HTTP 200` (`receive_time - end_time` was `50–113 ms`), well inside the 5-minute missing-identity check.
+- **Size — rejects the span at `65,533` bytes (no truncation).** Exact measured per-attribute string cap is **`65,532` bytes** (`65,536 - 4` bytes protobuf framing); `65,533+` bytes returns `HTTP 400`, and inside a mixed OTLP batch returns `HTTP 200` with `partialSuccess.rejectedSpans = "1"` — silently dropping only the oversized span while sibling spans land. Two `40 KiB` attributes (`80 KiB` total) on one span succeed (`HTTP 200`), confirming the cap is per attribute, not per span. Span `events` attributes enforce the exact same 64 KiB hard-reject cap. Because dropped spans never reach `_AllSpans`, `read_whole = false` cannot detect them; they surface only as missing-parent or rootless traces.
+- **Trace state — verified.** W3C `traceState` (including `ot=th:...`) is preserved verbatim in `_AllSpans.trace_state`.
 
-## Evaluation where text may not leave
+## Settle time and horizon lengths
 
-A judge needs the prompt and the answer, and text does not leave its cloud. Evaluation of a trace therefore has to run in the cloud that holds its text. How an add-on does that is open.
+How long a trace must be quiet before an add-on counts it as settled, and how long each read horizon is. Both are settings, not design, and need a measurement of how late spans arrive and what a scan costs. Whether a stored layer is ever needed on top of horizons is decided by that measurement; it is not part of the contract.
 
-## A trace split across clouds
+## Hash equality
 
-The owning cloud judges the trace on the spans it can see. Errors, tool calls and tokens in the other cloud are not part of that judgement. Whether an add-on should treat such a trace as incomplete is open.
+Tested live in BigQuery: `TO_JSON_STRING(PARSE_JSON(...))` normalizes object key ordering (including nested objects), whitespace, trailing decimal zeros (`10.50` == `10.5`), and Unicode escapes (`\u00e9` == `é`), **but does not normalize integer vs. float representations**: `100` vs. `100.0`, `100` vs. `1e2`, `0` vs. `0.0`, and `-0.0` vs. `0` all hash differently (`equal = false`). Raw `TO_JSON_STRING(PARSE_JSON(...))` is therefore insufficient for `args_sha256` / `approved_args_sha256` equality whenever one side serializes `100` and the other serializes `100.0`; canonical RFC 8785 (JCS) normalization is required.
+
+## What each shape can fill
+
+The three [shapes](shapes.md) do not carry the same facts, and no table yet says which columns are empty by construction for which shape. That includes what counts as throttled in each shape. The leaning is to build the table from recorded traces, not from reading packages.
+
+## First-token time & live ADK 2.14.0 findings
+
+Tested live with Google ADK 2.14.0 (both Format 1 legacy and Format 2 `SPAN_ONLY`, with a tool call, exported to Cloud Trace `_AllSpans`):
+
+- **First-token time:** Confirmed absent on spans in both Format 1 and Format 2 (`gen_ai.response.time_to_first_chunk` is `NULL` on every span). Stamping it requires SDK/gateway/collector middleware.
+- **Format 1 double-counting:** Every model call in ADK 2.14.0 Format 1 emits nested `call_llm` + child `generate_content` spans with identical `input_tokens` and `output_tokens` (`82/21`, `118/18`). Shape 1 SQL must fold/deduplicate that parent-child pair to prevent `2x` token and cost inflation.
+- **Shape marker collision:** ADK 2.14.0 Format 2 still emits `gcp.vertex.agent.invocation_id` and `gcp.vertex.agent.event_id` on `generate_content` spans. Shape routing must key on `gcp.vertex.agent.llm_request` / `tool_call_args` (Shape 1) vs. `gen_ai.input.messages` / `gen_ai.tool.call.arguments` (Shape 2), never `invocation_id`.
+- **Operation name & model/identity gaps:** ADK 2.14.0 emits `gen_ai.operation.name = 'generate_content'` (not `'chat'`), omits `gen_ai.response.model` (only `gen_ai.request.model` is populated), omits `gen_ai.response.id`, and emits no `user.id` on root spans even when `user_id` is passed to `Runner.run_async()`.
+- **Cloud Logging `_AllLogs` (also verified live):** Authorized Dataset (`targetTypes: ["VIEWS"]`) and timestamp pruning (`1.01 MB` -> `21.1 KB` 24h -> `680 B` 1h) both pass on linked `_AllLogs`. OTLP `/v1/logs` `gen_ai.evaluation.result` lands with `log_id = 'gen_ai.evaluation.result'`, body in `text_payload`, resource/scope in `otel`, all OTel attributes in `labels` JSON (not `json_payload`), and bare-hex `trace` IDs.
 
 ## Sessions
 
-A session is not a Silver object. `traces` carries the session ID and the turn number. Whether multi-turn conversations need an object of their own is open.
-
-## Call-level rows without text
-
-Decision needed. Whether the scheduled job that builds `traces` also stores one row per model call and per tool call, holding everything except text: model, tokens, durations, tool name, status. Add-ons would then read stored rows and step attributes would be parsed once, not on every query. The leaning is yes.
+A session is not a Silver object. `traces` carries `gen_ai.conversation.id` and `start_time` (which Gold uses to order turns and count user-turn conversation length without a custom `turn_index`). Whether multi-turn conversations ever need a dedicated Silver view is open.
 
 ## Copies of text
 
@@ -48,67 +66,26 @@ Decision needed. What Silver does with a step it cannot read as one of the three
 
 ## Size of content on a step
 
-The trace store's limit on the size of one step attribute is not known. Two of the three shapes put whole prompts and tool results on the step. A test with one very large prompt settles how many setups have to move to content by reference.
+Tested live (see [Tests on the trace store](#tests-on-the-trace-store)): the exact per-attribute string cap is **`65,532` bytes** (`HTTP 200`), and **`65,533+` bytes** hard-rejects the span (even inside an `HTTP 200` `partialSuccess` batch) rather than truncating. The cap applies per attribute (`2 x 40 KiB` on one span succeeds), and span `events` attributes share the exact same 64 KiB cap. Any workload that can exceed `65,532` bytes in one attribute must use content by reference.
 
 ## Proof of each setup
 
-The versions and settings in [shapes.md](shapes.md) come from reading each package, not from running it. Google ADK 2.13 was not read at all. The leaning is that a setup counts as supported only when a recorded trace from it is among the fixed inputs.
+Google ADK 2.14.0 Format 1 (legacy) and Format 2 (`SPAN_ONLY`) have now been recorded live against Cloud Trace `_AllSpans` (see [First-token time & live ADK 2.14.0 findings](#first-token-time--live-adk-2140-findings)). The remaining framework versions and settings in [shapes.md](shapes.md) — and the Shape 3 reference hook — still come from reading each package, not from running it. A setup counts as supported only when a recorded trace from it is among the fixed inputs.
 
 ## Limits of content by reference
 
-- Tool steps are not covered. Their arguments and results are inside the stored messages of the model call that follows. Whether a row per tool call reads them from there is open.
-- An upload can be skipped while its address is still written. How large the share of such addresses may get before a trace counts as having no text is open.
-- Storage fills with many small files under one path. How an external table performs over them is not measured.
-- Only setups built on the official OpenTelemetry helper library can write by reference. Whether the others get a small application-side uploader is open; the leaning is not before the size test shows text being cut.
+- Standalone `execute_tool` spans in traces with zero model calls have no uploaded model-message JSONL to reconstruct arguments/results from (normal agent turns reconstruct `tool_calls` via `gen_ai.tool.call.id` under `ADR-016`), and aborted turns without a subsequent model call drop tool outputs/errors.
+- The exact file names of the upload contract are fixed when the reference hook is written and a recorded trace from it is among the fixed inputs.
+- **Measured live (`200` tiny JSONL files, `374 KB` total):** literal `WHERE _FILE_NAME = '...'` pruned to `1` file (`1.87 KB`, `100–136 ms` slot), **but dynamic `JOIN` on `e._FILE_NAME = s.messages_ref` scanned `100%` of all `200` files** (`374 KB`, `15.9s–24.9s` slot = `~80–125 ms` slot overhead per tiny file) on both plain external and BigLake tables — and even on Hive-partitioned BigLake tables when joining on `e.dt = s.span_dt`. Only a **static Hive partition predicate** (`WHERE dt = DATE '...'`) pruned GCS reads (`20/200` files, `37.5 KB`, `2.2s` slot). Flat per-call JSONL joined dynamically by `_FILE_NAME` therefore does not prune; Shape 3 requires BigLake Connections (for IAM), Hive date/hour partitioning with static horizon predicates, and/or micro-batched Parquet/Iceberg storage.
 
+## Outcome status
 
-## What the use cases need that Silver does not define
+Decided for BQ Eval in `ADR-029` ([attributes.md](attributes.md), [gold.md](gold.md)): `outcome.status` adds `rejected | denied` alongside `guardrail.intervention` so policy blocks do not inflate error rates. Open: synchronizing the new values into the cross-repo standard (`EVAL-P11`).
 
-Of the 27 required checks in the [use-case notes](use-cases.md), Silver as specified in [silver.md](silver.md) feeds 6 in full, 10 in part and 11 not at all. That count is a reading of the notes against the specification, not a measurement. The questions below are what stands between the two.
+## Retention for regulated workloads
 
-### Who may read call-level data
+Decided in `ADR-029` ([gold.md](gold.md)): regulated workloads write immutable WORM Gold Audit Snapshots (point-in-time scorecard, hashes, calibration intervals, and reference-table snapshots) rather than forcing multi-year raw Bronze prompt retention. Open: exact retention-lock DDL and archive bucket lifecycle templates.
 
-Only the cost add-on may read `spans`, and tool arguments and results are in no published object. Every use case needs something at this level: the user passed to a tool call (1), whether the ticketing tool ran on a rejected email (2), time to first output and personal data in tool traffic (3), which model handled a document first (4), which calls wrote and with which key (5). Whether Silver publishes one object per model call without text and one per tool call with its arguments, results and a hash of the arguments, readable by every add-on, is open. The leaning is yes, and that it replaces the cost add-on's access to `spans`.
+## Clouds extension
 
-### Events between the start and the close of an outcome
-
-`outcomes` holds what the closing step reported. Use case 2 needs the time from the inbound email to the acknowledgement, the rejection before a ticket, the escalation and the time spent waiting for the customer. Use case 5 needs the park for approval, the approval and the resume. Use case 4 needs to know whether a document went to user review. Whether Silver publishes such events is open.
-
-### Signals that arrive after a trace is settled
-
-A thumbs up or down (3), a user's correction of an extraction (4) and a reviewer's sign-off (5) arrive minutes or days later, and a settled row should not change. Whether these share one object with the events above is open. So is the line to the add-ons; the leaning is that signals that are part of the running workflow are Silver, and labels produced by the evaluation process are not. An approval has to come from the system that grants it: an agent's own statement that a person approved is a claim and counts for nothing.
-
-### The tool-call limit
-
-The limit of 8 tool calls is the same for every application and changes the overall pass. A coding session (3), an orchestrator with specialists (2) and a long document read in parts (4) pass 8 without looping. Whether the limit becomes a value per application, or a loop is redefined as the same tool called again with the same arguments, is open.
-
-### Freshness
-
-Silver states no delay. Use case 1 asks for a warning within one minute when the user is missing, and use case 2 has a one-minute target. Whether such alerts read `spans` over the last minutes, or are raised where telemetry is collected and stay outside Silver, is open.
-
-### Outcomes that outlive the rebuild window
-
-Use case 2 runs to 24 hours and beyond, and use case 5 pauses for days. Which day an outcome's row belongs to, how it is rebuilt once its first trace has left the window, and that an outcome with no closing step still gets a row, are not stated.
-
-### Sources that are not telemetry
-
-Batch results that produce no span per document (4), the approval system's own records (5) and the mail and ticket system's own events (2). Whether each enters as spans written by the application or through an adapter of its own is open.
-
-### What prompt, context and answer mean
-
-`trace_payloads` has three parts per trace, and telemetry carries text on many steps. Which steps fill each part is not written down. In use case 2 the last output of a trace can be a question back to the customer, not an answer.
-
-### A tool list as reference data
-
-Which tools write to a system of record and which need approval first (5), which return personal data (1) and which create a ticket (2). None of this is in the telemetry, and asking an application to label its own tools runs against the rule on what an application says about itself. Whether a third reference table holds it is open.
-
-### What every application has to add
-
-The OpenTelemetry GenAI conventions carry no user, no business outcome, no turn number, no user feedback, no serving tier for Gemini, no mark for test traffic, no human approval, no model confidence and no idempotency key. Which of these are required of every application, and under which names, is open.
-
-### Smaller items
-
-- `traces` and `outcomes` are described as small. Use case 4 is one outcome per document at very large volume, and nothing is measured.
-- `spans` and `trace_payloads` are views. When the trace store expires data, the evidence behind a decision in use case 5 is gone.
-- A user on a per-trace row crosses to the hub with the row. "No text" does not cover it.
-- Values only an application knows, such as page count or model confidence, have no defined way into Silver.
+Decided in `ADR-028` ([clouds.md](clouds.md), [design/clouds.md](../design/clouds.md)): the hub ingests text-free `model_calls`, `outcomes`, and open twins via a scheduled Hub Transfer Port (avoiding synchronous cross-cloud queries on live dashboards), executes judges via an In-Cloud Judge Port next to raw text in each non-GCP cloud, and correlates split traces across clouds in the hub on `(trace_id, parent_span_id)`. Open: throughput benchmarking of the Hub Transfer Port at high call volume, multi-cloud reference fixtures, and whether Gold add-ons should flag split traces whose remote cloud transfer has not arrived yet as incomplete.

@@ -525,7 +525,7 @@ def test_unjudged_and_low_ac2_scorecard_renders_fail_closed_without_pass_or_zero
 
 
 def test_progressive_step1_step2_step25_step3_pack() -> None:
-    """Verify the progressive Step 1 -> Step 2 -> Step 2.5 Skill -> Step 3 SQL and CSV pack."""
+    """Verify the Step 1 -> Step 2 -> Step 3 SQL and CSV pack."""
     step1_sql = (REPO_ROOT / "sql" / "core" / "step1_trace_views.sql").read_text(encoding="utf-8")
     assert "CREATE OR REPLACE VIEW `agent_eval.v_step1_trace_waterfall`" in step1_sql
     assert "CREATE OR REPLACE VIEW `agent_eval.v_step1_trace_eval`" in step1_sql
@@ -562,26 +562,6 @@ def test_progressive_step1_step2_step25_step3_pack() -> None:
     assert "CREATE OR REPLACE VIEW `agent_eval.v_step2_trace_rubric_prompts`" in step2_sql
     assert "MOD(ABS(FARM_FINGERPRINT(trace_id)), 100) < 10" in step2_sql
     assert "AI.GENERATE_TABLE(" in step2_sql
-
-    skill_md = (REPO_ROOT / "skills" / "bq-eval" / "SKILL.md").read_text(encoding="utf-8")
-    recipes_md = (REPO_ROOT / "skills" / "bq-eval" / "references" / "sql_recipes.md").read_text(
-        encoding="utf-8"
-    )
-    assert "name: bq-eval" in skill_md
-    assert "MOD(ABS(FARM_FINGERPRINT(trace_id)), 100) < 5" in skill_md
-    assert "TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR)" in skill_md
-    assert "MERGE INTO agent_eval.rubrics" in skill_md
-    assert "MERGE INTO agent_eval.rubrics AS target" in recipes_md
-    assert "## 3. Stateless Eval on Only the Last 1 Hour of Traces" in recipes_md
-    assert "MODEL `agent_eval.gemini_4_argon_judge`" in recipes_md
-    assert "INSERT INTO `agent_eval.eval_results`" in recipes_md
-    assert "FROM AI.GENERATE_TABLE(\n  MODEL `agent_eval.gemini_3_8_flash_judge`" in recipes_md
-    workflow3_section = skill_md.split("## Workflow 3:", 1)[1]
-    assert "references/sql_recipes.md" in workflow3_section
-    for link_dir in (".agents", ".claude"):
-        skills_link = REPO_ROOT / link_dir / "skills"
-        assert skills_link.is_symlink()
-        assert skills_link.readlink().as_posix() == "../skills"
 
     step3_sql = (REPO_ROOT / "sql" / "core" / "step3_saved_results.sql").read_text(encoding="utf-8")
     assert "CREATE TABLE IF NOT EXISTS `agent_eval.eval_results`" in step3_sql

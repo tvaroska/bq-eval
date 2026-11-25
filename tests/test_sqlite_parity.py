@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import re
 import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -422,11 +421,6 @@ def test_prefix_cache_dilution_direction_and_wif_collector_attribute() -> None:
         target_cache_hit_ratio=0.75,
     )
     assert report_low.dilution_detected is True
-
-    wif_text = (REPO_ROOT / "examples" / "otel-collector-wif.yaml").read_text(encoding="utf-8")
-    assert "gen_ai.finops.traffic_type" not in wif_text
-    assert re.search(r"key:\s*finops\.traffic_type", wif_text)
-    assert re.search(r"replacement:\s*finops\.traffic_type", wif_text)
 
 
 def test_value_parity_step1_step2_xml_escaping_step3_runs_and_ddl_views() -> None:

@@ -665,15 +665,21 @@ def test_policy_sha256_and_amended_clause_ids_in_judge_sql_and_ddl() -> None:
 
 
 def test_public_doc_hygiene_marks_evaluate_agent_preview() -> None:
-    """All public docs citing `AI.EVALUATE_AGENT` explicitly note preview/non-public status."""
-    files = (
-        REPO_ROOT / "README.md",
-        REPO_ROOT / "docs" / "architecture-and-sql.md",
-        REPO_ROOT / "docs" / "bqaa-and-dual-path-architecture.md",
+    """All files citing `AI.EVALUATE_AGENT` explicitly note preview/non-public status."""
+    sql_files = (
         REPO_ROOT / "sql" / "core" / "step2_stateless_eval.sql",
         REPO_ROOT / "sql" / "core" / "step3_saved_results.sql",
     )
-    for path in files:
+    for path in sql_files:
         lower = path.read_text(encoding="utf-8").lower()
         assert "ai.evaluate_agent" in lower
         assert "preview" in lower or "non-public" in lower
+
+    for md_path in sorted(REPO_ROOT.rglob("*.md")):
+        if ".venv" in md_path.parts or md_path.name in {"roadmap.md", "roadmap-history.md"}:
+            continue
+        lower = md_path.read_text(encoding="utf-8").lower()
+        if "ai.evaluate_agent" in lower:
+            assert "preview" in lower or "non-public" in lower, (
+                f"{md_path.relative_to(REPO_ROOT)} cites AI.EVALUATE_AGENT without preview note"
+            )
