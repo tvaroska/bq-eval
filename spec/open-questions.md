@@ -10,82 +10,75 @@ tags: [bq-eval]
 
 # Open Questions
 
-> What is undecided or unverified. Settled decisions live in [silver.md](silver.md), [gold.md](gold.md) and the design notes; this note tracks only what is still open, with the current leaning where one exists.
+> What is undecided or still requires live-environment verification. Settled decisions live in [silver.md](silver.md), [gold.md](gold.md), [clouds.md](clouds.md), [capacity.md](capacity.md), and the design notes; this note tracks only what remains open or empirically unverified.
 
-## Column lists
+## Column lists & exact schema files
 
-The objects and their rules are fixed in [silver.md](silver.md). The columns of each object are not. They come with the schema files.
+The objects, semantics, and nullability rules are fixed in [silver.md](silver.md) and [capacity.md](capacity.md). Exact column DDL files ship alongside the Silver SQL implementation.
 
-- Whether `traces` also counts spans without a user id, an outcome id or a conversation id. The leaning is yes.
-- How `final_model_confidence`, `escalated` and `page_count` roll up from traces to an outcome. The leaning for confidence is the last trace that reports one.
-- Whether the open twins carry salted hashes of user and tenant ids in the core, or only in the [clouds extension](clouds.md). The leaning is in the core, so cost per user can be read without raw ids.
+- Whether `traces` also counts spans without a user id, an outcome id, or a conversation id. Leaning: yes.
+- **Decided (`ADR-034`):** when the root span and a platform-class span elsewhere in the trace carry different user ids, Silver does not choose; which id is the requester is Gold's rule. Open with that rule: the rule itself (leaning: the platform-class id, because it is the verified one), and whether Silver then publishes that id beside the root span's (leaning: yes, Gold cannot read it otherwise).
+- Which of today's columns stay columns and which become registered keys of the `labels` column (`ADR-039`). Settled with the column files.
+- Where the linked outcome id of an `outcome.linked` row is read from; `workflow_events` has no column for it. Leaning: a key in `payload_json`.
+- How `outcomes`, which can span days, relate to a read window (`ADR-035`). Leaning: an outcome is returned when one of its traces or events falls in the window, with a fact for parts that lie outside.
+- **Decided (`ADR-033`):** Multi-trace/map-reduce outcomes default to worst-chunk `min_model_confidence` alongside `final_model_confidence`.
+- Whether per-BU KMS-HMAC `user_id_hash`/`tenant_id_hash` (`hmac_key_version`, `ADR-028`/`ADR-031`) should also populate `silver_open` in single-cloud deployments. Leaning: yes, so per-user cost reads stay in `silver_open` without raw ids while preserving RTBF crypto-shredding separation.
 
-## Tests on the trace store
+## Tests on the trace store (live probes & remaining perimeter checks)
 
 Five Cloud Trace (`_AllSpans` linked BigQuery dataset) behaviors were tested live:
 
-- **Access — verified for `_AllSpans`; BigLake required for Shape 3.** Both an authorized view and an authorized dataset (`targetTypes: ["VIEWS"]`) patch onto a linked `_AllSpans` dataset and allow a service account with zero read access on `_AllSpans` or Cloud Trace to query rows while direct queries to `_AllSpans` return `403`. Over Cloud Storage external tables (Shape 3), a plain external table **fails** (`HTTP 400 accessDenied`, requiring `storage.objects.list` on the caller), whereas a **BigLake table (`WITH CONNECTION`)** succeeds (`HTTP 200`) for a zero-privilege service account. **Still untested:** authorized views across VPC-SC / CMEK perimeters.
-- **Pruning & single-pass — verified with two traps.** Timestamp predicates on `start_time`, `receive_time`, and `end_time` prune both dry-run/executed bytes scanned and stage-0 records read (`18d` -> `3d` cut scanned bytes to `4.8%`, `24h` to `1.8%`, and `1h` to streaming buffer). Filtering `start_time` *inside* a horizon view cut scanned bytes **`37x`** compared to filtering `MIN(start_time)` *outside* a `GROUP BY trace_id` view (confirming zero pushdown past `GROUP BY`). **Trap:** expressing `spans` as a `UNION ALL` of two shape views over `_AllSpans` caused BigQuery to scan `_AllSpans` twice (`2x` rows/bytes), so shape routing over `_AllSpans` must run in one single `SELECT` pass.
-- **Arrival — verified.** Spans became queryable in `_AllSpans` in `13.8s–21.6s` after OTLP `HTTP 200` (`receive_time - end_time` was `50–113 ms`), well inside the 5-minute missing-identity check.
-- **Size — rejects the span at `65,533` bytes (no truncation).** Exact measured per-attribute string cap is **`65,532` bytes** (`65,536 - 4` bytes protobuf framing); `65,533+` bytes returns `HTTP 400`, and inside a mixed OTLP batch returns `HTTP 200` with `partialSuccess.rejectedSpans = "1"` — silently dropping only the oversized span while sibling spans land. Two `40 KiB` attributes (`80 KiB` total) on one span succeed (`HTTP 200`), confirming the cap is per attribute, not per span. Span `events` attributes enforce the exact same 64 KiB hard-reject cap. Because dropped spans never reach `_AllSpans`, `read_whole = false` cannot detect them; they surface only as missing-parent or rootless traces.
-- **Trace state — verified.** W3C `traceState` (including `ot=th:...`) is preserved verbatim in `_AllSpans.trace_state`.
+- **Access — verified on standard projects; VPC-SC + multi-region CMEK still untested:** Both an authorized view and an authorized dataset (`targetTypes: ["VIEWS"]`) patch onto linked `_AllSpans` and `_AllLogs` datasets and allow a zero-privilege service account to query rows (`HTTP 200`, direct=`403`). Over Shape-3 storage, plain GCS external tables fail (`400 accessDenied`), whereas **BigLake tables (`WITH CONNECTION`)** succeed (`HTTP 200`). **Still untested (P0 live probe):** cross-project Authorized Datasets (`_AllSpans`, `_AllLogs`) and per-BU `bqcx-*` BigLake Connections across **locked-down VPC-SC perimeters + `US`/`EU` multi-region CMEK** and multi-project landing zones (plus Row Access Policies on `silver_restricted`).
+- **Pruning & single-pass — verified with two traps:** Inside-horizon `start_time` filters cut scanned bytes **`37x`** vs. outer filters past `GROUP BY`. Expressing `spans` as `UNION ALL` over `_AllSpans` scanned `_AllSpans` **`2x`**, so shape routing runs in one single `SELECT` pass. **Still untested (P0 live benchmark):** the design-only high-volume profile, a stored text-free span base side by side with bounded `enterprise` `MERGE` (with static target `DATE(start_time)` partition pruning and `max_bytes_billed` / `INFORMATION_SCHEMA.JOBS` slot circuit breakers) at multi-PiB scale.
+- **Arrival — verified:** Spans landed in `_AllSpans` in `13.8s–21.6s` after OTLP `HTTP 200` (`receive_time - end_time` `50–113 ms`).
+- **Size — hard-rejects at `65,533` bytes (no truncation):** Exact measured per-attribute string cap is **`65,532` bytes** (`HTTP 200`); `65,533+` bytes hard-rejects the span (including inside mixed `HTTP 200` `partialSuccess` batches and span `events`), requiring Shape 3 for large payloads and reverse `action.committed -> tool_calls` checks for regulated writes.
+- **Trace state — verified:** W3C `traceState` (`ot=th:...`) is preserved verbatim in `_AllSpans.trace_state`.
+- **Read windows, untested (`ADR-035`):** that a window passed as function arguments limits scanned bytes as a filter inside a view does, and that table functions can be authorized on linked `_AllSpans`/`_AllLogs` like the views.
+- **Writer provenance, measured on recorded traces (`ADR-034`):** `_AllSpans` has no column that records who wrote a span, so the writer class has to come from the landing place. The server-set `apphub` column was empty on all `38,859` spans, while `34,803` carried a self-declared `apphub.application.id` resource attribute. The environment attribute appears under its older name `deployment.environment` on `23,783` spans and under `deployment.environment.name` on none, so the second identity path has to read both (`ADR-040`). **Still untested:** a gateway's spans in a separate landing place joining an application's spans by trace id.
+- **Root facts, measured (`ADR-037`):** of `8,716` Cloud Run traces only `49` had a parentless span; `8,665` of the other `8,667` had only server-kind top spans, whose parent is the runtime's front end, and `2` had other orphans. A "no parent" definition of root would mark `99.4%` of these traces rootless. The same picture appears at every service hop: of `25,969` application server spans none has its parent in another service, and `11,169` have a parent that is not stored, because the cloud runtime's own span sits between caller and callee. An orphan of server kind therefore shows no loss, and a lost span whose only children are server spans in another service stays invisible. Of the `1,580` parentless spans, `1,555` were the cloud runtime's own request spans (no instrumentation scope, no span kind, a `/component` label of `HTTP load balancer` or `AppServer`) and `25` carried no SDK resource attributes (probe spans sent by hand; `24` checked by name). No deployed application emitted a parentless span. **Decided (`ADR-037`):** the root is the first span, by start time, that an application emitted; the cloud runtime's own spans do not count. Measured on `8,856` traces with application spans: that span never had an application span above it and was never tied; `6,144` traces had one top application span and `2,712` had two to eight, so "top-most" alone does not pick one. While a trace is still arriving, its entry span may not be in the store yet. Turns, measured: `499` of `9,494` traces hold an agent, model-call or tool span (`447` a model call); where the runtime's request span is stored and starts first, it precedes the first application span by `17 ms` at the median and up to `53 s`.
+- **Read margin, measured (`ADR-035`):** trace length was `244 ms` at p50, `18.8 s` at p95, `54.1 s` at p99 and `406 s` at most; a start-time filter cut `6` of `170` traces at the start of a busy 30-minute window.
+- **Span kinds and tokens, measured (`ADR-036`, `ADR-042`):** `35,708` spans (`92%`) carried no GenAI operation. `1,045` spans carried a token attribute and `924` reported a count above zero; the `121` zeros include all `99` tool spans that carried the attribute. The operations Silver lists as model calls (`chat`, `generate_content`, `embeddings`, legacy `call_llm`) covered `702` of the `924` spans but only `35%` of their input tokens; the rest sat under application-specific operation names. Only `8` spans carried content in an accepted shape.
+- **Token spans inside token spans, measured (`ADR-042`):** `22` spans that report tokens enclose `50` others: `2` legacy ADK wrappers equal to their inner call, and `20` application spans of which `7` equal the sum of their inner calls and `13` report less. None reports more than its inner spans. Counting both adds `66,360` input tokens (`1.1%`) here and doubles them in the legacy ADK format. **Decided (`ADR-042`):** the innermost span that reports tokens is the model call, and an enclosing span is not counted again.
+- **Duplicates, measured (`ADR-042`):** `791` `(trace_id, span_id)` keys appear twice, with the same attributes and different arrival times: `753` are runtime request spans and `38` are application spans from one load run. `dropped_attributes_count` and `dropped_events_count` were zero on every span.
+- **Sampling, measured (`ADR-043`):** no application span carried a sampling probability, in trace state or as an attribute.
+- **Scan size, measured (`ADR-035`):** a query that reads the trace table through five subqueries processed `6.1 MB` against `4.8 MB` for one, so bytes do not grow with the number of references, while slot time grew `5.5x`. A filter on arrival time processed the same bytes as a filter on start time, and a window passed as query parameters the same bytes as literals. A table function itself is still untested.
 
-## Settle time and horizon lengths
+## Settle time, read margin & session inactivity cutoffs
 
-How long a trace must be quiet before an add-on counts it as settled, and how long each read horizon is. Both are settings, not design, and need a measurement of how late spans arrive and what a scan costs. Whether a stored layer is ever needed on top of horizons is decided by that measurement; it is not part of the contract.
+Exact default values for the read margin around a window, `settle_buffer`, `merge_lookback_days`, `outcome_lookback_days`, and Gold's bounded `session_inactivity_hours` cutoff are deployment settings to be tuned from live span arrival skew and scan-cost measurements.
 
 ## Hash equality
 
-Tested live in BigQuery: `TO_JSON_STRING(PARSE_JSON(...))` normalizes object key ordering (including nested objects), whitespace, trailing decimal zeros (`10.50` == `10.5`), and Unicode escapes (`\u00e9` == `é`), **but does not normalize integer vs. float representations**: `100` vs. `100.0`, `100` vs. `1e2`, `0` vs. `0.0`, and `-0.0` vs. `0` all hash differently (`equal = false`). Raw `TO_JSON_STRING(PARSE_JSON(...))` is therefore insufficient for `args_sha256` / `approved_args_sha256` equality whenever one side serializes `100` and the other serializes `100.0`; canonical RFC 8785 (JCS) normalization is required.
+Tested live in BigQuery: `TO_JSON_STRING(PARSE_JSON(...))` fails int-vs-float equality (`100` vs. `100.0` / `1e2`, `0` vs. `0.0` / `-0.0`), so both execution-time `bq_eval.args_sha256` and Silver SQL fallback hashing use deterministic **RFC 8785 (JCS)** normalization (with a payload-byte guard before SQL UDF invocation).
 
-## What each shape can fill
+## What each shape can fill & proof of each setup
 
-The three [shapes](shapes.md) do not carry the same facts, and no table yet says which columns are empty by construction for which shape. That includes what counts as throttled in each shape. The leaning is to build the table from recorded traces, not from reading packages.
+Google ADK `2.14.0` Format 1 (legacy) and Format 2 (`SPAN_ONLY`) have been recorded live against Cloud Trace `_AllSpans` (exposing Format 1 `call_llm` + `generate_content` `2x` token duplication, Format 2 `invocation_id` marker collision, and missing `gen_ai.response.model`, `gen_ai.response.id`, root `user.id`, and `gen_ai.response.time_to_first_chunk`), and `_AllLogs` OTLP `gen_ai.evaluation.result` ingestion has been verified live (`labels` JSON, bare-hex `trace`).
 
-## First-token time & live ADK 2.14.0 findings
-
-Tested live with Google ADK 2.14.0 (both Format 1 legacy and Format 2 `SPAN_ONLY`, with a tool call, exported to Cloud Trace `_AllSpans`):
-
-- **First-token time:** Confirmed absent on spans in both Format 1 and Format 2 (`gen_ai.response.time_to_first_chunk` is `NULL` on every span). Stamping it requires SDK/gateway/collector middleware.
-- **Format 1 double-counting:** Every model call in ADK 2.14.0 Format 1 emits nested `call_llm` + child `generate_content` spans with identical `input_tokens` and `output_tokens` (`82/21`, `118/18`). Shape 1 SQL must fold/deduplicate that parent-child pair to prevent `2x` token and cost inflation.
-- **Shape marker collision:** ADK 2.14.0 Format 2 still emits `gcp.vertex.agent.invocation_id` and `gcp.vertex.agent.event_id` on `generate_content` spans. Shape routing must key on `gcp.vertex.agent.llm_request` / `tool_call_args` (Shape 1) vs. `gen_ai.input.messages` / `gen_ai.tool.call.arguments` (Shape 2), never `invocation_id`.
-- **Operation name & model/identity gaps:** ADK 2.14.0 emits `gen_ai.operation.name = 'generate_content'` (not `'chat'`), omits `gen_ai.response.model` (only `gen_ai.request.model` is populated), omits `gen_ai.response.id`, and emits no `user.id` on root spans even when `user_id` is passed to `Runner.run_async()`.
-- **Cloud Logging `_AllLogs` (also verified live):** Authorized Dataset (`targetTypes: ["VIEWS"]`) and timestamp pruning (`1.01 MB` -> `21.1 KB` 24h -> `680 B` 1h) both pass on linked `_AllLogs`. OTLP `/v1/logs` `gen_ai.evaluation.result` lands with `log_id = 'gen_ai.evaluation.result'`, body in `text_payload`, resource/scope in `otel`, all OTel attributes in `labels` JSON (not `json_payload`), and bare-hex `trace` IDs.
-
-## Sessions
-
-A session is not a Silver object. `traces` carries `gen_ai.conversation.id` and `start_time` (which Gold uses to order turns and count user-turn conversation length without a custom `turn_index`). Whether multi-turn conversations ever need a dedicated Silver view is open.
-
-## Copies of text
-
-Decision needed. Whether Silver ever stores a copy of text or encoded files. The leaning is never: content stays where it landed and is read only for the traces someone judges.
-
-## A step that fits no shape
-
-Decision needed. What Silver does with a step it cannot read as one of the three [shapes](shapes.md). The leaning is to keep it, flag it and count it.
-
-## Size of content on a step
-
-Tested live (see [Tests on the trace store](#tests-on-the-trace-store)): the exact per-attribute string cap is **`65,532` bytes** (`HTTP 200`), and **`65,533+` bytes** hard-rejects the span (even inside an `HTTP 200` `partialSuccess` batch) rather than truncating. The cap applies per attribute (`2 x 40 KiB` on one span succeeds), and span `events` attributes share the exact same 64 KiB cap. Any workload that can exceed `65,532` bytes in one attribute must use content by reference.
-
-## Proof of each setup
-
-Google ADK 2.14.0 Format 1 (legacy) and Format 2 (`SPAN_ONLY`) have now been recorded live against Cloud Trace `_AllSpans` (see [First-token time & live ADK 2.14.0 findings](#first-token-time--live-adk-2140-findings)). The remaining framework versions and settings in [shapes.md](shapes.md) — and the Shape 3 reference hook — still come from reading each package, not from running it. A setup counts as supported only when a recorded trace from it is among the fixed inputs.
+**Still unrecorded (must capture live fixtures before marking supported):**
+- LangGraph / LangChain, OpenAI Agents SDK, Pydantic AI, Strands, Microsoft Agent Framework, and LiteLLM gateway.
+- Custom central LLM gateway (`_AllLogs` `inference_request` and AWS S3 Iceberg proxy logs) with `x-client-request-id` + `1:N` `429` failover attempts.
+- Coding-agent SDK (`Claude Agent SDK`) and ephemeral dev-container OTel Collector adapter.
+- Shape 3 async BigLake Parquet reference hook and batch API recorded traces.
+- Empirical per-shape nullability matrix built from recorded traces (not package docs).
 
 ## Limits of content by reference
 
-- Standalone `execute_tool` spans in traces with zero model calls have no uploaded model-message JSONL to reconstruct arguments/results from (normal agent turns reconstruct `tool_calls` via `gen_ai.tool.call.id` under `ADR-016`), and aborted turns without a subsequent model call drop tool outputs/errors.
-- The exact file names of the upload contract are fixed when the reference hook is written and a recorded trace from it is among the fixed inputs.
-- **Measured live (`200` tiny JSONL files, `374 KB` total):** literal `WHERE _FILE_NAME = '...'` pruned to `1` file (`1.87 KB`, `100–136 ms` slot), **but dynamic `JOIN` on `e._FILE_NAME = s.messages_ref` scanned `100%` of all `200` files** (`374 KB`, `15.9s–24.9s` slot = `~80–125 ms` slot overhead per tiny file) on both plain external and BigLake tables — and even on Hive-partitioned BigLake tables when joining on `e.dt = s.span_dt`. Only a **static Hive partition predicate** (`WHERE dt = DATE '...'`) pruned GCS reads (`20/200` files, `37.5 KB`, `2.2s` slot). Flat per-call JSONL joined dynamically by `_FILE_NAME` therefore does not prune; Shape 3 requires BigLake Connections (for IAM), Hive date/hour partitioning with static horizon predicates, and/or micro-batched Parquet/Iceberg storage.
+- Standalone `execute_tool` spans in traces with zero model calls have no uploaded model-message payload; aborted turns must emit tool errors and execution-time `bq_eval.args_sha256` directly on `execute_tool` spans.
+- **Measured live (`200` tiny JSONL files, `374 KB`):** dynamic `_FILE_NAME` and dynamic Hive `e.dt = s.span_dt` joins scanned `100%` of files (`~80–125 ms` slot/file), whereas static Hive literal predicates (`WHERE dt = DATE '...'`) pruned reads. Shape 3 therefore mandates BigLake Connections + static Hive date/hour predicates + micro-batched Parquet/Iceberg at scale.
 
-## Outcome status
+## Settled architecture items (`ADR-029`–`ADR-033`)
 
-Decided for BQ Eval in `ADR-029` ([attributes.md](attributes.md), [gold.md](gold.md)): `outcome.status` adds `rejected | denied` alongside `guardrail.intervention` so policy blocks do not inflate error rates. Open: synchronizing the new values into the cross-repo standard (`EVAL-P11`).
+- **Hub region & residency (`ADR-031`):** Multi-region (`US` or `EU`) is the default Hub topology with strict per-domain location/CMEK alignment (never mix `US` and `us-east4` in one query domain); non-hub sovereign/single regions act as spokes via the Hub Transfer Port.
+- **Regulated WORM & RTBF (`ADR-031`):** Regulated snapshots export to PII-free **GCS Bucket Retention-Lock + CMEK** archives (not BigQuery tables alone) paired with per-subject crypto-shredding DEKs for RTBF. Open: shipping the exact Terraform/DDL archival template.
+- **Fast local/CI gates (`ADR-032`):** Sub-5s DevAI PR gates and offline optimizer sweeps run through the **Local/CI Eval Runner Port** (`CI_ONLY`), never polling BigQuery.
+- **Cross-cloud skew (`ADR-031`):** Hub views flag split traces whose remote spoke `transfer_watermark_utc` has not yet advanced as `remote_fragment_pending = true`.
+- **Outcome status (`ADR-029`):** `rejected | denied` added alongside `guardrail.intervention`. Open: syncing new enum values into cross-repo `EVAL-P11`.
 
-## Retention for regulated workloads
+## A step that fits no shape
 
-Decided in `ADR-029` ([gold.md](gold.md)): regulated workloads write immutable WORM Gold Audit Snapshots (point-in-time scorecard, hashes, calibration intervals, and reference-table snapshots) rather than forcing multi-year raw Bronze prompt retention. Open: exact retention-lock DDL and archive bucket lifecycle templates.
+Decided (`ADR-036`, `ADR-042`): the shape is decided by content and the kind of a span by its operation name, and a span that reports tokens above zero is a model call whatever that name is. A span with no GenAI operation and no tokens is an ordinary span: kept, counted, not flagged. `spans` keeps one row per `(trace_id, span_id)`, the latest arrival, and counts the rest. A model or tool call without content is kept in the text-free objects with a content-missing fact and is not scored (`ADR-036`); in the recorded traces no deployed service sends content in an accepted shape, so all `918` of its token spans are of that kind. Still open: a span whose operation name is outside the conventions and that reports no tokens, such as the `631` recorded `invoke_node` spans. Leaning: keep it and count it. Also open: a tool span that reports tokens above zero, which the recorded traces do not contain. Leaning: it stays a tool call and its tokens also appear as a model call.
 
-## Clouds extension
+## Clouds extension (remaining live benchmarks)
 
-Decided in `ADR-028` ([clouds.md](clouds.md), [design/clouds.md](../design/clouds.md)): the hub ingests text-free `model_calls`, `outcomes`, and open twins via a scheduled Hub Transfer Port (avoiding synchronous cross-cloud queries on live dashboards), executes judges via an In-Cloud Judge Port next to raw text in each non-GCP cloud, and correlates split traces across clouds in the hub on `(trace_id, parent_span_id)`. Open: throughput benchmarking of the Hub Transfer Port at high call volume, multi-cloud reference fixtures, and whether Gold add-ons should flag split traces whose remote cloud transfer has not arrived yet as incomplete.
+Architecture is decided in `ADR-028` and `ADR-031` ([clouds.md](clouds.md), [design/clouds.md](../design/clouds.md)). **Still unbenchmarked live:** Hub Transfer Port throughput (Omni `CTAS` `< 60 GiB` vs. S3 -> Interconnect/STS -> Hub GCS -> `LOAD DATA`) at multi-PiB/high-QPS scale, AWS Bedrock VPC In-Cloud Judge Port latency/cost, cross-cloud KMS-HMAC key-import rotation drill, and multi-cloud recorded reference fixtures.
