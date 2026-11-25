@@ -1,0 +1,4 @@
+[
+  {"name": "primary_outcome_id", "type": "STRING", "mode": "REQUIRED", "description": "Primary outcome_id from outcome.linked events inside [from_time, to_time)."},
+  {"name": "linked_outcome_id", "type": "STRING", "mode": "REQUIRED", "description": "Linked secondary outcome identifier lifted from workflow_events.payload_json (rows without linked_outcome_id are excluded)."}
+]

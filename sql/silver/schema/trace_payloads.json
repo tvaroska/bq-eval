@@ -1,0 +1,21 @@
+[
+  {"name": "trace_id", "type": "STRING", "mode": "REQUIRED", "description": "W3C 32-hex trace identifier of the content-bearing turn."},
+  {"name": "trace_owner_app_id", "type": "STRING", "mode": "NULLABLE", "description": "Owning application ID of the trace (NULL when unregistered)."},
+  {"name": "previous_interaction_id", "type": "STRING", "mode": "NULLABLE", "description": "bq_eval.previous_interaction_id marking stateful delta turns (leaves prior_history NULL)."},
+  {"name": "prior_history", "type": "JSON", "mode": "NULLABLE", "description": "Turns 1..k-1 message array as JSON (NULL on stateful delta turns or when absent, distinct from empty [])."},
+  {"name": "turn_prompt", "type": "JSON", "mode": "NULLABLE", "description": "Last input message before the first model output of the turn, with its role, as JSON."},
+  {"name": "turn_context", "type": "JSON", "mode": "NULLABLE", "description": "Ordered JSON array of tool, retrieval, and memory results in the turn tagged with span_id, tool_name, operation_name, and tools flags."},
+  {"name": "turn_output", "type": "JSON", "mode": "NULLABLE", "description": "Arguments of the last sends_external_reply tool call, else the last root-agent model output requesting no tool, as JSON."},
+  {"name": "step_outputs", "type": "JSON", "mode": "NULLABLE", "description": "Ordered JSON array of per-step structured outputs keyed by span_id and optional nudge_id."},
+  {"name": "media_uris", "type": "JSON", "mode": "NULLABLE", "description": "JSON array of in-place storage URI objects carrying uri, document_bytes, page_count, and attachment_sha256."},
+  {"name": "system_instructions", "type": "JSON", "mode": "NULLABLE", "description": "Inline system instructions from the first root-agent model call as JSON (NULL in Shape 3 or when absent)."},
+  {"name": "system_instructions_ref", "type": "STRING", "mode": "NULLABLE", "description": "Shape-3 gen_ai.system_instructions_ref address (kept as an address without BigLake dereferencing)."},
+  {"name": "tool_definitions", "type": "JSON", "mode": "NULLABLE", "description": "Inline tool definitions from the first root-agent model call as JSON (NULL in Shape 3 or when absent)."},
+  {"name": "tool_definitions_ref", "type": "STRING", "mode": "NULLABLE", "description": "Shape-3 gen_ai.tool.definitions_ref address (kept as an address without BigLake dereferencing)."},
+  {"name": "prior_history_read_whole", "type": "BOOL", "mode": "NULLABLE", "description": "TRUE when inline or Shape-3 input ref resolved completely; FALSE on missing ref; NULL when prior_history is NULL."},
+  {"name": "turn_prompt_read_whole", "type": "BOOL", "mode": "NULLABLE", "description": "TRUE when inline or Shape-3 input ref resolved completely; FALSE on missing ref; NULL when turn_prompt is NULL."},
+  {"name": "turn_context_read_whole", "type": "BOOL", "mode": "NULLABLE", "description": "TRUE when all context-contributing calls resolved completely; FALSE on any missing ref; NULL when turn_context is NULL."},
+  {"name": "turn_output_read_whole", "type": "BOOL", "mode": "NULLABLE", "description": "TRUE when inline or Shape-3 output ref resolved completely; FALSE on missing ref; NULL when turn_output is NULL."},
+  {"name": "step_outputs_read_whole", "type": "BOOL", "mode": "NULLABLE", "description": "TRUE when all step output refs resolved completely; FALSE on any missing ref; NULL when step_outputs is NULL."},
+  {"name": "labels", "type": "JSON", "mode": "NULLABLE", "description": "Registered slice-only attributes JSON object."}
+]

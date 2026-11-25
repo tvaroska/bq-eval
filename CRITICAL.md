@@ -3,7 +3,7 @@
 Break one of these and the numbers this repository reports stop being trustworthy.
 
 1. **Silver holds counts and facts, never prices, defaults, or a pass.**
-   - Silver normalizes telemetry and SCD-2 refs (`app_registry`, `tools`, `skill_registry`) in BigQuery ([spec/silver.md](spec/silver.md)) across separate `silver_open` and `silver_restricted` datasets (split compaction SAs, per-BU RAPs on `silver_restricted`, `outcome.subject` excluded from `outcomes_open`, zero Shape-3 scans from `*_open`). `*_open` carries no argument hashes or file digests. The high-volume profile is design only.
+   - Silver normalizes telemetry and SCD-2 refs (`app_registry`, `tools`, `skill_registry`) in BigQuery ([spec/silver.md](spec/silver.md)) across separate `silver_open` and `silver_restricted` datasets (split compaction SAs, per-BU caller filter in `silver_restricted` functions with RAPs on stored tables, `outcome.subject` excluded from `outcomes_open`, zero Shape-3 scans from `*_open`). `*_open` carries no argument hashes or file digests. The high-volume profile is design only.
    - Missing values stay `NULL` and are counted (`sampling_probability = NULL` never defaults to `1.0`). Silver publishes the `user.id` it saw; "verified" and application identity come only from where a record landed, never from an attribute, and Gold applies the tier rule. Self-reported `bq_eval.app_failed` counts against the turn while structured `guardrail.intervention` (`control_id`/`layer`/`action`) stays separate; self-reported pass or `protected_block_sha256` counts for nothing without `skill_registry`.
 
 2. **Detective SQL runs before judges — Preventive blocking lives in request-path gateways.**
