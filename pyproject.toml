@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "bq-eval"
-version = "0.4.1"
+version = "0.6.0"
 description = "AI agent evaluation without ETL: BigQuery views check every trace with rules, debias sampled LLM scores against labeled cases, and fold judge spend into cost per verified outcome."
 readme = "README.md"
 license = "Apache-2.0"
