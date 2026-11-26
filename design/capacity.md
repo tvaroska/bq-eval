@@ -6,25 +6,27 @@ tags: [bq-eval, silver, capacity, extension]
 
 # Extension: capacity and governance
 
-> How gateway `requests`, dedicated capacity pools, and scoped model governance are built alongside [Silver](silver.md) without bloating the single-cloud core. Contract: [spec/capacity.md](../spec/capacity.md).
+> How custom-proxy `requests`, 3-pool `FOCUS 1.2` chargeback, and scoped model governance are built alongside [Silver](silver.md) without bloating the core or breaking `ADR-001` repository separation. Contract: [spec/capacity.md](../spec/capacity.md).
 
-## `requests` view and `1:N` failover reconciliation
+## Custom Proxy Bronze Contract, `requests` view & `1:N` failover reconciliation
 
-`requests` is a SQL view (or incremental partitioned table in `enterprise` mode) over gateway or model-server request logs, emitting one row per upstream attempt keyed by `(request_id / span_id, attempt_index)`.
+`requests` is a SQL view (or bounded incremental partitioned table in `enterprise` mode) over central LLM gateway or model-server request logs (`_AllLogs` `inference_request` on GCP, S3 Parquet/Iceberg proxy logs on AWS), emitting one row per upstream attempt keyed by **`(x-client-request-id, span_id, attempt_index)`**:
 
-- **Why `1:N` matters:** When a gateway hits HTTP `429` on Provisioned Throughput and fails over to Priority PayGo (or retries across endpoints), one agent `model_calls` span triggers `N` upstream `requests`.
-- **No fan-out join:** Gold collapses `requests` to one summary row per `(request_id / span_id)` before joining `model_calls` — preserving total billed tokens across attempts, `attempt_count`, `throttled_attempt_count`, `final_serving_tier`, `upstream_endpoint_location`, `billing_project_id`, `ttft_ms`, `thought_signature_present`, and attested OBO identity where present.
-- **3P serving-tier fallback:** When a third-party provider omits `TrafficType` response metadata, `requests` derives fulfillment tier deterministically from gateway admission headers and pool bindings, setting `tier_source = 'inferred'` vs. `'server'`.
-- **Cache-write pricing tiers:** `requests` and `model_calls` preserve optional `5m` vs. `1h` ephemeral cache-write token splits alongside standard `gen_ai.usage.cache_write.input_tokens` so Gold prices multi-tier provider caches accurately.
+- **Mandatory correlation & caller ownership:** Because frameworks omit `gen_ai.response.id` and failed `429` legs have none, the gateway propagates `x-client-request-id` + `traceparent` (`trace_id`, `span_id`) across every attempt and stamps caller/desk `trace_owner_app_id` (taking precedence over the proxy's own root service name).
+- **Option A / Option B neutrality (`state_mode`):** Carries `state_mode` (`stateless_chat | stateful_cmek_platform | stateful_cmek_gateway | zdr_stateless`) so thin stateless proxies (Option A) and dual-lane stateful `/interactions` proxies (Option B) emit identical Silver/Gold and `FOCUS 1.2` chargeback records.
+- **Price per attempt, then collapse:** Gold prices **each `requests` attempt individually** (using its actual `serving_tier`, `upstream_endpoint_location`, `>200K` cliffs keyed on `input_tokens + cache_read_tokens`, weighted burndown units `1x/0.1x/4x` vs. `2x/0.2x/7.5x`, and `5m`/`1h` cache splits) and collapses to one summary per `(x-client-request-id, span_id)` before joining `model_calls`. `gateway_failover_attempts` stays strictly separated from illegal SDK `caller_retry_count` storms (`attempts > 1`).
+- **Honest 3P `inferred_ambiguous` tiering:** When `emits_traffic_type = false` on a third-party server where shared pools can spill downstream without signaling it, `requests` emits `tier_source = 'inferred_ambiguous'` (never falsely claiming deterministic `'inferred'`), leaving aggregate 3P PT-vs-PayGo split to Cloud Billing reconciliation.
 
-## Scoped SCD-2 governance tables
+## Scoped SCD-2 governance & 3-pool `FOCUS 1.2` reconciliation
 
-`capacity_pools`, `capacity_allocations`, and `allowed_models` carry `(effective_from, effective_to)` validity windows (`NULL` end = active) joined on `call.start_time`:
+`capacity_pools`, `capacity_allocations`, and `allowed_models` enforce mandatory SCD-2 `(effective_from, effective_to)` windows joined at `call.start_time`:
 
-- **`capacity_pools`:** Maps split commercial reservation orders (`order_id`) to their shared FCFS `runtime_pool_id` alongside `(cloud, scope_key, model, region, committed_units, expiry_date)`.
-- **`capacity_allocations`:** Maps `(pool_id, consumer_app_or_unit)` to `funded_share` and `risk_tier` (`RL-1`..`RL-5`) for `FOCUS 1.2` multi-pool attribution.
-- **`allowed_models`:** Scoped by `(provider, model, environment, business_unit)` with `is_allowed`, `zdr_allowed`, `lifecycle_tier` (`short_term_ga | long_term_ga | preview`), and `eol_date`. Silver flags policy violations on `model_calls`; Gold enforces `allowed_models` as a deterministic governance gate.
+- **`capacity_pools` & merged FCFS `order_id` attribution:** Maps individual commercial `order_id`s (`renewal_type = FIXED_TERM | AUTO_RENEW`, `expiry_date`, `committed_units`, `unit_rate`, `min_cache_tokens`, `supports_priority_paygo`, `emits_traffic_type`) to their shared FCFS `runtime_pool_id`. Gold attributes merged-pool usage **pro-rata by `committed_units`** (or explicit priority policy) so expiring fixed-term renewal exposure stays isolated from auto-renew orders.
+- **3-pool spillover & Cloud Billing invoice reconciliation:** Splits spend explicitly across (1) **Base PT** (active-hours funded share, off-peak backfill credit, unallocated idle pool), (2) **`1.8x` Priority PayGo spillover**, and (3) **Standard/Flex PayGo**, and reconciles modeled Gold totals against Cloud Billing `FOCUS 1.2` invoice/net-realized exports (capturing unmapped `workload_id = NULL` subscription rows and reporting reconciliation delta %).
+- **Extended `allowed_models` & sanitized LOB lifecycle export:** Scoped by `(provider, model, region, environment, business_unit, risk_tier, app_id)` with `is_allowed`, `invokable_status` (`active | drain | circuit_broken`), `zdr_allowed`, `lifecycle_tier`, `eol_date`, `deprecation_notice_days`, `migration_target_model`, and `min_cache_tokens`. Publishes a sanitized LOB lifecycle export (zero raw project/order IDs).
 
-## Sub-minute burst physics vs. BigQuery rollups
+## Sub-minute `burst_metrics_1m` & bidirectional `bq-eval` <-> `capacity` contract
 
-Sub-minute weighted burndown (`1s`/`10s` for 1P pools, `30s`/`60s` for 3P pools) and `<1m` admission guards live at the gateway or OTel Collector metrics Port, which emits `1m` rollups to BigQuery rather than polling raw spans every second. Gold cost reconciles `1m`/hourly rollups with `FOCUS 1.2` billing exports and publishes the versioned payload consumed by the sibling `capacity` repository.
+Sub-minute weighted burndown (`1s`/`10s` for 1P; `30s`/`60s` for 3P), involuntary vs. burst spillover counters, and `~2 ms` live `429` shedding run inside the **Preventive Request-Path Enforcement Port** (gateway/collector), writing the fixed `burst_metrics_1m` BigQuery rollup schema (`minute_utc`, `runtime_pool_id`, `trace_owner_app_id`, `risk_tier`, `window_sec`, `weighted_burndown_units`, `committed_capacity_units`, `peak_burst_ratio`, `pt/priority/standard/involuntary_spillover_requests`, `http_429_count`, `gateway_failover_count`, `caller_retry_count`).
+
+Per `ADR-001`, `bq-eval` never actuates live shedding: it exports hourly `FOCUS 1.2` chargeback + `burst_metrics_1m` + `RL-1`..`RL-5` risk tiers to `capacity`, which computes Newsvendor PT sizing and gateway admission policies.
