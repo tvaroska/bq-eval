@@ -44,6 +44,7 @@ if [[ $# -eq 0 ]]; then
   uv run --no-sync bq-eval bootstrap --mode light --project-id demo-proj >/dev/null
   uv run --no-sync bq-eval bootstrap --mode full --project-id demo-proj >/dev/null
   uv run --no-sync bq-eval bootstrap --mode hybrid --project-id demo-proj >/dev/null
+  uv run --no-sync bq-eval bootstrap --mode silver --project-id demo-proj >/dev/null
   uv run --no-sync bq-eval capacity-export --corpus m2-live >/dev/null
   uv run --no-sync python -m bq_eval.runner.engine.loader --manifest tests/fixtures/silver/manifest.json --max-seconds 5.0 >/dev/null
   uv run --no-sync python examples/run_showcase_demo.py >/dev/null

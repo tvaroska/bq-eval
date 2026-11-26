@@ -63,9 +63,11 @@ class _ScopeBindings:
     aliases: frozenset[str]
     qualified: Mapping[tuple[str, str], str]
     implicit: Mapping[str, str | None]
+    unnest_aliases: frozenset[str] = frozenset()
+    unnest_offsets: Mapping[str, str] = ()  # type: ignore[assignment]
 
 
-_EMPTY_SCOPE = _ScopeBindings(frozenset(), {}, {})
+_EMPTY_SCOPE = _ScopeBindings(frozenset(), {}, {}, frozenset(), {})
 
 
 def _merge_scope(outer: _ScopeBindings, local: _ScopeBindings) -> _ScopeBindings:
@@ -73,10 +75,14 @@ def _merge_scope(outer: _ScopeBindings, local: _ScopeBindings) -> _ScopeBindings
     merged_qualified.update(local.qualified)
     merged_implicit = dict(outer.implicit)
     merged_implicit.update(local.implicit)
+    merged_offsets = dict(outer.unnest_offsets)
+    merged_offsets.update(local.unnest_offsets)
     return _ScopeBindings(
         aliases=outer.aliases | local.aliases,
         qualified=merged_qualified,
         implicit=merged_implicit,
+        unnest_aliases=outer.unnest_aliases | local.unnest_aliases,
+        unnest_offsets=merged_offsets,
     )
 
 
@@ -89,10 +95,10 @@ def _rewrite_table_node(
     flat_to_original: dict[str, tuple[str | None, str]],
 ) -> exp.Table:
     if isinstance(node.this, exp.Anonymous):
-        return node.copy()
+        return node
     parts = _extract_table_parts(node)
     if parts is None:
-        return node.copy()
+        return node
     dataset, obj = parts
     if dataset is None and not node.catalog:
         if default_dataset and qualify_datasets and obj.lower() not in active_ctes:
@@ -100,14 +106,14 @@ def _rewrite_table_node(
             flat_to_original[flat_name] = (default_dataset, obj)
             rebuilt = exp.Table(this=exp.to_identifier(flat_name, quoted=False))
             if node.args.get("alias") is not None:
-                rebuilt.set("alias", node.args["alias"].copy())
+                rebuilt.set("alias", node.args["alias"])
             return rebuilt
-        return node.copy()
+        return node
     flat_name = f"{dataset}__{obj}" if (qualify_datasets and dataset) else obj
     flat_to_original[flat_name] = (dataset, obj)
     rebuilt = exp.Table(this=exp.to_identifier(flat_name, quoted=False))
     if node.args.get("alias") is not None:
-        rebuilt.set("alias", node.args["alias"].copy())
+        rebuilt.set("alias", node.args["alias"])
     return rebuilt
 
 
@@ -127,15 +133,12 @@ def _rewrite_tables_scoped(
             active_ctes=active_ctes,
             flat_to_original=flat_to_original,
         )
-    cloned: exp.Expr = node.copy()
     next_ctes = set(active_ctes)
-    with_clause = cloned.args.get("with_")
+    with_clause = node.args.get("with_")
     if isinstance(with_clause, exp.With):
-        new_ctes: list[exp.CTE] = []
         for cte in with_clause.expressions:
             if isinstance(cte, exp.CTE) and cte.this is not None:
-                rewritten_cte = cte.copy()
-                rewritten_cte.set(
+                cte.set(
                     "this",
                     _rewrite_tables_scoped(
                         cte.this,
@@ -145,20 +148,14 @@ def _rewrite_tables_scoped(
                         flat_to_original=flat_to_original,
                     ),
                 )
-                new_ctes.append(rewritten_cte)
                 if cte.alias:
                     next_ctes.add(cte.alias.lower())
-            else:
-                new_ctes.append(cte)
-        new_with = with_clause.copy()
-        new_with.set("expressions", new_ctes)
-        cloned.set("with_", new_with)
     scoped_ctes = frozenset(next_ctes)
-    for key, value in list(cloned.args.items()):
+    for key, value in list(node.args.items()):
         if key == "with_":
             continue
         if isinstance(value, exp.Expr):
-            cloned.set(
+            node.set(
                 key,
                 _rewrite_tables_scoped(
                     value,
@@ -169,7 +166,7 @@ def _rewrite_tables_scoped(
                 ),
             )
         elif isinstance(value, list):
-            cloned.set(
+            node.set(
                 key,
                 [
                     _rewrite_tables_scoped(
@@ -184,7 +181,7 @@ def _rewrite_tables_scoped(
                     for item in value
                 ],
             )
-    return cloned
+    return node
 
 
 def _rewrite_qualified_tables(
@@ -192,13 +189,14 @@ def _rewrite_qualified_tables(
     *,
     qualify_datasets: bool,
     default_dataset: str | None = None,
+    preserved_tables: frozenset[str] = frozenset(),
 ) -> tuple[exp.Expr, dict[str, tuple[str | None, str]]]:
     flat_to_original: dict[str, tuple[str | None, str]] = {}
     rewritten = _rewrite_tables_scoped(
-        ast_node,
+        ast_node.copy(),
         qualify_datasets=qualify_datasets,
         default_dataset=default_dataset,
-        active_ctes=frozenset(),
+        active_ctes=preserved_tables,
         flat_to_original=flat_to_original,
     )
     return rewritten, flat_to_original
@@ -223,6 +221,51 @@ def _record_unaliased_table(
         implicit[obj_key] = None
 
 
+def _unnest_array_expr(unnest: exp.Unnest) -> exp.Expr:
+    target = unnest.expressions[0].copy() if unnest.expressions else exp.Literal.string("[]")
+    if isinstance(target, exp.Anonymous) and target.name.upper() in {
+        "JSON_QUERY_ARRAY",
+        "JSON_EXTRACT_ARRAY",
+        "JSON_VALUE_ARRAY",
+        "JSON_EXTRACT_STRING_ARRAY",
+    }:
+        if len(target.expressions) >= 2:
+            extracted = exp.Anonymous(
+                this="BQ_JSON_QUERY",
+                expressions=[target.expressions[0].copy(), target.expressions[1].copy()],
+            )
+        else:
+            extracted = target.expressions[0].copy()
+        return exp.Anonymous(this="BQ_JSON_ENSURE_ARRAY", expressions=[extracted])
+    if isinstance(target, (exp.JSONValueArray, exp.JSONExtractArray)) and target.this is not None:
+        raw_path = (
+            target.expression.sql("bigquery").strip("'") if target.expression is not None else "$"
+        )
+        if raw_path and raw_path != "$":
+            extracted = exp.Anonymous(
+                this="BQ_JSON_QUERY",
+                expressions=[target.this.copy(), exp.Literal.string(raw_path)],
+            )
+        else:
+            extracted = target.this.copy()
+        return exp.Anonymous(this="BQ_JSON_ENSURE_ARRAY", expressions=[extracted])
+    return exp.Anonymous(this="BQ_JSON_ENSURE_ARRAY", expressions=[target])
+
+
+def _extract_unnest_alias_and_offset(unnest: exp.Unnest) -> tuple[str | None, str | None]:
+    alias_name: str | None = unnest.alias or None
+    alias_node = unnest.args.get("alias")
+    if alias_name is None and isinstance(alias_node, exp.TableAlias) and alias_node.columns:
+        alias_name = alias_node.columns[0].name
+    offset_expr = unnest.args.get("offset")
+    offset_name: str | None = None
+    if isinstance(offset_expr, exp.Identifier):
+        offset_name = offset_expr.name
+    elif isinstance(offset_expr, exp.Expr):
+        offset_name = offset_expr.alias or offset_expr.name or None
+    return alias_name, offset_name
+
+
 def _collect_local_scope(
     select_node: exp.Select,
     flat_to_original: Mapping[str, tuple[str | None, str]],
@@ -230,6 +273,8 @@ def _collect_local_scope(
     aliases: set[str] = set()
     qualified: dict[tuple[str, str], str] = {}
     implicit: dict[str, str | None] = {}
+    unnest_aliases: set[str] = set()
+    unnest_offsets: dict[str, str] = {}
     sources: list[exp.Expr] = []
     from_clause = select_node.args.get("from_")
     if isinstance(from_clause, exp.From) and from_clause.this is not None:
@@ -238,16 +283,32 @@ def _collect_local_scope(
         if isinstance(join, exp.Join) and join.this is not None:
             sources.append(join.this)
     for src in sources:
+        if isinstance(src, exp.Unnest):
+            alias_name, offset_name = _extract_unnest_alias_and_offset(src)
+            if alias_name:
+                aliases.add(alias_name.lower())
+                unnest_aliases.add(alias_name.lower())
+                if offset_name:
+                    unnest_offsets[offset_name.lower()] = alias_name
+            continue
         if src.alias:
             aliases.add(src.alias.lower())
         elif isinstance(src, exp.Table) and src.name:
             aliases.add(src.name.lower())
             _record_unaliased_table(src.name, flat_to_original, qualified, implicit)
-    return _ScopeBindings(frozenset(aliases), qualified, implicit)
+    return _ScopeBindings(
+        frozenset(aliases),
+        qualified,
+        implicit,
+        frozenset(unnest_aliases),
+        unnest_offsets,
+    )
 
 
 def _extract_dotted_parts(node: exp.Expr) -> list[str] | None:
     if isinstance(node, exp.Column):
+        if isinstance(node.this, exp.Star):
+            return None
         parts = [p for p in (node.catalog, node.db, node.table, node.name) if p]
         return parts or None
     if isinstance(node, exp.Dot) and isinstance(node.expression, exp.Identifier):
@@ -268,6 +329,12 @@ def _build_table_or_struct_expr(table_name: str, rest: list[str]) -> exp.Expr:
 
 
 def _rewrite_dotted_path(parts: list[str], *, scope: _ScopeBindings) -> exp.Expr:
+    if parts[0].lower() in scope.unnest_aliases:
+        val_col = exp.Column(this=exp.to_identifier("value"), table=exp.to_identifier(parts[0]))
+        return exp.Anonymous(
+            this="BQ_STRUCT_FIELD",
+            expressions=[val_col, exp.Literal.string(".".join(parts[1:]))],
+        )
     if len(parts) >= 3:
         flat = scope.qualified.get((parts[0].lower(), parts[1].lower()))
         if flat is not None:
@@ -287,20 +354,31 @@ def _rewrite_dotted_path(parts: list[str], *, scope: _ScopeBindings) -> exp.Expr
 def _rewrite_from_or_join_source(
     source: exp.Expr,
     *,
+    scope: _ScopeBindings = _EMPTY_SCOPE,
     flat_to_original: Mapping[str, tuple[str | None, str]],
 ) -> exp.Expr:
+    if isinstance(source, exp.Unnest):
+        alias_name, _ = _extract_unnest_alias_and_offset(source)
+        arr_expr = _rewrite_struct_paths_in_place(
+            _unnest_array_expr(source),
+            scope=scope,
+            flat_to_original=flat_to_original,
+        )
+        return exp.Table(
+            this=exp.Anonymous(this="json_each", expressions=[arr_expr]),
+            alias=exp.TableAlias(this=exp.to_identifier(alias_name)) if alias_name else None,
+        )
     if isinstance(source, exp.Subquery) and source.this is not None:
-        rebuilt = source.copy()
-        rebuilt.set(
+        source.set(
             "this",
-            _rewrite_struct_paths(
+            _rewrite_struct_paths_in_place(
                 source.this,
                 scope=_EMPTY_SCOPE,
                 flat_to_original=flat_to_original,
             ),
         )
-        return rebuilt
-    return _rewrite_struct_paths(
+        return source
+    return _rewrite_struct_paths_in_place(
         source,
         scope=_EMPTY_SCOPE,
         flat_to_original=flat_to_original,
@@ -315,26 +393,29 @@ def _rewrite_join_item(
 ) -> object:
     if not isinstance(item, exp.Join):
         return item
-    new_join = item.copy()
-    if new_join.this is not None:
-        new_join.set(
+    was_unnest = isinstance(item.this, exp.Unnest)
+    if item.this is not None:
+        item.set(
             "this",
             _rewrite_from_or_join_source(
-                new_join.this,
+                item.this,
+                scope=next_scope,
                 flat_to_original=flat_to_original,
             ),
         )
-    for jkey, jval in list(new_join.args.items()):
+    if was_unnest and item.args.get("side") and item.args.get("on") is None:
+        item.set("on", exp.Boolean(this=True))
+    for jkey, jval in list(item.args.items()):
         if jkey != "this" and isinstance(jval, exp.Expr):
-            new_join.set(
+            item.set(
                 jkey,
-                _rewrite_struct_paths(
+                _rewrite_struct_paths_in_place(
                     jval,
                     scope=next_scope,
                     flat_to_original=flat_to_original,
                 ),
             )
-    return new_join
+    return item
 
 
 def _rewrite_struct_child(
@@ -344,14 +425,14 @@ def _rewrite_struct_child(
     flat_to_original: Mapping[str, tuple[str | None, str]],
 ) -> object:
     if isinstance(value, exp.Expr):
-        return _rewrite_struct_paths(
+        return _rewrite_struct_paths_in_place(
             value,
             scope=scope,
             flat_to_original=flat_to_original,
         )
     if isinstance(value, list):
         return [
-            _rewrite_struct_paths(
+            _rewrite_struct_paths_in_place(
                 item,
                 scope=scope,
                 flat_to_original=flat_to_original,
@@ -369,30 +450,27 @@ def _rewrite_select_struct_paths(
     scope: _ScopeBindings,
     flat_to_original: Mapping[str, tuple[str | None, str]],
 ) -> exp.Select:
-    cloned = node.copy()
     next_scope = _merge_scope(scope, _collect_local_scope(node, flat_to_original))
-    for key, value in list(cloned.args.items()):
+    for key, value in list(node.args.items()):
         if key == "with_" and isinstance(value, exp.With):
-            cloned.set(
+            node.set(
                 key,
-                _rewrite_struct_paths(
+                _rewrite_struct_paths_in_place(
                     value,
                     scope=_EMPTY_SCOPE,
                     flat_to_original=flat_to_original,
                 ),
             )
         elif key == "from_" and isinstance(value, exp.From) and value.this is not None:
-            new_from = value.copy()
-            new_from.set(
+            value.set(
                 "this",
                 _rewrite_from_or_join_source(
                     value.this,
                     flat_to_original=flat_to_original,
                 ),
             )
-            cloned.set(key, new_from)
         elif key == "joins" and isinstance(value, list):
-            cloned.set(
+            node.set(
                 key,
                 [
                     _rewrite_join_item(
@@ -403,8 +481,38 @@ def _rewrite_select_struct_paths(
                     for item in value
                 ],
             )
+        elif key == "expressions" and isinstance(value, list):
+            rebuilt_exprs: list[object] = []
+            for item in value:
+                if (
+                    isinstance(item, exp.Column)
+                    and not item.table
+                    and not item.db
+                    and not item.catalog
+                    and not isinstance(item.this, exp.Star)
+                    and (
+                        item.name.lower() in next_scope.unnest_aliases
+                        or item.name.lower() in next_scope.unnest_offsets
+                    )
+                ):
+                    orig_name = item.name
+                    rewritten_col = _rewrite_struct_paths_in_place(
+                        item,
+                        scope=next_scope,
+                        flat_to_original=flat_to_original,
+                    )
+                    rebuilt_exprs.append(exp.alias_(rewritten_col, orig_name))
+                else:
+                    rebuilt_exprs.append(
+                        _rewrite_struct_child(
+                            item,
+                            scope=next_scope,
+                            flat_to_original=flat_to_original,
+                        )
+                    )
+            node.set(key, rebuilt_exprs)
         else:
-            cloned.set(
+            node.set(
                 key,
                 _rewrite_struct_child(
                     value,
@@ -412,7 +520,61 @@ def _rewrite_select_struct_paths(
                     flat_to_original=flat_to_original,
                 ),
             )
-    return cloned
+    return node
+
+
+def _rewrite_struct_paths_in_place(
+    node: exp.Expr,
+    *,
+    scope: _ScopeBindings = _EMPTY_SCOPE,
+    flat_to_original: Mapping[str, tuple[str | None, str]] | None = None,
+) -> exp.Expr:
+    orig_map: Mapping[str, tuple[str | None, str]] = flat_to_original or {}
+    if isinstance(node, (exp.Column, exp.Dot)):
+        if (
+            isinstance(node, exp.Column)
+            and not node.table
+            and not node.db
+            and not node.catalog
+            and not isinstance(node.this, exp.Star)
+        ):
+            lower = node.name.lower()
+            if lower in scope.unnest_aliases:
+                return exp.Column(
+                    this=exp.to_identifier("value"),
+                    table=exp.to_identifier(node.name),
+                )
+            if lower in scope.unnest_offsets:
+                src_alias = scope.unnest_offsets[lower]
+                return exp.Cast(
+                    this=exp.Column(
+                        this=exp.to_identifier("key"),
+                        table=exp.to_identifier(src_alias),
+                    ),
+                    to=exp.DataType.build("INTEGER", dialect="sqlite"),
+                )
+        parts = _extract_dotted_parts(node)
+        if parts is not None and len(parts) >= 2:
+            return _rewrite_dotted_path(parts, scope=scope)
+        if isinstance(node, exp.Column):
+            return node
+    if isinstance(node, exp.Select):
+        return _rewrite_select_struct_paths(
+            node,
+            scope=scope,
+            flat_to_original=orig_map,
+        )
+    for key, value in list(node.args.items()):
+        child_scope = _EMPTY_SCOPE if key == "with_" else scope
+        node.set(
+            key,
+            _rewrite_struct_child(
+                value,
+                scope=child_scope,
+                flat_to_original=orig_map,
+            ),
+        )
+    return node
 
 
 def _rewrite_struct_paths(
@@ -421,28 +583,8 @@ def _rewrite_struct_paths(
     scope: _ScopeBindings = _EMPTY_SCOPE,
     flat_to_original: Mapping[str, tuple[str | None, str]] | None = None,
 ) -> exp.Expr:
-    orig_map: Mapping[str, tuple[str | None, str]] = flat_to_original or {}
-    if isinstance(node, (exp.Column, exp.Dot)):
-        parts = _extract_dotted_parts(node)
-        if parts is not None and len(parts) >= 2:
-            return _rewrite_dotted_path(parts, scope=scope)
-        if isinstance(node, exp.Column):
-            return node.copy()
-    if isinstance(node, exp.Select):
-        return _rewrite_select_struct_paths(
-            node,
-            scope=scope,
-            flat_to_original=orig_map,
-        )
-    cloned: exp.Expr = node.copy()
-    for key, value in list(cloned.args.items()):
-        child_scope = _EMPTY_SCOPE if key == "with_" else scope
-        cloned.set(
-            key,
-            _rewrite_struct_child(
-                value,
-                scope=child_scope,
-                flat_to_original=orig_map,
-            ),
-        )
-    return cloned
+    return _rewrite_struct_paths_in_place(
+        node.copy(),
+        scope=scope,
+        flat_to_original=flat_to_original,
+    )

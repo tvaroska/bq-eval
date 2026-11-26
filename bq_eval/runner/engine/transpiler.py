@@ -12,6 +12,8 @@ from datetime import UTC, datetime, timedelta
 import sqlglot
 from sqlglot import exp
 
+from bq_eval.runner.engine.silver_udfs import register_silver_sqlite_udfs, rewrite_silver_bq_expr
+
 SqliteValue = str | int | float | bytes | None
 
 _TZ_SUFFIX_RE = re.compile(r"\s+UTC$", re.IGNORECASE)
@@ -199,7 +201,8 @@ def _sqlite_timestamp_diff_ms(later: str | None, earlier: str | None) -> float |
 def _sqlite_format_timestamp(fmt: str, ts: str | None) -> str | None:
     if ts is None:
         return None
-    return _parse_utc_dt(ts).strftime(fmt)
+    py_fmt = fmt.replace("%E6S", "%S.%f").replace("%E3S", "%S.%f")
+    return _parse_utc_dt(ts).strftime(py_fmt)
 
 
 _TIMESTAMP_TRUNC_UNITS: frozenset[str] = frozenset(
@@ -343,7 +346,10 @@ def _sqlite_safe_cast_int64(value: object) -> int | None:
     if isinstance(value, float):
         return round(value) if math.isfinite(value) else None
     try:
-        return int(str(value).strip())
+        text = str(value).strip()
+        if text.lower().startswith("0x"):
+            return int(text, 16)
+        return int(text)
     except ValueError:
         return None
 
@@ -517,6 +523,11 @@ def _new_sqlite_bq_conn(
     conn.create_aggregate("BQ_APPROX_QUANTILE", 3, _SQLiteQuantileAgg)  # type: ignore[arg-type]
     conn.create_aggregate("BQ_ARRAY_FIRST", 5, _SQLiteArrayFirstAgg)  # type: ignore[arg-type]
     conn.create_aggregate("BQ_STRING_AGG_ASC", 3, _SQLiteStringAggAsc)  # type: ignore[arg-type]
+    register_silver_sqlite_udfs(
+        conn,
+        parse_tokens=_parse_json_path_tokens,
+        walk_tokens=_walk_json_tokens,
+    )
     return conn
 
 
@@ -832,6 +843,9 @@ def _rewrite_bq_scalar(node: exp.Expr) -> exp.Expr | None:
 
 
 def _rewrite_bq_node_for_sqlite(node: exp.Expr) -> exp.Expr:
+    silver_rewritten = rewrite_silver_bq_expr(node, json_path_fn=_json_path_expr)
+    if silver_rewritten is not None:
+        return silver_rewritten
     for helper in (_rewrite_bq_scalar, _rewrite_bq_string_and_agg, _rewrite_bq_temporal):
         rewritten = helper(node)
         if rewritten is not None:

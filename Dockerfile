@@ -13,7 +13,12 @@ RUN uv sync --frozen --no-install-project --no-dev --no-config
 
 COPY bq_eval/ bq_eval/
 COPY sql/ sql/
-COPY benchmarks/results/m2_live_receipt.json benchmarks/results/SHA256SUMS benchmarks/results/
+COPY benchmarks/results/m2_live_receipt.json \
+     benchmarks/results/m16_live_cloud_proof.json \
+     benchmarks/results/m16_anonymized_traces_100.jsonl \
+     benchmarks/results/bq_dry_run_receipt.json \
+     benchmarks/results/SHA256SUMS \
+     benchmarks/results/
 RUN uv sync --frozen --no-dev --no-config \
   && rm -rf /usr/local/lib/python3.12/site-packages/pip* \
             /usr/local/lib/python3.12/site-packages/setuptools* \

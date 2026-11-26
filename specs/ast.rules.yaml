@@ -74,7 +74,7 @@ rule:
 id: core-package-dependencies
 language: Python
 severity: error
-message: "Package violation (core/): bq_eval/core/ must not import bq_eval.{finops,deploy,runner,demo,cli}."
+message: "Package violation (core/): bq_eval/core/ must not import bq_eval.{finops,deploy,runner,upload,demo,cli}."
 files:
   - "**/bq_eval/core/**/*.py"
 metadata:
@@ -84,6 +84,7 @@ metadata:
     - "from bq_eval.demo.pipeline import run_showcase_pipeline"
     - "import bq_eval.deploy.engine.bootstrap"
     - "from bq_eval.runner.engine.loader import OfflineSqlRunner"
+    - "from bq_eval.upload.engine.hook import AsyncReferenceUploadHook"
     - "from ...demo import loadgen"
     - "from ....runner import engine"
     - "from bq_eval import cli"
@@ -94,16 +95,16 @@ metadata:
 rule:
   any:
     - kind: import_statement
-      regex: "(?s)^import\\s+(.+,\\s*)*bq_eval\\.(finops|deploy|runner|demo|cli)(\\b|\\.)"
+      regex: "(?s)^import\\s+(.+,\\s*)*bq_eval\\.(finops|deploy|runner|upload|demo|cli)(\\b|\\.)"
     - kind: import_from_statement
-      regex: "(?s)^from\\s+(bq_eval\\.|\\.{3,}\\s*)(finops|deploy|runner|demo|cli)(\\b|\\.)"
+      regex: "(?s)^from\\s+(bq_eval\\.|\\.{3,}\\s*)(finops|deploy|runner|upload|demo|cli)(\\b|\\.)"
     - kind: import_from_statement
-      regex: "(?s)^from\\s+(bq_eval|\\.{3,})\\s+import\\s+(.*[\\s,(])?(finops|deploy|runner|demo|cli)\\b"
+      regex: "(?s)^from\\s+(bq_eval|\\.{3,})\\s+import\\s+(.*[\\s,(])?(finops|deploy|runner|upload|demo|cli)\\b"
 ---
 id: finops-package-dependencies
 language: Python
 severity: error
-message: "Package violation (finops/): bq_eval/finops/ must not import bq_eval.{deploy,runner,demo,cli}."
+message: "Package violation (finops/): bq_eval/finops/ must not import bq_eval.{deploy,runner,upload,demo,cli}."
 files:
   - "**/bq_eval/finops/**/*.py"
 metadata:
@@ -112,6 +113,7 @@ metadata:
     - "from bq_eval.demo import pipeline"
     - "from bq_eval.cli.app import main"
     - "from bq_eval.runner.engine.loader import OfflineSqlRunner"
+    - "from bq_eval.upload.engine.hook import AsyncReferenceUploadHook"
     - "from ...deploy import engine"
     - "from ....demo import pipeline"
   valid_examples:
@@ -120,16 +122,16 @@ metadata:
 rule:
   any:
     - kind: import_statement
-      regex: "(?s)^import\\s+(.+,\\s*)*bq_eval\\.(deploy|runner|demo|cli)(\\b|\\.)"
+      regex: "(?s)^import\\s+(.+,\\s*)*bq_eval\\.(deploy|runner|upload|demo|cli)(\\b|\\.)"
     - kind: import_from_statement
-      regex: "(?s)^from\\s+(bq_eval\\.|\\.{3,}\\s*)(deploy|runner|demo|cli)(\\b|\\.)"
+      regex: "(?s)^from\\s+(bq_eval\\.|\\.{3,}\\s*)(deploy|runner|upload|demo|cli)(\\b|\\.)"
     - kind: import_from_statement
-      regex: "(?s)^from\\s+(bq_eval|\\.{3,})\\s+import\\s+(.*[\\s,(])?(deploy|runner|demo|cli)\\b"
+      regex: "(?s)^from\\s+(bq_eval|\\.{3,})\\s+import\\s+(.*[\\s,(])?(deploy|runner|upload|demo|cli)\\b"
 ---
 id: deploy-package-dependencies
 language: Python
 severity: error
-message: "Package violation (deploy/): bq_eval/deploy/ must not import bq_eval.{finops,runner,demo,cli}."
+message: "Package violation (deploy/): bq_eval/deploy/ must not import bq_eval.{finops,runner,upload,demo,cli}."
 files:
   - "**/bq_eval/deploy/**/*.py"
 metadata:
@@ -138,6 +140,7 @@ metadata:
     - "from bq_eval.finops.engine import spend"
     - "from bq_eval.demo.pipeline import run_showcase_pipeline"
     - "from bq_eval.runner.engine.loader import OfflineSqlRunner"
+    - "from bq_eval.upload.engine.hook import AsyncReferenceUploadHook"
     - "from ....cli import app"
   valid_examples:
     - "from bq_eval.deploy.contract.bootstrap import BootstrapMode"
@@ -145,16 +148,16 @@ metadata:
 rule:
   any:
     - kind: import_statement
-      regex: "(?s)^import\\s+(.+,\\s*)*bq_eval\\.(finops|runner|demo|cli)(\\b|\\.)"
+      regex: "(?s)^import\\s+(.+,\\s*)*bq_eval\\.(finops|runner|upload|demo|cli)(\\b|\\.)"
     - kind: import_from_statement
-      regex: "(?s)^from\\s+(bq_eval\\.|\\.{3,}\\s*)(finops|runner|demo|cli)(\\b|\\.)"
+      regex: "(?s)^from\\s+(bq_eval\\.|\\.{3,}\\s*)(finops|runner|upload|demo|cli)(\\b|\\.)"
     - kind: import_from_statement
-      regex: "(?s)^from\\s+(bq_eval|\\.{3,})\\s+import\\s+(.*[\\s,(])?(finops|runner|demo|cli)\\b"
+      regex: "(?s)^from\\s+(bq_eval|\\.{3,})\\s+import\\s+(.*[\\s,(])?(finops|runner|upload|demo|cli)\\b"
 ---
 id: runner-package-dependencies
 language: Python
 severity: error
-message: "Package violation (runner/): bq_eval/runner/ must not import bq_eval.{finops,deploy,demo,cli}."
+message: "Package violation (runner/): bq_eval/runner/ must not import bq_eval.{finops,deploy,upload,demo,cli}."
 files:
   - "**/bq_eval/runner/**/*.py"
 metadata:
@@ -162,6 +165,7 @@ metadata:
   invalid_examples:
     - "from bq_eval.finops.engine import spend"
     - "from bq_eval.deploy.engine import bootstrap"
+    - "from bq_eval.upload.engine import hook"
     - "from bq_eval.demo.pipeline import run_showcase_pipeline"
     - "from bq_eval.cli.app import main"
     - "from ...deploy import engine"
@@ -173,16 +177,44 @@ metadata:
 rule:
   any:
     - kind: import_statement
-      regex: "(?s)^import\\s+(.+,\\s*)*bq_eval\\.(finops|deploy|demo|cli)(\\b|\\.)"
+      regex: "(?s)^import\\s+(.+,\\s*)*bq_eval\\.(finops|deploy|upload|demo|cli)(\\b|\\.)"
     - kind: import_from_statement
-      regex: "(?s)^from\\s+(bq_eval\\.|\\.{3,}\\s*)(finops|deploy|demo|cli)(\\b|\\.)"
+      regex: "(?s)^from\\s+(bq_eval\\.|\\.{3,}\\s*)(finops|deploy|upload|demo|cli)(\\b|\\.)"
     - kind: import_from_statement
-      regex: "(?s)^from\\s+(bq_eval|\\.{3,})\\s+import\\s+(.*[\\s,(])?(finops|deploy|demo|cli)\\b"
+      regex: "(?s)^from\\s+(bq_eval|\\.{3,})\\s+import\\s+(.*[\\s,(])?(finops|deploy|upload|demo|cli)\\b"
+---
+id: upload-package-dependencies
+language: Python
+severity: error
+message: "Package violation (upload/): bq_eval/upload/ must not import bq_eval.{finops,deploy,runner,demo,cli}."
+files:
+  - "**/bq_eval/upload/**/*.py"
+metadata:
+  test_path: "bq_eval/upload/engine/probe.py"
+  invalid_examples:
+    - "from bq_eval.finops.engine import spend"
+    - "from bq_eval.deploy.engine import bootstrap"
+    - "from bq_eval.runner.engine import loader"
+    - "from bq_eval.demo.pipeline import run_showcase_pipeline"
+    - "from bq_eval.cli.app import main"
+    - "from ...runner import engine"
+  valid_examples:
+    - "from bq_eval.upload.contract.hook import ReferenceUploadConfig"
+    - "from bq_eval.core.contract.types import NonNegFloat"
+    - "import queue"
+rule:
+  any:
+    - kind: import_statement
+      regex: "(?s)^import\\s+(.+,\\s*)*bq_eval\\.(finops|deploy|runner|demo|cli)(\\b|\\.)"
+    - kind: import_from_statement
+      regex: "(?s)^from\\s+(bq_eval\\.|\\.{3,}\\s*)(finops|deploy|runner|demo|cli)(\\b|\\.)"
+    - kind: import_from_statement
+      regex: "(?s)^from\\s+(bq_eval|\\.{3,})\\s+import\\s+(.*[\\s,(])?(finops|deploy|runner|demo|cli)\\b"
 ---
 id: demo-package-dependencies
 language: Python
 severity: error
-message: "Package violation (demo/): bq_eval/demo/ must not import bq_eval.{deploy,cli}."
+message: "Package violation (demo/): bq_eval/demo/ must not import bq_eval.{deploy,upload,cli}."
 files:
   - "**/bq_eval/demo/**/*.py"
 metadata:
@@ -190,6 +222,7 @@ metadata:
   invalid_examples:
     - "from bq_eval.cli.app import main"
     - "from bq_eval.deploy.engine.bootstrap import REPO_ROOT"
+    - "from bq_eval.upload.engine.hook import AsyncReferenceUploadHook"
     - "from ..cli import server"
     - "from .. import cli"
     - "from ....cli import app"
@@ -200,11 +233,11 @@ metadata:
 rule:
   any:
     - kind: import_statement
-      regex: "(?s)^import\\s+(.+,\\s*)*bq_eval\\.(deploy|cli)(\\b|\\.)"
+      regex: "(?s)^import\\s+(.+,\\s*)*bq_eval\\.(deploy|upload|cli)(\\b|\\.)"
     - kind: import_from_statement
-      regex: "(?s)^from\\s+(bq_eval\\.|\\.{2,}\\s*)(deploy|cli)(\\b|\\.)"
+      regex: "(?s)^from\\s+(bq_eval\\.|\\.{2,}\\s*)(deploy|upload|cli)(\\b|\\.)"
     - kind: import_from_statement
-      regex: "(?s)^from\\s+(bq_eval|\\.{2,})\\s+import\\s+(.*[\\s,(])?(deploy|cli)\\b"
+      regex: "(?s)^from\\s+(bq_eval|\\.{2,})\\s+import\\s+(.*[\\s,(])?(deploy|upload|cli)\\b"
 ---
 id: contract-layer-imports-only-contracts
 language: Python
@@ -353,11 +386,12 @@ rule:
 id: no-subprocess-or-urllib-in-pure-packages
 language: Python
 severity: error
-message: "Isolation violation (A-21): pure packages (core/, finops/, runner/) must never import or invoke subprocess or urllib."
+message: "Isolation violation (A-21): pure packages (core/, finops/, runner/, upload/) must never import or invoke subprocess or urllib."
 files:
   - "**/bq_eval/core/**/*.py"
   - "**/bq_eval/finops/**/*.py"
   - "**/bq_eval/runner/**/*.py"
+  - "**/bq_eval/upload/**/*.py"
 metadata:
   test_path: "bq_eval/core/engine/proc_probe.py"
   invalid_examples:
@@ -428,6 +462,7 @@ files:
   - "**/bq_eval/core/**/*.py"
   - "**/bq_eval/finops/**/*.py"
   - "**/bq_eval/deploy/**/*.py"
+  - "**/bq_eval/upload/**/*.py"
   - "**/bq_eval/demo/**/*.py"
   - "**/bq_eval/cli/**/*.py"
 ignores:

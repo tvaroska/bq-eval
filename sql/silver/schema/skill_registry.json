@@ -1,0 +1,9 @@
+[
+  {"name": "app_id", "type": "STRING", "mode": "REQUIRED", "description": "Owning application identifier matching app_registry.app_id."},
+  {"name": "skill_name", "type": "STRING", "mode": "REQUIRED", "description": "Registered skill name matching gen_ai.skill.name."},
+  {"name": "skill_version", "type": "STRING", "mode": "REQUIRED", "description": "Registered skill semantic version matching bq_eval.skill_version."},
+  {"name": "skill_sha256", "type": "STRING", "mode": "REQUIRED", "description": "Authoritative pinned SHA-256 hex digest of the skill definition."},
+  {"name": "protected_block_sha256", "type": "STRING", "mode": "NULLABLE", "description": "Authoritative pinned SHA-256 hex digest of the immutable compliance block."},
+  {"name": "effective_from", "type": "TIMESTAMP", "mode": "REQUIRED", "description": "SCD-2 inclusive UTC start timestamp for this skill version."},
+  {"name": "effective_to", "type": "TIMESTAMP", "mode": "NULLABLE", "description": "SCD-2 exclusive UTC end timestamp (NULL while active)."}
+]

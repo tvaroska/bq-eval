@@ -289,8 +289,8 @@ def test_receipts_recompute_from_spans_and_dry_run_manifest() -> None:
     )
     manifest = bq_dry_run.collect_dry_run_manifest(project_id="showcase-project")
     assert dry_run_receipt == manifest
-    assert manifest["checked"] == 74
-    assert manifest["skipped"] == 15
+    assert manifest["checked"] == 109
+    assert manifest["skipped"] == 23
 
 
 def test_rubric_count_and_names_match_docs_csv_and_code() -> None:

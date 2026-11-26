@@ -1,0 +1,5 @@
+[
+  {"name": "principal_email", "type": "STRING", "mode": "REQUIRED", "description": "BigQuery caller email matched against SESSION_USER() inside restricted TVFs (ADR-044)."},
+  {"name": "business_unit", "type": "STRING", "mode": "REQUIRED", "description": "Entitled business unit ('__unowned__' grants access to unregistered or unowned rows)."},
+  {"name": "tenant_id", "type": "STRING", "mode": "REQUIRED", "description": "Entitled tenant boundary ('*' wildcard for BU-wide access; explicit tenant_id for UC9 isolation, ADR-047)."}
+]

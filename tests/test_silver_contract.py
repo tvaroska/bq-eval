@@ -43,13 +43,22 @@ RESTRICTED_TWIN_PAIRS: tuple[tuple[str, str], ...] = (
     ("outcomes", "outcomes_open"),
 )
 
+EXPECTED_TABLE_SCHEMAS: tuple[str, ...] = (
+    "app_registry",
+    "tools",
+    "skill_registry",
+    "unit_entitlements",
+    "workflow_events",
+)
+
 ALLOWED_BQ_SCALAR_OR_JSON_TYPES: frozenset[str] = frozenset(
-    {"STRING", "INT64", "FLOAT64", "BOOL", "TIMESTAMP", "JSON"}
+    {"STRING", "INT64", "FLOAT64", "BOOL", "TIMESTAMP", "DATE", "JSON"}
 )
 
 FORBIDDEN_IN_OPEN_SCHEMAS: frozenset[str] = frozenset(
     {
         "user_id",
+        "platform_user_id",
         "tenant_id",
         "actor_id",
         "act_chain",
@@ -96,10 +105,11 @@ def _col_map(schema: list[dict[str, str]]) -> dict[str, dict[str, str]]:
 
 def test_silver_schema_files_parse_and_avoid_array_types() -> None:
     """Every core Silver schema file parses cleanly and avoids BigQuery ARRAY types (`ADR-045`)."""
+    all_expected = set(EXPECTED_SCHEMA_OBJECTS) | set(EXPECTED_TABLE_SCHEMAS)
     actual_json = {p.stem for p in SCHEMA_DIR.glob("*.json") if p.name != "labels_registry.json"}
-    assert actual_json == set(EXPECTED_SCHEMA_OBJECTS)
+    assert actual_json == all_expected
 
-    for obj_name in EXPECTED_SCHEMA_OBJECTS:
+    for obj_name in (*EXPECTED_SCHEMA_OBJECTS, *EXPECTED_TABLE_SCHEMAS):
         cols = _load_schema(obj_name)
         seen: set[str] = set()
         for col in cols:

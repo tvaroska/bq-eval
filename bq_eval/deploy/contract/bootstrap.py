@@ -6,7 +6,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-BootstrapMode = Literal["light", "full", "hybrid"]
+BootstrapMode = Literal["light", "full", "hybrid", "silver"]
 
 
 class BootstrapValidationReport(BaseModel):

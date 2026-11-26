@@ -1,0 +1,12 @@
+[
+  {"name": "app_id", "type": "STRING", "mode": "REQUIRED", "description": "Owning application identifier matching app_registry.app_id."},
+  {"name": "tool_name", "type": "STRING", "mode": "REQUIRED", "description": "Canonical tool name matching gen_ai.tool.name."},
+  {"name": "writes_state", "type": "BOOL", "mode": "REQUIRED", "description": "TRUE when the tool mutates system-of-record state."},
+  {"name": "modifies_workspace", "type": "BOOL", "mode": "REQUIRED", "description": "TRUE when the tool edits local dev or sandbox workspace files."},
+  {"name": "executes_code", "type": "BOOL", "mode": "REQUIRED", "description": "TRUE when the tool executes arbitrary code or shell commands."},
+  {"name": "sends_external_reply", "type": "BOOL", "mode": "REQUIRED", "description": "TRUE when the tool sends an external user-visible reply."},
+  {"name": "returns_pii", "type": "BOOL", "mode": "REQUIRED", "description": "TRUE when the tool returns direct personally identifiable information."},
+  {"name": "creates_ticket", "type": "BOOL", "mode": "REQUIRED", "description": "TRUE when the tool creates an operational or support ticket."},
+  {"name": "effective_from", "type": "TIMESTAMP", "mode": "REQUIRED", "description": "SCD-2 inclusive UTC start timestamp for this tool capability version."},
+  {"name": "effective_to", "type": "TIMESTAMP", "mode": "NULLABLE", "description": "SCD-2 exclusive UTC end timestamp (NULL while active)."}
+]

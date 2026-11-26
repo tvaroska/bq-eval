@@ -41,7 +41,7 @@
   {"name": "sandbox_status", "type": "STRING", "mode": "NULLABLE", "description": "bq_eval.sandbox.status (ok, timeout, error, policy_blocked)."},
   {"name": "arguments", "type": "STRING", "mode": "NULLABLE", "description": "Executed tool arguments raw string from inline span or Shape-3 message part fallback (restricted only)."},
   {"name": "results", "type": "STRING", "mode": "NULLABLE", "description": "Tool execution result raw string from inline span or Shape-3 message part fallback (restricted only)."},
-  {"name": "content_missing", "type": "BOOL", "mode": "REQUIRED", "description": "TRUE when the call has no inline arguments/results and its trace carries no Shape-3 message reference."},
+  {"name": "content_missing", "type": "BOOL", "mode": "REQUIRED", "description": "TRUE when the call has no inline arguments/results and no resolved Shape-3 stored message part (including failed Shape-3 uploads)."},
   {"name": "repeat_number", "type": "INT64", "mode": "NULLABLE", "description": "Dense rank per trace of (tool_name, args_sha256) in order of first (start_time, span_id); NULL when args_hash_source is none."},
   {"name": "writes_state", "type": "BOOL", "mode": "NULLABLE", "description": "SCD-2 tools.writes_state capability flag (NULL when tool is unregistered)."},
   {"name": "modifies_workspace", "type": "BOOL", "mode": "NULLABLE", "description": "SCD-2 tools.modifies_workspace capability flag."},

@@ -99,8 +99,8 @@ def test_bq_dry_run_backref_comment_stripping_and_receipt_manifest(tmp_path: Pat
     assert json.loads(full_manifest.read_text(encoding="utf-8")) == expected
     assert committed == expected
     assert committed["live_bq_dry_run_executed"] is False
-    assert committed["checked"] == 74
-    assert committed["skipped"] == 15
+    assert committed["checked"] == 109
+    assert committed["skipped"] == 23
 
 
 def test_generate_table_judge_sql_rule0_failure_mode() -> None:

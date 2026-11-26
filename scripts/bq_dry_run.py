@@ -48,6 +48,7 @@ def qualify_project_datasets(  # noqa: PLR0913
     project_id: str,
     *,
     dataset_id: str = "agent_eval",
+    location: str = "US",
     connection_id: str = "us.vertex_ai_connection",
     payload_bucket: str | None = None,
     payload_prefix: str = "bq-eval/",
@@ -57,10 +58,24 @@ def qualify_project_datasets(  # noqa: PLR0913
     prefix = normalize_payload_prefix(payload_prefix)
     qualified = (
         sql.replace("${PROJECT_ID}", project_id)
+        .replace("${LOCATION}", location)
         .replace("${DATASET_ID}", dataset_id)
         .replace("${CONNECTION_ID}", connection_id)
         .replace("${PAYLOAD_BUCKET}", bucket)
         .replace("${PREFIX}", prefix)
+        .replace("${SILVER_INTERNAL_DATASET}", "silver_internal")
+        .replace("${SILVER_REF_DATASET}", "silver_ref")
+        .replace("${SILVER_OPEN_DATASET}", "silver_open")
+        .replace("${SILVER_RESTRICTED_DATASET}", "silver_restricted")
+        .replace("${TRACES_DATASET_ID}", "obs_traces")
+        .replace("${PLATFORM_TRACES_DATASET_ID}", "platform_traces")
+        .replace("${PLATFORM_TRACES_TABLE_ID}", "_AllSpans")
+        .replace("${LOGS_DATASET_ID}", "obs_logs")
+        .replace("${READ_MARGIN_MINUTES}", "60")
+        .replace("${SETTLE_MINUTES}", "5")
+        .replace("${OUTCOME_LOOKBACK_DAYS}", "30")
+        .replace("${SHAPE3_PREFIX}", "bq-eval/shape3/")
+        .replace("${SHAPE3_FORMAT}", "JSON")
         .replace("${AWS_OMNI_CONNECTION_ID}", "aws-us-east-1.omni_connection")
         .replace("${AZURE_OMNI_CONNECTION_ID}", "azure-eastus2.omni_connection")
         .replace("${AWS_S3_BUCKET}", "enterprise-aws-otel-bucket")
@@ -145,10 +160,23 @@ def collect_dry_run_manifest(
     }
 
 
-def dry_run_statement(bq_bin: str, project_id: str, statement: str) -> tuple[bool, str]:
+def dry_run_statement(
+    bq_bin: str,
+    project_id: str,
+    statement: str,
+    *,
+    location: str = "US",
+) -> tuple[bool, str]:
     """Run `bq query --dry_run --use_legacy_sql=false` on a single BigQuery SQL statement."""
     proc = subprocess.run(  # noqa: S603
-        [bq_bin, "query", f"--project_id={project_id}", "--use_legacy_sql=false", "--dry_run"],
+        [
+            bq_bin,
+            "query",
+            f"--project_id={project_id}",
+            f"--location={location}",
+            "--use_legacy_sql=false",
+            "--dry_run",
+        ],
         input=statement,
         text=True,
         capture_output=True,
@@ -166,6 +194,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--project-id",
         default=None,
         help="Target GCP project ID for live dry-run (defaults to showcase-project in offline manifest mode).",
+    )
+    parser.add_argument(
+        "--location",
+        default="US",
+        help="BigQuery location for live --dry_run queries (default: US).",
     )
     parser.add_argument(
         "--files",
@@ -198,10 +231,11 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
-def _run_live_dry_run(
+def _run_live_dry_run(  # noqa: PLR0913
     *,
     bq_bin: str,
     project_id: str,
+    location: str = "US",
     files: Sequence[str] | None,
     skip_generated: bool,
     receipt_out: Path | None,
@@ -214,7 +248,7 @@ def _run_live_dry_run(
 
     for sql_file in sql_files:
         raw = sql_file.read_text(encoding="utf-8")
-        qualified = qualify_project_datasets(raw, project_id)
+        qualified = qualify_project_datasets(raw, project_id, location=location)
         file_checked = 0
         file_skipped = 0
         for idx, stmt in enumerate(split_sql_statements(qualified), start=1):
@@ -222,7 +256,7 @@ def _run_live_dry_run(
                 file_skipped += 1
                 skipped += 1
                 continue
-            ok, output = dry_run_statement(bq_bin, project_id, stmt)
+            ok, output = dry_run_statement(bq_bin, project_id, stmt, location=location)
             checked += 1
             file_checked += 1
             if ok:
@@ -243,7 +277,7 @@ def _run_live_dry_run(
     if not skip_generated:
         for label, sql in _generated_sql_cases(project_id):
             generated_labels.append(label)
-            ok, output = dry_run_statement(bq_bin, project_id, sql)
+            ok, output = dry_run_statement(bq_bin, project_id, sql, location=location)
             checked += 1
             if ok:
                 print(f"PASS {label}")
@@ -302,6 +336,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     return _run_live_dry_run(
         bq_bin=bq_bin,
         project_id=args.project_id,
+        location=args.location,
         files=args.files,
         skip_generated=args.skip_generated,
         receipt_out=args.receipt_out,

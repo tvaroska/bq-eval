@@ -24,6 +24,16 @@ output "completions_table_fqn" {
 }
 
 output "scheduled_judge_disabled" {
-  description = "Whether the daily quota-guarded judge scheduled query is paused (true when power_policy = hibernate)."
+  description = "Whether the daily quota-guarded judge scheduled query is paused (true when power_policy != active)."
   value       = local.scheduled_judge_disabled
+}
+
+output "silver_dataset_ids" {
+  description = "Provisioned Silver dataset IDs keyed by tier (internal, ref, open, restricted)."
+  value       = { for k, ds in google_bigquery_dataset.silver : k => ds.dataset_id }
+}
+
+output "shape3_source_uri" {
+  description = "Hive-partitioned BigLake Shape-3 payload URI pattern."
+  value       = local.shape3_source_uri
 }

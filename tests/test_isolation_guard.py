@@ -52,6 +52,7 @@ PACKAGE_DEPS: dict[str, tuple[str, ...]] = {
     "finops": ("core", "finops"),
     "deploy": ("core", "deploy"),
     "runner": ("core", "runner"),
+    "upload": ("core", "upload"),
     "demo": ("core", "finops", "runner", "demo"),
 }
 
@@ -101,7 +102,7 @@ def _build_folder_rules() -> dict[str, FolderRule]:
         ),
     }
     for pkg in PACKAGE_DEPS:
-        is_pure = pkg in {"core", "finops", "runner"}
+        is_pure = pkg in {"core", "finops", "runner", "upload"}
         rules[f"{pkg}_contract"] = FolderRule(
             name=f"{pkg}_contract",
             allowed_bq_eval_prefixes=_layer_prefixes(pkg, ("contract",)),
@@ -445,6 +446,8 @@ def test_subfolder_probes_fail_both_python_and_ast_grep_guards(tmp_path: Path) -
         ("bq_eval/cli/probe.py", "from google.genai import Client\n"),
         ("bq_eval/runner/engine/probe.py", "from bq_eval.deploy.engine import bootstrap\n"),
         ("bq_eval/core/engine/probe.py", "from bq_eval.runner.engine import loader\n"),
+        ("bq_eval/upload/engine/probe.py", "from bq_eval.runner.engine import loader\n"),
+        ("bq_eval/demo/probe.py", "from bq_eval.upload.engine import hook\n"),
     )
     for rel_path, bad_import in cases:
         probe_file = tmp_path / rel_path
@@ -484,6 +487,7 @@ def test_ast_grep_flags_subprocess_in_core(tmp_path: Path) -> None:
         ),
         ("bq_eval/finops/engine/probe.py", 'subprocess.run(["echo", "hi"], check=False)\n'),
         ("bq_eval/runner/engine/probe.py", 'subprocess.run(["echo", "hi"], check=False)\n'),
+        ("bq_eval/upload/engine/probe.py", 'subprocess.run(["echo", "hi"], check=False)\n'),
     )
     for rel_path, snippet in a21_cases:
         probe_file = tmp_path / rel_path
@@ -515,7 +519,7 @@ def test_importing_core_loads_no_other_package() -> None:
         "import sys\n"
         + "".join(f"import {mod}\n" for mod in pure_modules)
         + "print(sorted(m for m in sys.modules if m.startswith(("
-        "'bq_eval.finops', 'bq_eval.deploy', 'bq_eval.runner', 'bq_eval.demo', 'bq_eval.cli', "
+        "'bq_eval.finops', 'bq_eval.deploy', 'bq_eval.runner', 'bq_eval.upload', 'bq_eval.demo', 'bq_eval.cli', "
         "'sqlglot', 'google.genai', 'vertexai', 'openai', 'anthropic'"
         "))))"
     )

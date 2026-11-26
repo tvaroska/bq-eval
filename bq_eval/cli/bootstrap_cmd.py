@@ -26,9 +26,88 @@ def register_bootstrap_subparser(sub: argparse._SubParsersAction[argparse.Argume
     )
     boot_p.add_argument(
         "--mode",
-        choices=("light", "full", "hybrid"),
+        choices=("light", "full", "hybrid", "silver"),
         default="full",
-        help="Capture mode: light (BQAA only), full (OTel _AllSpans/_AllLogs), or hybrid (default: full).",
+        help="Capture/deploy mode: light, full, hybrid, or silver (ADR-048 4-dataset Silver core).",
+    )
+    boot_p.add_argument(
+        "--location",
+        default="US",
+        help="BigQuery / Cloud Observability location (default: US).",
+    )
+    boot_p.add_argument(
+        "--ensure-observability-link",
+        action="store_true",
+        help="Opt-in: configure Cloud Observability storage location and `obs_traces` linked dataset during --apply (S-21).",
+    )
+    boot_p.add_argument(
+        "--silver-internal-dataset",
+        default="silver_internal",
+        help="Silver internal dataset ID (default: silver_internal).",
+    )
+    boot_p.add_argument(
+        "--silver-ref-dataset",
+        default="silver_ref",
+        help="Silver reference dataset ID (default: silver_ref).",
+    )
+    boot_p.add_argument(
+        "--silver-open-dataset",
+        default="silver_open",
+        help="Silver open dataset ID (default: silver_open).",
+    )
+    boot_p.add_argument(
+        "--silver-restricted-dataset",
+        default="silver_restricted",
+        help="Silver restricted dataset ID (default: silver_restricted).",
+    )
+    boot_p.add_argument(
+        "--read-margin-minutes",
+        type=int,
+        default=60,
+        help="Silver read-window margin rendered into TVF bodies (default: 60).",
+    )
+    boot_p.add_argument(
+        "--settle-minutes",
+        type=int,
+        default=5,
+        help="Silver settle time rendered into TVF metadata (default: 5).",
+    )
+    boot_p.add_argument(
+        "--outcome-lookback-days",
+        type=int,
+        default=30,
+        help="Silver outcomes lookback window in days (default: 30).",
+    )
+    boot_p.add_argument(
+        "--traces-dataset-id",
+        default="obs_traces",
+        help="Linked Cloud Trace dataset ID (default: obs_traces).",
+    )
+    boot_p.add_argument(
+        "--platform-traces-dataset-id",
+        default="silver_internal",
+        help="Platform gateway trace dataset ID (default: silver_internal single-project stub).",
+    )
+    boot_p.add_argument(
+        "--platform-traces-table-id",
+        default="platform_spans",
+        help="Platform gateway trace table ID (default: platform_spans).",
+    )
+    boot_p.add_argument(
+        "--logs-dataset-id",
+        default="obs_logs",
+        help="Linked Cloud Logging dataset ID (default: obs_logs).",
+    )
+    boot_p.add_argument(
+        "--shape3-prefix",
+        default="bq-eval/shape3/",
+        help="GCS Hive-partitioned prefix for Shape-3 BigLake payloads (default: bq-eval/shape3/).",
+    )
+    boot_p.add_argument(
+        "--shape3-format",
+        choices=("JSON", "PARQUET"),
+        default="JSON",
+        help="BigLake format for Shape-3 payloads (default: JSON).",
     )
     boot_p.add_argument(
         "--project-id",
@@ -111,7 +190,12 @@ def register_bootstrap_subparser(sub: argparse._SubParsersAction[argparse.Argume
     )
 
 
-def _run_gcp_dry_run(project_id: str, stmts: list[tuple[str, str]]) -> list[str]:
+def _run_gcp_dry_run(
+    project_id: str,
+    stmts: list[tuple[str, str]],
+    *,
+    location: str = "US",
+) -> list[str]:
     bq_bin = shutil.which("bq")
     if bq_bin is None:
         raise ValueError(
@@ -127,6 +211,7 @@ def _run_gcp_dry_run(project_id: str, stmts: list[tuple[str, str]]) -> list[str]
                 bq_bin,
                 "query",
                 f"--project_id={project_id}",
+                f"--location={location}",
                 "--use_legacy_sql=false",
                 "--dry_run",
                 *label_flags,
@@ -178,9 +263,23 @@ def run_bootstrap_command(args: argparse.Namespace) -> int:
         mode=mode,
         project_id=effective_project,
         dataset_id=args.dataset_id,
+        location=args.location,
         connection_id=args.connection_id,
         payload_bucket=args.payload_bucket,
         payload_prefix=args.payload_prefix,
+        traces_dataset_id=args.traces_dataset_id,
+        platform_traces_dataset_id=args.platform_traces_dataset_id,
+        platform_traces_table_id=args.platform_traces_table_id,
+        logs_dataset_id=args.logs_dataset_id,
+        silver_internal_dataset=args.silver_internal_dataset,
+        silver_ref_dataset=args.silver_ref_dataset,
+        silver_open_dataset=args.silver_open_dataset,
+        silver_restricted_dataset=args.silver_restricted_dataset,
+        read_margin_minutes=args.read_margin_minutes,
+        settle_minutes=args.settle_minutes,
+        outcome_lookback_days=args.outcome_lookback_days,
+        shape3_prefix=args.shape3_prefix,
+        shape3_format=args.shape3_format,
         include_omni=bool(args.include_omni),
         aws_omni_connection_id=args.aws_omni_connection_id,
         aws_s3_bucket=args.aws_s3_bucket,
@@ -194,10 +293,25 @@ def run_bootstrap_command(args: argparse.Namespace) -> int:
     live_apply = False
     if report.passed and args.dry_run:
         live_dry_run = True
-        extra_errors.extend(_run_gcp_dry_run(effective_project, stmts))
+        extra_errors.extend(_run_gcp_dry_run(effective_project, stmts, location=args.location))
     elif report.passed and args.apply:
         live_apply = True
-        extra_errors.extend(apply_bootstrap_statements(effective_project, stmts, mode=mode))
+        extra_errors.extend(
+            apply_bootstrap_statements(
+                effective_project,
+                stmts,
+                mode=mode,
+                location=args.location,
+                ensure_traces_link=bool(args.ensure_observability_link),
+                silver_internal_dataset=args.silver_internal_dataset,
+                silver_ref_dataset=args.silver_ref_dataset,
+                silver_open_dataset=args.silver_open_dataset,
+                silver_restricted_dataset=args.silver_restricted_dataset,
+                traces_dataset_id=args.traces_dataset_id,
+                platform_traces_dataset_id=args.platform_traces_dataset_id,
+                logs_dataset_id=args.logs_dataset_id,
+            )
+        )
 
     final_report = report.model_copy(
         update={

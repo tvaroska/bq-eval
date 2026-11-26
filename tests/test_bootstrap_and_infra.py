@@ -155,6 +155,84 @@ def test_bootstrap_offline_schema_all_modes_and_cli(
         normalize_payload_prefix("../escape")
 
 
+def test_offline_validator_rejects_renamed_span_column(tmp_path: Path) -> None:
+    """`S-25` ordered top-level SELECT alias check catches renamed columns & Silver bootstrap excludes Omni."""
+    # Silver bootstrap validates cleanly offline and excludes `omni_spoke_views.sql`.
+    silver_report, silver_stmts = validate_bootstrap_offline(
+        mode="silver",
+        project_id="cold-proj-01",
+        location="US",
+        connection_id="us.vertex_ai_connection",
+        payload_bucket="cold-proj-01",
+        shape3_prefix="bq-eval/shape3/",
+    )
+    assert silver_report.passed, f"Silver bootstrap errors: {silver_report.errors}"
+    assert silver_report.unresolved_placeholders == ()
+    assert silver_report.statement_count == len(silver_stmts)
+    assert all("omni_spoke_views" not in label for label, _ in silver_stmts)
+    assert any("silver/spans.sql" in label for label, _ in silver_stmts)
+    assert any("silver/wrapper_views.sql" in label for label, _ in silver_stmts)
+
+    # Mutate a copy of `sql/` renaming `input_tokens` -> `input_tokens_renamed` in
+    # `v_otel_allspans_only` while keeping `input_tokens` inside JSON_VALUE path (would fool regex!).
+    mutated_sql = tmp_path / "sql"
+    shutil.copytree(SQL_DIR, mutated_sql)
+    compat_file = mutated_sql / "core" / "otel_compat_views.sql"
+    compat_text = compat_file.read_text(encoding="utf-8")
+    assert "AS input_tokens," in compat_text
+    compat_file.write_text(
+        compat_text.replace("AS input_tokens,", "AS input_tokens_renamed,", 1),
+        encoding="utf-8",
+    )
+    bad_report, _ = validate_bootstrap_offline(
+        mode="full",
+        project_id="cold-proj-01",
+        sql_dir=mutated_sql,
+    )
+    assert not bad_report.passed
+    assert any("input_tokens" in err for err in bad_report.errors), bad_report.errors
+
+    # Also verify out-of-order, duplicate, and extra SELECT columns are rejected (`S-25`).
+    from bq_eval.deploy.engine.silver_deploy import validate_view_columns_ordered
+
+    swapped_errors = validate_view_columns_ordered(
+        "CREATE OR REPLACE VIEW v AS SELECT b AS col_b, a AS col_a FROM t",
+        ("col_a", "col_b"),
+        view_name="v",
+    )
+    assert any("out of schema order" in err for err in swapped_errors), swapped_errors
+    dup_errors = validate_view_columns_ordered(
+        "CREATE OR REPLACE VIEW v AS SELECT b AS col_b, a AS col_a, c AS col_b FROM t",
+        ("col_a", "col_b"),
+        view_name="v",
+    )
+    assert any("duplicate" in err for err in dup_errors), dup_errors
+    extra_errors = validate_view_columns_ordered(
+        "CREATE OR REPLACE VIEW v AS SELECT a AS col_a, b AS col_b, c AS col_extra FROM t",
+        ("col_a", "col_b"),
+        view_name="v",
+        exact=True,
+    )
+    assert any("unexpected extra" in err for err in extra_errors), extra_errors
+
+    # Verify offline Silver mode rejects a renamed column in a Silver TVF (`S-25`).
+    mc_file = mutated_sql / "silver" / "model_calls.sql"
+    mc_text = mc_file.read_text(encoding="utf-8")
+    assert "\n    latency_ms,\n" in mc_text
+    mc_file.write_text(
+        mc_text.replace("\n    latency_ms,\n", "\n    latency_ms AS latency_ms_renamed,\n", 1),
+        encoding="utf-8",
+    )
+    bad_silver_report, _ = validate_bootstrap_offline(
+        mode="silver",
+        project_id="cold-proj-01",
+        sql_dir=mutated_sql,
+    )
+    assert not bad_silver_report.passed
+    assert any("latency_ms" in err for err in bad_silver_report.errors), bad_silver_report.errors
+    assert any("latency_ms" in err for err in bad_silver_report.errors), bad_silver_report.errors
+
+
 def test_dual_schema_completions_top_level_and_nested_json_payloads() -> None:
     """`v_otel_logs_payloads_only` reads both top-level `completions` columns and nested `payload` JSON."""
     compat_path = SQL_DIR / "core" / "otel_compat_views.sql"

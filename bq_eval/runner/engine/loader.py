@@ -19,6 +19,10 @@ from bq_eval.runner.contract.spec import (
     RunnerConfig,
     RunnerQueryResult,
 )
+from bq_eval.runner.engine.silver_udfs import (
+    SILVER_MANIFEST_TABLE_MAP,
+    render_silver_sql,
+)
 from bq_eval.runner.engine.transpiler import (
     SqliteValue,
     _new_sqlite_bq_conn,
@@ -29,6 +33,7 @@ from bq_eval.runner.engine.tvf import (
     parse_qualified_parts,
     sqlite_table_name,
     transpile_bigquery_ast,
+    transpile_bigquery_staged,
 )
 
 _INT_STR_RE = re.compile(r"^-?\d+$")
@@ -170,11 +175,12 @@ def _build_drop_sql(kind: str, name: str) -> str:
     return sqlglot.parse_one(f"DROP {kind} IF EXISTS {name}", read="sqlite").sql(dialect="sqlite")
 
 
-def _build_drop_and_create_view_sql(view_name: str, select_sql: str) -> tuple[str, str]:
-    drop_stmt = _build_drop_sql("VIEW", view_name)
+def _build_temp_table_as_sql(table_name: str, select_sql: str) -> tuple[str, str]:
+    drop_stmt = _build_drop_sql("TABLE", table_name)
     create_stmt = exp.Create(
-        this=exp.Table(this=exp.to_identifier(view_name, quoted=False)),
-        kind="VIEW",
+        this=exp.Table(this=exp.to_identifier(table_name, quoted=False)),
+        kind="TABLE",
+        properties=exp.Properties(expressions=[exp.TemporaryProperty()]),
         expression=sqlglot.parse_one(select_sql, read="sqlite"),
     ).sql(dialect="sqlite")
     return drop_stmt, create_stmt
@@ -264,39 +270,33 @@ class OfflineSqlRunner:
     ) -> None:
         self.close()
 
-    def load_rows(
+    def _collect_load_columns(
         self,
         target_table: str,
+        sqlite_name: str,
         rows: Sequence[Mapping[str, object]],
         *,
-        append: bool = False,
-    ) -> FixtureTableLoadResult:
-        """Load JSON/trace-store rows with nested record and list fields into SQLite."""
-        sqlite_name = self._resolve_sqlite_table_name(target_table)
-        if not rows:
-            if not append and sqlite_name in self._table_columns:
-                self.conn.execute(_build_drop_sql("TABLE", sqlite_name))
-                self.conn.commit()
-                self._table_columns.pop(sqlite_name, None)
-            return FixtureTableLoadResult(
-                target_table=target_table,
-                sqlite_table=sqlite_name,
-                row_count=0,
-                columns=self._table_columns.get(sqlite_name, ()),
-            )
+        append: bool,
+        extra_columns: Sequence[str],
+    ) -> list[str]:
         ordered_cols: list[str] = list(self._table_columns.get(sqlite_name, ())) if append else []
         seen = set(ordered_cols)
-        for row in rows:
-            for col in row:
-                if not _SAFE_COL_RE.fullmatch(col):
-                    raise ValueError(f"Invalid column identifier {col!r} in {target_table!r}")
-                if col not in seen:
-                    seen.add(col)
-                    ordered_cols.append(col)
+        for col in (*extra_columns, *(c for row in rows for c in row)):
+            if not _SAFE_COL_RE.fullmatch(col):
+                raise ValueError(f"Invalid column identifier {col!r} in {target_table!r}")
+            if col not in seen:
+                seen.add(col)
+                ordered_cols.append(col)
+        return ordered_cols
 
-        coerced_rows: list[tuple[SqliteValue, ...]] = [
-            tuple(_coerce_cell(col, row.get(col)) for col in ordered_cols) for row in rows
-        ]
+    def _prepare_sqlite_table(
+        self,
+        sqlite_name: str,
+        ordered_cols: Sequence[str],
+        coerced_rows: Sequence[tuple[SqliteValue, ...]],
+        *,
+        append: bool,
+    ) -> None:
         if not append or sqlite_name not in self._table_columns:
             self.conn.execute(_build_drop_sql("TABLE", sqlite_name))
             col_types = [
@@ -304,7 +304,6 @@ class OfflineSqlRunner:
                 for idx, col in enumerate(ordered_cols)
             ]
             self.conn.execute(_build_create_table_sql(sqlite_name, col_types))
-            self._table_columns[sqlite_name] = tuple(ordered_cols)
         else:
             existing = set(self._table_columns[sqlite_name])
             for idx, col in enumerate(ordered_cols):
@@ -321,8 +320,46 @@ class OfflineSqlRunner:
                         ],
                     ).sql(dialect="sqlite")
                     self.conn.execute(alter_sql)
-            self._table_columns[sqlite_name] = tuple(ordered_cols)
+        self._table_columns[sqlite_name] = tuple(ordered_cols)
 
+    def load_rows(
+        self,
+        target_table: str,
+        rows: Sequence[Mapping[str, object]],
+        *,
+        append: bool = False,
+        extra_columns: Sequence[str] = (),
+    ) -> FixtureTableLoadResult:
+        """Load JSON/trace-store rows with nested record and list fields into SQLite."""
+        sqlite_name = self._resolve_sqlite_table_name(target_table)
+        if not rows:
+            if not append and sqlite_name in self._table_columns:
+                self.conn.execute(_build_drop_sql("TABLE", sqlite_name))
+                self.conn.commit()
+                self._table_columns.pop(sqlite_name, None)
+            if extra_columns and sqlite_name not in self._table_columns:
+                valid_cols = [c for c in extra_columns if _SAFE_COL_RE.fullmatch(c)]
+                col_types = [(col, _infer_column_type(col, ())) for col in valid_cols]
+                self.conn.execute(_build_create_table_sql(sqlite_name, col_types))
+                self.conn.commit()
+                self._table_columns[sqlite_name] = tuple(valid_cols)
+            return FixtureTableLoadResult(
+                target_table=target_table,
+                sqlite_table=sqlite_name,
+                row_count=0,
+                columns=self._table_columns.get(sqlite_name, ()),
+            )
+        ordered_cols = self._collect_load_columns(
+            target_table,
+            sqlite_name,
+            rows,
+            append=append,
+            extra_columns=extra_columns,
+        )
+        coerced_rows: list[tuple[SqliteValue, ...]] = [
+            tuple(_coerce_cell(col, row.get(col)) for col in ordered_cols) for row in rows
+        ]
+        self._prepare_sqlite_table(sqlite_name, ordered_cols, coerced_rows, append=append)
         insert_sql = _build_insert_sql(sqlite_name, ordered_cols)
         self.conn.executemany(insert_sql, coerced_rows)
         self.conn.commit()
@@ -339,23 +376,97 @@ class OfflineSqlRunner:
         path: Path,
         *,
         append: bool = False,
+        extra_columns: Sequence[str] = (),
     ) -> FixtureTableLoadResult:
         """Load a JSONL fixture file into `target_table`."""
-        return self.load_rows(target_table, load_jsonl_rows(path), append=append)
+        return self.load_rows(
+            target_table,
+            load_jsonl_rows(path),
+            append=append,
+            extra_columns=extra_columns,
+        )
 
-    def load_manifest(self, manifest_path: Path) -> list[FixtureTableLoadResult]:
+    def load_manifest(
+        self,
+        manifest_path: Path,
+        *,
+        table_map: Mapping[str, str] | None = None,
+        schema_dir: Path | None = None,
+    ) -> list[FixtureTableLoadResult]:
         """Load every fixture table listed in a Silver fixture `manifest.json`."""
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         base_dir = manifest_path.parent
         loaded_targets: set[str] = set()
         results: list[FixtureTableLoadResult] = []
         for entry in manifest.get("fixtures", ()):
-            target_table = str(entry["target_table"])
+            raw_target = str(entry["target_table"])
+            target_table = table_map.get(raw_target, raw_target) if table_map else raw_target
             fixture_path = base_dir / str(entry["file"])
             append = target_table in loaded_targets
-            results.append(self.load_jsonl(target_table, fixture_path, append=append))
+            extra_cols: tuple[str, ...] = ()
+            if schema_dir is not None:
+                short_name = raw_target.rsplit(".", 1)[-1]
+                schema_name = (
+                    "workflow_events" if short_name.startswith("workflow_events_") else short_name
+                )
+                schema_file = schema_dir / f"{schema_name}.json"
+                if schema_file.is_file():
+                    schema_cols = json.loads(schema_file.read_text(encoding="utf-8"))
+                    extra_cols = tuple(str(c["name"]) for c in schema_cols)
+            results.append(
+                self.load_jsonl(
+                    target_table,
+                    fixture_path,
+                    append=append,
+                    extra_columns=extra_cols,
+                )
+            )
             loaded_targets.add(target_table)
         return results
+
+    def load_silver_manifest(
+        self,
+        manifest_path: Path,
+        *,
+        schema_dir: Path | None = None,
+    ) -> list[FixtureTableLoadResult]:
+        """Load manifest fixtures into canonical ADR-048 dataset-qualified Silver tables."""
+        return self.load_manifest(
+            manifest_path,
+            table_map=SILVER_MANIFEST_TABLE_MAP,
+            schema_dir=schema_dir,
+        )
+
+    def register_silver_file(
+        self,
+        sql_path: Path,
+        *,
+        params: Mapping[str, str] | None = None,
+    ) -> list[str]:
+        """Render placeholders in a `sql/silver/*.sql` file and register its SQL objects."""
+        rendered = render_silver_sql(sql_path.read_text(encoding="utf-8"), params=params)
+        return self.register_sql(rendered)
+
+    def _register_create_stmt(self, stmt: exp.Create) -> str | None:
+        kind_upper = str(stmt.args.get("kind", "")).upper()
+        if kind_upper == "SCHEMA":
+            return ""
+        if kind_upper == "TABLE" and stmt.args.get("properties") is not None:
+            props = stmt.args["properties"].expressions
+            if any(isinstance(p, exp.ExternalProperty) for p in props):
+                return "external_table"
+        if isinstance(stmt.this, exp.UserDefinedFunction):
+            if kind_upper == "FUNCTION" and stmt.args.get("returns") is not None:
+                udf_name = stmt.this.this.sql("bigquery") if stmt.this.this else "udf"
+                return udf_name.replace("`", "")
+            return self.registry.register_ast(stmt).to_spec().canonical_key
+        if (
+            kind_upper == "VIEW"
+            and isinstance(stmt.this, exp.Table)
+            and stmt.expression is not None
+        ):
+            return self.registry.register_view_ast(stmt)
+        return None
 
     def register_sql(self, sql: str) -> list[str]:
         """Register BigQuery table functions, views, or tables from a SQL script."""
@@ -363,30 +474,17 @@ class OfflineSqlRunner:
         for stmt in sqlglot.parse(sql, read="bigquery"):
             if stmt is None:
                 continue
-            if isinstance(stmt, exp.Create) and isinstance(stmt.this, exp.UserDefinedFunction):
-                defn = self.registry.register_ast(stmt)
-                registered.append(defn.to_spec().canonical_key)
-                continue
-            if (
-                isinstance(stmt, exp.Create)
-                and str(stmt.args.get("kind", "")).upper() == "VIEW"
-                and isinstance(stmt.this, exp.Table)
-                and stmt.expression is not None
-            ):
-                raw_view = ".".join(
-                    p for p in (stmt.this.catalog, stmt.this.db, stmt.this.name) if p
-                )
-                view_name = self._resolve_sqlite_table_name(raw_view)
-                select_sql = transpile_bigquery_ast(
-                    stmt.expression,
-                    registry=self.registry,
-                    default_dataset=self.config.default_dataset,
-                )
-                drop_sql, create_sql = _build_drop_and_create_view_sql(view_name, select_sql)
-                self.conn.execute(drop_sql)
-                self.conn.execute(create_sql)
-                registered.append(view_name)
-                continue
+            if isinstance(stmt, exp.Command):
+                raw_cmd = stmt.sql("bigquery").upper()
+                if "CREATE EXTERNAL TABLE" in raw_cmd or "CREATE SCHEMA" in raw_cmd:
+                    registered.append("external_table")
+                    continue
+            if isinstance(stmt, exp.Create):
+                handled = self._register_create_stmt(stmt)
+                if handled is not None:
+                    if handled:
+                        registered.append(handled)
+                    continue
             transpiled = transpile_bigquery_ast(
                 stmt,
                 registry=self.registry,
@@ -398,17 +496,27 @@ class OfflineSqlRunner:
         return registered
 
     def query(self, sql: str) -> RunnerQueryResult:
-        """Execute a BigQuery query on SQLite with TVF inlining and dataset-name mapping."""
+        """Execute a BigQuery query on SQLite with staged temp-table TVF execution."""
         t0 = time.perf_counter()
         stmt = sqlglot.parse_one(sql, read="bigquery")
-        sqlite_sql = transpile_bigquery_ast(
+        stages, sqlite_sql = transpile_bigquery_staged(
             stmt,
             registry=self.registry,
             default_dataset=self.config.default_dataset,
         )
-        cur = self.conn.execute(sqlite_sql)
-        cols = tuple(desc[0] for desc in (cur.description or ()))
-        rows = tuple({col: row[col] for col in cols} for row in cur.fetchall())
+        created_stages: list[str] = []
+        try:
+            for stage_name, stage_sql in stages:
+                drop_sql, create_sql = _build_temp_table_as_sql(stage_name, stage_sql)
+                self.conn.execute(drop_sql)
+                self.conn.execute(create_sql)
+                created_stages.append(stage_name)
+            cur = self.conn.execute(sqlite_sql)
+            cols = tuple(desc[0] for desc in (cur.description or ()))
+            rows = tuple({col: row[col] for col in cols} for row in cur.fetchall())
+        finally:
+            for stage_name in reversed(created_stages):
+                self.conn.execute(_build_drop_sql("TABLE", stage_name))
         elapsed_ms = (time.perf_counter() - t0) * 1000.0
         return RunnerQueryResult(
             sql=sql,
@@ -455,51 +563,41 @@ class OfflineSqlRunner:
 
 
 def smoke_silver_fixtures(manifest_path: Path, *, max_seconds: float = 5.0) -> dict[str, object]:
-    """Load all manifest fixtures, run nested TVF + view checks, and enforce `< max_seconds`."""
+    """Load all manifest fixtures, run real Silver `spans` + `model_calls` TVFs, and enforce `< max_seconds`."""
     t0 = time.perf_counter()
+    silver_sql_dir = manifest_path.resolve().parents[3] / "sql" / "silver"
+    schema_dir = silver_sql_dir / "schema"
     with OfflineSqlRunner(RunnerConfig(current_date_utc="2026-11-26")) as runner:
-        loaded = runner.load_manifest(manifest_path)
-        runner.register_sql(
+        loaded = runner.load_silver_manifest(
+            manifest_path,
+            schema_dir=schema_dir if schema_dir.is_dir() else None,
+        )
+        raw_res = runner.query(
             """
-            CREATE OR REPLACE TABLE FUNCTION `silver.smoke_spans`(
-              from_time TIMESTAMP,
-              to_time TIMESTAMP
-            ) AS (
-              SELECT
-                s.trace_id,
-                s.span_id,
-                s.start_time,
-                s.kind,
-                s.status.code AS status_code,
-                s.instrumentation_scope.name AS scope_name,
-                JSON_VALUE(s.resource.attributes, '$."service.name"') AS service_name,
-                ARRAY_LENGTH(s.events) AS event_count
-              FROM `obs_traces._AllSpans` AS s
-              WHERE s.start_time >= from_time AND s.start_time < to_time
-            );
-
-            CREATE OR REPLACE TABLE FUNCTION `silver_open.smoke_trace_counts`(
-              from_time TIMESTAMP,
-              to_time TIMESTAMP
-            ) AS (
-              SELECT
-                COUNT(*) AS span_count,
-                COUNT(DISTINCT trace_id) AS trace_count
-              FROM `silver.smoke_spans`(from_time, to_time)
-            );
+            SELECT COUNT(*) AS span_count, COUNT(DISTINCT trace_id) AS trace_count
+            FROM `obs_traces._AllSpans`
             """
         )
-        res = runner.query(
-            """
-            SELECT span_count, trace_count
-            FROM `silver_open.smoke_trace_counts`(
-              TIMESTAMP '2026-11-01 00:00:00 UTC',
-              TIMESTAMP '2026-12-01 00:00:00 UTC'
+        if not raw_res.rows or int(str(raw_res.rows[0]["span_count"])) < 95:
+            raise EmptyQueryResultError(f"Unexpected smoke span count: {raw_res.rows!r}")
+        model_call_count = 0
+        if (silver_sql_dir / "spans.sql").is_file() and (
+            silver_sql_dir / "model_calls.sql"
+        ).is_file():
+            runner.register_silver_file(silver_sql_dir / "spans.sql")
+            runner.register_silver_file(silver_sql_dir / "model_calls.sql")
+            mc_res = runner.query(
+                """
+                SELECT COUNT(*) AS model_call_count
+                FROM `showcase-project.silver_open.model_calls`(
+                  TIMESTAMP '2026-11-01 00:00:00 UTC',
+                  TIMESTAMP '2026-12-01 00:00:00 UTC'
+                )
+                """
             )
-            """
-        )
-        if not res.rows or int(str(res.rows[0]["span_count"])) < 95:
-            raise EmptyQueryResultError(f"Unexpected smoke span count: {res.rows!r}")
+            model_call_count = int(str(mc_res.rows[0]["model_call_count"])) if mc_res.rows else 0
+            if model_call_count < 1:
+                raise EmptyQueryResultError("Silver model_calls smoke returned 0 rows.")
     elapsed = time.perf_counter() - t0
     if elapsed >= max_seconds:
         raise TimeoutError(
@@ -508,8 +606,9 @@ def smoke_silver_fixtures(manifest_path: Path, *, max_seconds: float = 5.0) -> d
     return {
         "fixture_tables": len(loaded),
         "total_rows_loaded": sum(item.row_count for item in loaded),
-        "span_count": res.rows[0]["span_count"],
-        "trace_count": res.rows[0]["trace_count"],
+        "span_count": raw_res.rows[0]["span_count"],
+        "trace_count": raw_res.rows[0]["trace_count"],
+        "model_call_count": model_call_count,
         "elapsed_sec": round(elapsed, 4),
     }
 

@@ -43,6 +43,7 @@
   {"name": "case_id", "type": "STRING", "mode": "NULLABLE", "description": "bq_eval.case_id on root_span_id."},
   {"name": "eval_run_id", "type": "STRING", "mode": "NULLABLE", "description": "bq_eval.eval_run_id on root_span_id."},
   {"name": "eval_split", "type": "STRING", "mode": "NULLABLE", "description": "bq_eval.eval_split (train or holdout) on root_span_id."},
+  {"name": "skill_name", "type": "STRING", "mode": "NULLABLE", "description": "Primary gen_ai.skill.name resolved with root -> earliest-span precedence."},
   {"name": "skill_sha256", "type": "STRING", "mode": "NULLABLE", "description": "Primary bq_eval.skill_sha256 resolved with root -> earliest-call precedence."},
   {"name": "protected_block_sha256", "type": "STRING", "mode": "NULLABLE", "description": "Emitted bq_eval.protected_block_sha256 compared downstream against skill_registry."},
   {"name": "mounted_skills", "type": "JSON", "mode": "NULLABLE", "description": "bq_eval.mounted_skills JSON array (NULL when absent, distinct from [])."},

@@ -1,5 +1,5 @@
 {
-  "checked": 74,
+  "checked": 109,
   "generated_statements": [
     "build_ai_generate_table_judge_sql",
     "build_ai_evaluate_agent_sql"
@@ -71,6 +71,66 @@
       "checked": 4,
       "skipped": 2,
       "total": 6
+    },
+    "silver/events.sql": {
+      "checked": 4,
+      "skipped": 0,
+      "total": 4
+    },
+    "silver/jcs.sql": {
+      "checked": 0,
+      "skipped": 3,
+      "total": 3
+    },
+    "silver/model_calls.sql": {
+      "checked": 1,
+      "skipped": 0,
+      "total": 1
+    },
+    "silver/outcomes.sql": {
+      "checked": 3,
+      "skipped": 0,
+      "total": 3
+    },
+    "silver/reference.sql": {
+      "checked": 5,
+      "skipped": 4,
+      "total": 9
+    },
+    "silver/shape3.sql": {
+      "checked": 0,
+      "skipped": 1,
+      "total": 1
+    },
+    "silver/spans.sql": {
+      "checked": 1,
+      "skipped": 0,
+      "total": 1
+    },
+    "silver/tool_calls.sql": {
+      "checked": 3,
+      "skipped": 0,
+      "total": 3
+    },
+    "silver/trace_payloads.sql": {
+      "checked": 1,
+      "skipped": 0,
+      "total": 1
+    },
+    "silver/traces.sql": {
+      "checked": 3,
+      "skipped": 0,
+      "total": 3
+    },
+    "silver/workflow_events.sql": {
+      "checked": 3,
+      "skipped": 0,
+      "total": 3
+    },
+    "silver/wrapper_views.sql": {
+      "checked": 11,
+      "skipped": 0,
+      "total": 11
     }
   },
   "project_id": "showcase-project",
@@ -79,9 +139,11 @@
     "CREATE SCHEMA",
     "CREATE EXTERNAL TABLE",
     "CREATE MODEL",
+    "CREATE OR REPLACE FUNCTION",
+    "CREATE FUNCTION",
     "CREATE OR REPLACE PROCEDURE",
     "CREATE PROCEDURE",
     "ALTER TABLE"
   ],
-  "skipped": 15
+  "skipped": 23
 }

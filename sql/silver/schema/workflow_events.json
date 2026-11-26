@@ -1,0 +1,22 @@
+[
+  {"name": "event_id", "type": "STRING", "mode": "REQUIRED", "description": "Unique event identifier within a workflow_events landing copy (first by event_time wins, ADR-041)."},
+  {"name": "event_time", "type": "TIMESTAMP", "mode": "REQUIRED", "description": "Event UTC timestamp partitioning the append-only workflow_events copy."},
+  {"name": "event_type", "type": "STRING", "mode": "REQUIRED", "description": "Canonical event taxonomy name (outcome.*, action.committed, guardrail.intervention, state.transition, etc.)."},
+  {"name": "source_system", "type": "STRING", "mode": "NULLABLE", "description": "Emitting system or service identifier."},
+  {"name": "trace_id", "type": "STRING", "mode": "NULLABLE", "description": "Associated W3C 32-hex trace identifier."},
+  {"name": "span_id", "type": "STRING", "mode": "NULLABLE", "description": "Associated W3C 16-hex span identifier."},
+  {"name": "response_id", "type": "STRING", "mode": "NULLABLE", "description": "Associated gen_ai.response.id provider response identifier."},
+  {"name": "outcome_id", "type": "STRING", "mode": "NULLABLE", "description": "Primary EVAL-P11 outcome.id associated with the event."},
+  {"name": "conversation_id", "type": "STRING", "mode": "NULLABLE", "description": "Associated gen_ai.conversation.id multi-turn session key."},
+  {"name": "action_id", "type": "STRING", "mode": "NULLABLE", "description": "Mutating action correlation identifier linking approvals, tool calls, and commits."},
+  {"name": "nudge_id", "type": "STRING", "mode": "NULLABLE", "description": "Optional per-recommendation output identifier."},
+  {"name": "control_id", "type": "STRING", "mode": "NULLABLE", "description": "Guardrail control identifier on guardrail.intervention rows."},
+  {"name": "control_layer", "type": "STRING", "mode": "NULLABLE", "description": "Guardrail enforcement layer (gateway, dlp, model_armor, app_rule)."},
+  {"name": "control_action", "type": "STRING", "mode": "NULLABLE", "description": "Guardrail action (block, redact, shadow)."},
+  {"name": "action_args", "type": "STRING", "mode": "NULLABLE", "description": "Raw JSON object {\"tool_name\": ..., \"args\": ...} hashed by Silver via RFC 8785 JCS (writers never send hashes)."},
+  {"name": "approved_expires_at", "type": "TIMESTAMP", "mode": "NULLABLE", "description": "Optional approval expiry UTC timestamp on outcome.approved rows."},
+  {"name": "user_id", "type": "STRING", "mode": "NULLABLE", "description": "Requester user identifier (restricted downstream only)."},
+  {"name": "tenant_id", "type": "STRING", "mode": "NULLABLE", "description": "Tenant boundary identifier (restricted downstream only)."},
+  {"name": "actor_id", "type": "STRING", "mode": "NULLABLE", "description": "Approver, reviewer, or committing actor identifier for Segregation-of-Duties checks."},
+  {"name": "payload_json", "type": "JSON", "mode": "NULLABLE", "description": "Unstructured JSON payload holding registered lifted keys (linked_outcome_id, outcome_status, feedback_reason, state_transition_to)."}
+]

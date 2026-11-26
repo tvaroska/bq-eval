@@ -27,6 +27,7 @@ __all__ = [
     "sqlite_table_name",
     "transpile_bigquery_ast",
     "transpile_bigquery_sql",
+    "transpile_bigquery_staged",
 ]
 
 
@@ -119,25 +120,18 @@ def _substitute_with_clause(
     shadowed: frozenset[str],
     cte_columns: dict[str, frozenset[str]],
 ) -> exp.With:
-    new_ctes: list[exp.CTE] = []
     for cte in with_clause.expressions:
         if isinstance(cte, exp.CTE) and cte.this is not None:
-            sub_body = _substitute_params(
+            sub_body = _substitute_in_place(
                 cte.this,
                 param_map,
                 shadowed=shadowed,
                 cte_columns=cte_columns,
             )
-            new_cte = cte.copy()
-            new_cte.set("this", sub_body)
-            new_ctes.append(new_cte)
+            cte.set("this", sub_body)
             if cte.alias:
                 cte_columns[cte.alias.lower()] = _query_output_aliases(sub_body)
-        else:
-            new_ctes.append(cte)
-    new_with = with_clause.copy()
-    new_with.set("expressions", new_ctes)
-    return new_with
+    return with_clause
 
 
 def _substitute_source_expr(
@@ -147,7 +141,7 @@ def _substitute_source_expr(
     shadowed: frozenset[str],
     cte_columns: Mapping[str, frozenset[str]],
 ) -> tuple[exp.Expr, frozenset[str]]:
-    sub_src = _substitute_params(
+    sub_src = _substitute_in_place(
         src,
         param_map,
         shadowed=shadowed,
@@ -168,7 +162,7 @@ def _substitute_child(
     cte_columns: Mapping[str, frozenset[str]],
 ) -> object:
     if isinstance(value, exp.Expr):
-        return _substitute_params(
+        return _substitute_in_place(
             value,
             param_map,
             shadowed=shadowed,
@@ -176,7 +170,7 @@ def _substitute_child(
         )
     if isinstance(value, list):
         return [
-            _substitute_params(
+            _substitute_in_place(
                 item,
                 param_map,
                 shadowed=shadowed,
@@ -199,15 +193,13 @@ def _prepare_select_sources(
     from_shadowed: set[str] = set()
     from_clause = cloned.args.get("from_")
     if isinstance(from_clause, exp.From) and from_clause.this is not None:
-        new_from = from_clause.copy()
         sub_src, cols = _substitute_source_expr(
             from_clause.this,
             param_map,
             shadowed=shadowed,
             cte_columns=local_cte_cols,
         )
-        new_from.set("this", sub_src)
-        cloned.set("from_", new_from)
+        from_clause.set("this", sub_src)
         from_shadowed.update(cols)
 
     raw_joins = cloned.args.get("joins")
@@ -216,16 +208,15 @@ def _prepare_select_sources(
     prepared_joins: list[object] = []
     for item in raw_joins:
         if isinstance(item, exp.Join) and item.this is not None:
-            new_join = item.copy()
             sub_src, cols = _substitute_source_expr(
                 item.this,
                 param_map,
                 shadowed=shadowed,
                 cte_columns=local_cte_cols,
             )
-            new_join.set("this", sub_src)
+            item.set("this", sub_src)
             from_shadowed.update(cols)
-            prepared_joins.append(new_join)
+            prepared_joins.append(item)
         else:
             prepared_joins.append(item)
     return frozenset(from_shadowed), prepared_joins
@@ -240,23 +231,22 @@ def _substitute_select_expressions(
 ) -> list[exp.Expr]:
     rebuilt: list[exp.Expr] = []
     for expr in expressions:
-        sub = _substitute_params(
-            expr,
-            param_map,
-            shadowed=body_shadowed,
-            cte_columns=local_cte_cols,
-        )
-        if (
+        is_bare_param = (
             isinstance(expr, exp.Column)
             and not expr.table
             and not expr.db
             and not expr.catalog
             and expr.name.lower() in param_map
             and expr.name.lower() not in body_shadowed
-        ):
-            rebuilt.append(exp.alias_(sub, expr.name))
-        else:
-            rebuilt.append(sub)
+        )
+        orig_name = expr.name if is_bare_param else ""
+        sub = _substitute_in_place(
+            expr,
+            param_map,
+            shadowed=body_shadowed,
+            cte_columns=local_cte_cols,
+        )
+        rebuilt.append(exp.alias_(sub, orig_name) if is_bare_param else sub)
     return rebuilt
 
 
@@ -321,7 +311,7 @@ def _substitute_select_params(
     return cloned
 
 
-def _substitute_params(
+def _substitute_in_place(
     node: exp.Expr,
     param_map: Mapping[str, exp.Expr],
     *,
@@ -342,32 +332,28 @@ def _substitute_params(
                 if isinstance(replacement, _ATOMIC_PARAM_TYPES)
                 else exp.Paren(this=replacement)
             )
-        return node.copy()
+        return node
 
-    cloned: exp.Expr = node.copy()
     local_cte_cols: dict[str, frozenset[str]] = dict(cte_columns or {})
-    with_clause = cloned.args.get("with_")
+    with_clause = node.args.get("with_")
     if isinstance(with_clause, exp.With):
-        cloned.set(
-            "with_",
-            _substitute_with_clause(
-                with_clause,
-                param_map,
-                shadowed=shadowed,
-                cte_columns=local_cte_cols,
-            ),
+        _substitute_with_clause(
+            with_clause,
+            param_map,
+            shadowed=shadowed,
+            cte_columns=local_cte_cols,
         )
-    if isinstance(cloned, exp.Select):
+    if isinstance(node, exp.Select):
         return _substitute_select_params(
-            cloned,
+            node,
             param_map,
             shadowed=shadowed,
             local_cte_cols=local_cte_cols,
         )
-    for key, value in list(cloned.args.items()):
+    for key, value in list(node.args.items()):
         if key == "with_":
             continue
-        cloned.set(
+        node.set(
             key,
             _substitute_child(
                 value,
@@ -376,7 +362,22 @@ def _substitute_params(
                 cte_columns=local_cte_cols,
             ),
         )
-    return cloned
+    return node
+
+
+def _substitute_params(
+    node: exp.Expr,
+    param_map: Mapping[str, exp.Expr],
+    *,
+    shadowed: frozenset[str] = frozenset(),
+    cte_columns: Mapping[str, frozenset[str]] | None = None,
+) -> exp.Expr:
+    return _substitute_in_place(
+        node.copy(),
+        param_map,
+        shadowed=shadowed,
+        cte_columns=cte_columns,
+    )
 
 
 class TableFunctionRegistry:
@@ -384,7 +385,31 @@ class TableFunctionRegistry:
 
     def __init__(self, *, default_dataset: str | None = None) -> None:
         self._defs: dict[tuple[str | None, str], TableFunctionDef] = {}
+        self._views: dict[tuple[str | None, str], TableFunctionDef] = {}
         self._default_dataset = default_dataset
+
+    def register_view_ast(self, stmt: exp.Create) -> str:
+        """Register a parsed `CREATE [OR REPLACE] VIEW` statement for staged AST inlining."""
+        if not isinstance(stmt.this, exp.Table) or stmt.expression is None:
+            raise ValueError("Expected CREATE VIEW with table name and SELECT body.")
+        parts = _extract_table_parts(stmt.this)
+        if parts is None:
+            raise ValueError("Missing view name.")
+        raw_dataset, name = parts
+        dataset = raw_dataset or self._default_dataset
+        body = stmt.expression
+        if isinstance(body, exp.Subquery) and body.this is not None:
+            body = body.this
+        defn = TableFunctionDef(dataset=dataset, name=name, params=(), body=body.copy())
+        self._views[canonical_key(dataset, name)] = defn
+        return f"{dataset}__{name}" if dataset else name
+
+    def resolve_view(self, dataset: str | None, name: str) -> TableFunctionDef | None:
+        if dataset is None and self._default_dataset is not None:
+            default_hit = self._views.get(canonical_key(self._default_dataset, name))
+            if default_hit is not None:
+                return default_hit
+        return self._views.get(canonical_key(dataset, name))
 
     def register_ast(self, stmt: exp.Create) -> TableFunctionDef:
         """Register a parsed `CREATE [OR REPLACE] TABLE FUNCTION` statement."""
@@ -430,24 +455,48 @@ class TableFunctionRegistry:
     def specs(self) -> tuple[TableFunctionSpec, ...]:
         return tuple(defn.to_spec() for defn in self._defs.values())
 
+    def extract_hoisted_tvfs(
+        self,
+        node: exp.Expr,
+    ) -> tuple[list[tuple[str, exp.Expr]], exp.Expr]:
+        """Extract nested TVF calls in topological order so SQLite executes each stage once."""
+        hoisted: dict[tuple[tuple[str | None, str], str], tuple[str, exp.Expr]] = {}
+        root_ast = self.inline_ast(node, _hoisted=hoisted)
+        return list(hoisted.values()), root_ast
+
+    def _resolve_inlinable(
+        self,
+        cur: exp.Expr,
+    ) -> tuple[TableFunctionDef, list[exp.Expr]] | None:
+        if not isinstance(cur, exp.Table):
+            return None
+        call_parts = _extract_tvf_call_parts(cur)
+        if call_parts is not None:
+            dataset, fn_name, call_args = call_parts
+            defn = self.resolve(dataset, fn_name)
+            return (defn, call_args) if defn is not None else None
+        table_parts = _extract_table_parts(cur)
+        if table_parts is None:
+            return None
+        v_defn = self.resolve_view(*table_parts)
+        return (v_defn, []) if v_defn is not None else None
+
     def inline_ast(
         self,
         node: exp.Expr,
         *,
         _active_stack: frozenset[tuple[str | None, str]] = frozenset(),
+        _hoisted: dict[tuple[tuple[str | None, str], str], tuple[str, exp.Expr]] | None = None,
     ) -> exp.Expr:
-        """Recursively inline every registered table-function invocation in `node`."""
+        """Recursively inline every registered table-function invocation, hoisting shared CTEs."""
+        is_root_select = _hoisted is None and isinstance(node, exp.Select)
+        hoisted = {} if is_root_select else _hoisted
 
         def _inline_node(cur: exp.Expr) -> exp.Expr:
-            if not isinstance(cur, exp.Table):
+            target = self._resolve_inlinable(cur)
+            if target is None:
                 return cur
-            call_parts = _extract_tvf_call_parts(cur)
-            if call_parts is None:
-                return cur
-            dataset, fn_name, call_args = call_parts
-            defn = self.resolve(dataset, fn_name)
-            if defn is None:
-                return cur
+            defn, call_args = target
             key = canonical_key(defn.dataset, defn.name)
             if key in _active_stack:
                 raise ValueError(f"Recursive table-function cycle detected involving {defn.name!r}")
@@ -455,21 +504,123 @@ class TableFunctionRegistry:
                 raise ValueError(
                     f"Table function {defn.name!r} expects {len(defn.params)} args, got {len(call_args)}"
                 )
-            resolved_args = [self.inline_ast(arg, _active_stack=_active_stack) for arg in call_args]
-            param_map = {
-                pname.lower(): arg_expr
-                for pname, arg_expr in zip(defn.params, resolved_args, strict=True)
-            }
-            substituted = _substitute_params(defn.body, param_map)
-            nested = self.inline_ast(substituted, _active_stack=_active_stack | {key})
+            resolved_args = [
+                self.inline_ast(arg, _active_stack=_active_stack, _hoisted=hoisted)
+                for arg in call_args
+            ]
             alias = (
                 cur.args["alias"].copy()
                 if cur.args.get("alias") is not None
                 else exp.TableAlias(this=exp.to_identifier(defn.name))
             )
+            param_map = {
+                pname.lower(): arg_expr
+                for pname, arg_expr in zip(defn.params, resolved_args, strict=True)
+            }
+            if hoisted is not None:
+                args_sig = ",".join(arg.sql("bigquery") for arg in resolved_args)
+                hoist_key = (key, args_sig)
+                if hoist_key not in hoisted:
+                    substituted = _substitute_params(defn.body, param_map)
+                    nested = self.inline_ast(
+                        substituted,
+                        _active_stack=_active_stack | {key},
+                        _hoisted=hoisted,
+                    )
+                    hoisted[hoist_key] = (f"_bq_tvf_{len(hoisted)}", nested)
+                return exp.Table(this=exp.to_identifier(hoisted[hoist_key][0]), alias=alias)
+            nested = self.inline_ast(
+                _substitute_params(defn.body, param_map),
+                _active_stack=_active_stack | {key},
+            )
             return exp.Subquery(this=nested, alias=alias)
 
-        return node.copy().transform(_inline_node)
+        rewritten = node.copy().transform(_inline_node, copy=False)
+        if is_root_select and hoisted:
+            cte_nodes = [
+                exp.CTE(
+                    this=body,
+                    alias=exp.TableAlias(this=exp.to_identifier(cte_name)),
+                    materialized=True,
+                )
+                for cte_name, body in hoisted.values()
+            ]
+            existing_with = rewritten.args.get("with_")
+            if isinstance(existing_with, exp.With):
+                existing_with.set("expressions", [*cte_nodes, *existing_with.expressions])
+            else:
+                rewritten.set("with_", exp.With(expressions=cte_nodes))
+        return rewritten
+
+
+def _finalize_sqlite_ast(
+    ast_node: exp.Expr,
+    *,
+    qualify_datasets: bool,
+    default_dataset: str | None,
+    preserved_tables: frozenset[str] = frozenset(),
+) -> str:
+    rewritten, flat_to_original = _rewrite_qualified_tables(
+        ast_node,
+        qualify_datasets=qualify_datasets,
+        default_dataset=default_dataset,
+        preserved_tables=preserved_tables,
+    )
+    rewritten = _rewrite_struct_paths(
+        rewritten,
+        scope=_EMPTY_SCOPE,
+        flat_to_original=flat_to_original,
+    )
+    for _ in range(12):
+        changed = False
+
+        def _rewrite_step(node: exp.Expr) -> exp.Expr:
+            nonlocal changed
+            out = _rewrite_bq_node_for_sqlite(node)
+            if out is not node:
+                changed = True
+            return out
+
+        rewritten = rewritten.transform(_rewrite_step, copy=False)
+        if not changed:
+            break
+    return rewritten.sql(dialect="sqlite")
+
+
+def transpile_bigquery_staged(
+    ast_node: exp.Expr,
+    *,
+    registry: TableFunctionRegistry | None = None,
+    qualify_datasets: bool = True,
+    default_dataset: str | None = None,
+) -> tuple[list[tuple[str, str]], str]:
+    """Transpile a query into sequential temp-table stages for nested TVFs plus the main SELECT."""
+    if registry is None or not isinstance(ast_node, exp.Select):
+        return [], transpile_bigquery_ast(
+            ast_node,
+            registry=registry,
+            qualify_datasets=qualify_datasets,
+            default_dataset=default_dataset,
+        )
+    raw_stages, root_ast = registry.extract_hoisted_tvfs(ast_node)
+    stage_sqls: list[tuple[str, str]] = []
+    preserved: set[str] = set()
+    for stage_name, stage_ast in raw_stages:
+        sql_text = _finalize_sqlite_ast(
+            stage_ast,
+            qualify_datasets=qualify_datasets,
+            default_dataset=default_dataset,
+            preserved_tables=frozenset(preserved),
+        )
+        stage_sqls.append((stage_name, sql_text))
+        preserved.add(stage_name.lower())
+    main_sql = _finalize_sqlite_ast(
+        root_ast,
+        qualify_datasets=qualify_datasets,
+        default_dataset=default_dataset,
+        preserved_tables=frozenset(preserved),
+    )
+    return stage_sqls, main_sql
 
 
 def transpile_bigquery_ast(
@@ -481,19 +632,11 @@ def transpile_bigquery_ast(
 ) -> str:
     """Inline table functions, flatten dataset names, rewrite structs, and emit SQLite SQL."""
     rewritten = registry.inline_ast(ast_node) if registry is not None else ast_node.copy()
-    rewritten, flat_to_original = _rewrite_qualified_tables(
+    return _finalize_sqlite_ast(
         rewritten,
         qualify_datasets=qualify_datasets,
         default_dataset=default_dataset,
     )
-    rewritten = _rewrite_struct_paths(
-        rewritten,
-        scope=_EMPTY_SCOPE,
-        flat_to_original=flat_to_original,
-    )
-    for _ in range(4):
-        rewritten = rewritten.transform(_rewrite_bq_node_for_sqlite)
-    return rewritten.sql(dialect="sqlite")
 
 
 def transpile_bigquery_sql(

@@ -12,14 +12,15 @@ BQ Eval evaluates agent telemetry in BigQuery where it already lands, organized 
 
 - **Requirements (`specs/`):** [Layers](specs/layers.md) · [Silver contract](specs/silver.md) · [Gold add-ons](specs/gold.md) · [Feature matrix](specs/features.md) · [Telemetry shapes](specs/shapes.md) · [Attributes & events](specs/attributes.md) · [Target use cases (`UC1`–`UC11`)](specs/use-cases.md) · [Clouds & regions extension](specs/clouds.md) · [Capacity & governance extension](specs/capacity.md) · [Open questions](specs/open-questions.md)
 - **Architecture (`design/`):** [Overview](design/bq-eval.md) · [Layer dependencies](design/layers.md) · [Silver production](design/silver.md) · [Gold pipelines](design/gold.md) · [Capacity & governance](design/capacity.md) · [Multi-cloud & multi-region](design/clouds.md)
-- **Governance & Plan:** [Critical rules](CRITICAL.md) · [Decisions (`ADR-001`–`ADR-047`)](DECISIONS.md) · [Roadmap](docs/roadmap.md)
+- **Governance & Plan:** [Critical rules](CRITICAL.md) · [Decisions (`ADR-001`–`ADR-048`)](DECISIONS.md) · [Roadmap](docs/roadmap.md)
 
 ## Quick Start
 
-> **Note:** `sql/` and `bq_eval/` currently run the `v0.4.0` previous-generation SQL views and local SQLite demo engine while Milestones `M18`–`M19` ([roadmap](docs/roadmap.md)) implement the Silver core and migrate the Gold add-ons onto a single BigQuery SQL source.
+> **Note:** The single-domain GCP Silver core (`sql/silver/`, `bq_eval/runner/`, `bq_eval/upload/`, `bq-eval bootstrap --mode silver`) is implemented alongside the previous-generation `v0.4.0` Gold/demo SQL views while Milestone `M19` ([roadmap](docs/roadmap.md)) migrates Gold add-ons onto Silver.
 
 ```bash
 bash scripts/gate.sh
+uv run bq-eval bootstrap --mode silver --project-id demo-proj
 uv run python -m bq_eval.cli demo --html-out /tmp/bq_eval_scorecard.html
 uv run python -m bq_eval.cli serve --port 8080
 ```

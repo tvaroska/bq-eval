@@ -9,6 +9,12 @@ from pathlib import Path
 
 from bq_eval.core.engine.resources import resolve_packaged_data
 from bq_eval.deploy.contract.bootstrap import BootstrapMode, BootstrapValidationReport
+from bq_eval.deploy.engine.silver_deploy import (
+    SILVER_SQL_ORDER,
+    render_silver_params,
+    validate_silver_statements_offline,
+    validate_view_columns_ordered,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_SQL_DIR = resolve_packaged_data("sql")
@@ -24,6 +30,8 @@ SKIP_DRY_RUN_PREFIXES: tuple[str, ...] = (
     "CREATE SCHEMA",
     "CREATE EXTERNAL TABLE",
     "CREATE MODEL",
+    "CREATE OR REPLACE FUNCTION",
+    "CREATE FUNCTION",
     "CREATE OR REPLACE PROCEDURE",
     "CREATE PROCEDURE",
     "ALTER TABLE",
@@ -34,6 +42,10 @@ ALLOWED_BOOTSTRAP_PREFIXES: tuple[str, ...] = (
     "CREATE TABLE",
     "CREATE OR REPLACE TABLE",
     "CREATE EXTERNAL TABLE",
+    "CREATE OR REPLACE TABLE FUNCTION",
+    "CREATE TABLE FUNCTION",
+    "CREATE OR REPLACE FUNCTION",
+    "CREATE FUNCTION",
     "CREATE OR REPLACE VIEW",
     "CREATE VIEW",
     "CREATE MODEL",
@@ -111,6 +123,26 @@ def _advance_word_depth(
     return block_depth, case_depth
 
 
+def _skip_quoted_literal(sql: str, i: int) -> int:
+    """Advance past a triple-quoted or single/double-quoted BigQuery string literal."""
+    n = len(sql)
+    offset = 1 if sql[i] in {"r", "R", "b", "B"} else 0
+    if sql.startswith('"""', i + offset) or sql.startswith("'''", i + offset):
+        delim = sql[i + offset : i + offset + 3]
+        end_tq = sql.find(delim, i + offset + 3)
+        return -1 if end_tq == -1 else end_tq + 3
+    quote = sql[i]
+    j = i + 1
+    while j < n:
+        if sql[j] == "\\":
+            j += 2
+            continue
+        if sql[j] == quote:
+            return j + 1
+        j += 1
+    return -1
+
+
 def _skip_sql_token_or_comment(sql: str, i: int) -> int | None:
     """Advance past a quoted literal, backtick identifier, or SQL comment if present."""
     n = len(sql)
@@ -120,17 +152,11 @@ def _skip_sql_token_or_comment(sql: str, i: int) -> int | None:
     if sql.startswith("/*", i):
         end = sql.find("*/", i + 2)
         return -1 if end == -1 else end + 2
-    if sql[i] in {"'", '"'}:
-        quote = sql[i]
-        i += 1
-        while i < n:
-            if sql[i] == "\\":
-                i += 2
-                continue
-            if sql[i] == quote:
-                return i + 1
-            i += 1
-        return -1
+    is_prefixed_triple = sql[i] in {"r", "R", "b", "B"} and (
+        sql.startswith('"""', i + 1) or sql.startswith("'''", i + 1)
+    )
+    if is_prefixed_triple or sql[i] in {"'", '"'}:
+        return _skip_quoted_literal(sql, i)
     if sql[i] == "`":
         end_bt = sql.find("`", i + 1)
         return -1 if end_bt == -1 else end_bt + 1
@@ -361,16 +387,42 @@ def _build_mode_core_statements(
     return out
 
 
+def _render_silver_sql_files(
+    resolved_sql_dir: Path,
+    silver_params: dict[str, str],
+) -> list[tuple[str, str]]:
+    ordered: list[tuple[str, str]] = []
+    for rel_name in SILVER_SQL_ORDER:
+        rendered = (resolved_sql_dir / rel_name).read_text(encoding="utf-8")
+        for key, val in silver_params.items():
+            rendered = rendered.replace(f"${{{key}}}", val)
+        for idx, stmt in enumerate(split_sql_statements_stdlib(rendered), start=1):
+            ordered.append((f"{rel_name}#{idx}", stmt))
+    return ordered
+
+
 def render_bootstrap_statements(  # noqa: PLR0913
     *,
     mode: BootstrapMode,
     project_id: str,
     dataset_id: str = "agent_eval",
+    location: str = "US",
     connection_id: str = "us.vertex_ai_connection",
     payload_bucket: str | None = None,
     payload_prefix: str = "bq-eval/",
     traces_dataset_id: str = "obs_traces",
+    platform_traces_dataset_id: str = "silver_internal",
+    platform_traces_table_id: str = "platform_spans",
     logs_dataset_id: str = "obs_logs",
+    silver_internal_dataset: str = "silver_internal",
+    silver_ref_dataset: str = "silver_ref",
+    silver_open_dataset: str = "silver_open",
+    silver_restricted_dataset: str = "silver_restricted",
+    read_margin_minutes: int = 60,
+    settle_minutes: int = 5,
+    outcome_lookback_days: int = 30,
+    shape3_prefix: str = "bq-eval/shape3/",
+    shape3_format: str = "JSON",
     include_omni: bool = False,
     aws_omni_connection_id: str | None = None,
     aws_s3_bucket: str | None = None,
@@ -379,12 +431,40 @@ def render_bootstrap_statements(  # noqa: PLR0913
     azure_container: str | None = None,
     sql_dir: Path | None = None,
 ) -> list[tuple[str, str]]:
-    """Build ordered `(label, sql_statement)` list for cold-start `light`, `full`, or `hybrid` deploy."""
-    if mode not in ("light", "full", "hybrid"):
-        raise ValueError(f"Unsupported bootstrap mode {mode!r}: expected light, full, or hybrid.")
+    """Build ordered `(label, sql_statement)` list for `light`, `full`, `hybrid`, or `silver` deploy."""
+    if mode not in ("light", "full", "hybrid", "silver"):
+        raise ValueError(
+            f"Unsupported bootstrap mode {mode!r}: expected light, full, hybrid, or silver."
+        )
 
     resolved_sql_dir = sql_dir if sql_dir is not None else resolve_packaged_data("sql")
     valid_project = _validate_param(project_id, _PROJECT_RE, "project_id")
+    if mode == "silver":
+        valid_conn = _validate_param(connection_id, _CONNECTION_RE, "connection_id")
+        valid_bucket = _validate_param(
+            payload_bucket or valid_project, _BUCKET_RE, "payload_bucket"
+        )
+        silver_params = render_silver_params(
+            project_id=valid_project,
+            location=location,
+            silver_internal_dataset=silver_internal_dataset,
+            silver_ref_dataset=silver_ref_dataset,
+            silver_open_dataset=silver_open_dataset,
+            silver_restricted_dataset=silver_restricted_dataset,
+            traces_dataset_id=traces_dataset_id,
+            platform_traces_dataset_id=platform_traces_dataset_id,
+            platform_traces_table_id=platform_traces_table_id,
+            logs_dataset_id=logs_dataset_id,
+            connection_id=valid_conn,
+            payload_bucket=valid_bucket,
+            shape3_prefix=shape3_prefix,
+            shape3_format=shape3_format,
+            read_margin_minutes=read_margin_minutes,
+            settle_minutes=settle_minutes,
+            outcome_lookback_days=outcome_lookback_days,
+        )
+        return _render_silver_sql_files(resolved_sql_dir, silver_params)
+
     valid_dataset = _validate_param(dataset_id, _DATASET_RE, "dataset_id")
 
     def _load(filename: str) -> list[str]:
@@ -523,11 +603,13 @@ def _validate_mode_bindings(  # noqa: PLR0913
         if target_view not in views:
             errors.append(f"Missing required span adapter view: {target_view}")
             continue
-        missing = [
-            c for c in schema_cols if not re.search(rf"\b{re.escape(c)}\b", views[target_view])
-        ]
-        if missing:
-            errors.append(f"{target_view}: missing schema columns {missing}")
+        errors.extend(
+            validate_view_columns_ordered(
+                views[target_view],
+                schema_cols,
+                view_name=target_view,
+            )
+        )
     return errors
 
 
@@ -536,9 +618,23 @@ def validate_bootstrap_offline(  # noqa: PLR0913
     mode: BootstrapMode,
     project_id: str = "showcase-project",
     dataset_id: str = "agent_eval",
+    location: str = "US",
     connection_id: str = "us.vertex_ai_connection",
     payload_bucket: str | None = None,
     payload_prefix: str = "bq-eval/",
+    traces_dataset_id: str = "obs_traces",
+    platform_traces_dataset_id: str = "silver_internal",
+    platform_traces_table_id: str = "platform_spans",
+    logs_dataset_id: str = "obs_logs",
+    silver_internal_dataset: str = "silver_internal",
+    silver_ref_dataset: str = "silver_ref",
+    silver_open_dataset: str = "silver_open",
+    silver_restricted_dataset: str = "silver_restricted",
+    read_margin_minutes: int = 60,
+    settle_minutes: int = 5,
+    outcome_lookback_days: int = 30,
+    shape3_prefix: str = "bq-eval/shape3/",
+    shape3_format: str = "JSON",
     include_omni: bool = False,
     aws_omni_connection_id: str | None = None,
     aws_s3_bucket: str | None = None,
@@ -553,9 +649,23 @@ def validate_bootstrap_offline(  # noqa: PLR0913
         mode=mode,
         project_id=project_id,
         dataset_id=dataset_id,
+        location=location,
         connection_id=connection_id,
         payload_bucket=payload_bucket,
         payload_prefix=payload_prefix,
+        traces_dataset_id=traces_dataset_id,
+        platform_traces_dataset_id=platform_traces_dataset_id,
+        platform_traces_table_id=platform_traces_table_id,
+        logs_dataset_id=logs_dataset_id,
+        silver_internal_dataset=silver_internal_dataset,
+        silver_ref_dataset=silver_ref_dataset,
+        silver_open_dataset=silver_open_dataset,
+        silver_restricted_dataset=silver_restricted_dataset,
+        read_margin_minutes=read_margin_minutes,
+        settle_minutes=settle_minutes,
+        outcome_lookback_days=outcome_lookback_days,
+        shape3_prefix=shape3_prefix,
+        shape3_format=shape3_format,
         include_omni=include_omni,
         aws_omni_connection_id=aws_omni_connection_id,
         aws_s3_bucket=aws_s3_bucket,
@@ -564,9 +674,6 @@ def validate_bootstrap_offline(  # noqa: PLR0913
         azure_container=azure_container,
         sql_dir=resolved_sql_dir,
     )
-    schema_path = resolved_sql_dir / "core" / "otel_spans_schema.json"
-    schema_cols = [str(col["name"]) for col in json.loads(schema_path.read_text(encoding="utf-8"))]
-
     unresolved: set[str] = set()
     errors: list[str] = []
     views: dict[str, str] = {}
@@ -588,6 +695,28 @@ def validate_bootstrap_offline(  # noqa: PLR0913
         if vm is not None:
             views[vm.group(1)] = stmt
 
+    bucket = payload_bucket or project_id
+    if mode == "silver":
+        report = validate_silver_statements_offline(
+            sql_dir=resolved_sql_dir,
+            stmts=stmts,
+            project_id=project_id,
+            silver_internal_dataset=silver_internal_dataset,
+            silver_open_dataset=silver_open_dataset,
+            silver_restricted_dataset=silver_restricted_dataset,
+            connection_id=connection_id,
+            payload_bucket=bucket,
+            shape3_prefix=shape3_prefix,
+            unresolved=unresolved,
+            errors=errors,
+            checked=checked,
+            skipped=skipped,
+        )
+        return report, stmts
+
+    schema_path = resolved_sql_dir / "core" / "otel_spans_schema.json"
+    schema_cols = [str(col["name"]) for col in json.loads(schema_path.read_text(encoding="utf-8"))]
+
     errors.extend(
         _validate_mode_bindings(
             mode=mode,
@@ -602,7 +731,6 @@ def validate_bootstrap_offline(  # noqa: PLR0913
     if cycles:
         errors.append(f"Cyclic view dependency detected: {cycles}")
 
-    bucket = payload_bucket or project_id
     prefix = normalize_payload_prefix(payload_prefix)
     report = BootstrapValidationReport(
         mode=mode,

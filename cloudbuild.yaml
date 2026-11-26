@@ -40,11 +40,29 @@ steps:
         IMAGE_REPO="${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/${_IMAGE_NAME}"
         BUILD_TAG="$${IMAGE_REPO}:$${TAG}"
         docker build -t "$${BUILD_TAG}" -f Dockerfile .
-        if [[ -n "${TAG_NAME}" || "${_PUSH}" == "true" ]]; then
-          docker tag "$${BUILD_TAG}" "$${IMAGE_REPO}:latest"
-          docker push "$${BUILD_TAG}"
-          docker push "$${IMAGE_REPO}:latest"
-        fi
+
+  - name: "gcr.io/cloud-builders/docker"
+    id: "container-healthz-smoke"
+    waitFor: ["docker-build"]
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        set -euo pipefail
+        TAG="${SHORT_SHA}"
+        if [[ -z "$${TAG}" ]]; then TAG="local"; fi
+        IMAGE_REPO="${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/${_IMAGE_NAME}"
+        BUILD_TAG="$${IMAGE_REPO}:$${TAG}"
+        CID="$(docker run -d -p 127.0.0.1:18080:8080 "$${BUILD_TAG}")"
+        trap 'docker rm -f "$${CID}" >/dev/null 2>&1 || true' EXIT
+        for _ in $(seq 1 20); do
+          if docker exec "$${CID}" /app/.venv/bin/python -c "import urllib.request; r = urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=2); assert r.status == 200"; then
+            exit 0
+          fi
+          sleep 1
+        done
+        docker logs "$${CID}" >&2
+        exit 1
 
   - name: "gcr.io/cloud-builders/docker"
     id: "trivy-scan"
@@ -67,6 +85,24 @@ steps:
           --ignore-unfixed \
           --exit-code 1 \
           "$${BUILD_TAG}"
+
+  - name: "gcr.io/cloud-builders/docker"
+    id: "docker-push"
+    waitFor: ["container-healthz-smoke", "trivy-scan"]
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        set -euo pipefail
+        if [[ -n "${TAG_NAME}" || "${_PUSH}" == "true" ]]; then
+          TAG="${SHORT_SHA}"
+          if [[ -z "$${TAG}" ]]; then TAG="local"; fi
+          IMAGE_REPO="${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/${_IMAGE_NAME}"
+          BUILD_TAG="$${IMAGE_REPO}:$${TAG}"
+          docker tag "$${BUILD_TAG}" "$${IMAGE_REPO}:latest"
+          docker push "$${BUILD_TAG}"
+          docker push "$${IMAGE_REPO}:latest"
+        fi
 
 options:
   logging: CLOUD_LOGGING_ONLY

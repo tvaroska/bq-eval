@@ -27,8 +27,16 @@ locals {
 
   resolved_bucket_name = var.shared_bucket_name != "" ? var.shared_bucket_name : var.project_id
 
-  trimmed_prefix    = trim(var.payload_prefix, "/")
-  normalized_prefix = local.trimmed_prefix != "" ? "${local.trimmed_prefix}/" : ""
+  trimmed_prefix       = trim(var.payload_prefix, "/")
+  normalized_prefix    = "${local.trimmed_prefix}/"
+  trimmed_shape3       = trim(var.silver_shape3_prefix, "/")
+  normalized_shape3    = "${local.trimmed_shape3}/"
+  shape3_in_payload    = startswith(local.normalized_shape3, local.normalized_prefix)
+  biglake_viewer_expr = (
+    var.create_silver_datasets && !local.shape3_in_payload
+    ? "resource.name.startsWith(\"projects/_/buckets/${local.effective_bucket_name}/objects/${local.normalized_prefix}\") || resource.name.startsWith(\"projects/_/buckets/${local.effective_bucket_name}/objects/${local.normalized_shape3}\")"
+    : "resource.name.startsWith(\"projects/_/buckets/${local.effective_bucket_name}/objects/${local.normalized_prefix}\")"
+  )
 
   effective_bucket_name = (
     var.create_shared_bucket
@@ -55,12 +63,21 @@ locals {
   )
 
   completions_source_uri = "gs://${local.effective_bucket_name}/${local.normalized_prefix}*.jsonl"
+  shape3_hive_prefix     = "gs://${local.effective_bucket_name}/${local.normalized_shape3}"
+  shape3_source_uri      = "${local.shape3_hive_prefix}*"
+
+  silver_datasets = {
+    internal   = { id = var.silver_internal_dataset_id, desc = "Silver internal spans, JCS UDF, unit_entitlements, and workflow_events copies." }
+    ref        = { id = var.silver_ref_dataset_id, desc = "Silver SCD-2 reference tables (app_registry, tools, skill_registry)." }
+    open       = { id = var.silver_open_dataset_id, desc = "Silver open text-free published TVFs and wrapper views." }
+    restricted = { id = var.silver_restricted_dataset_id, desc = "Silver restricted caller-filtered TVFs and Shape-3 BigLake payloads." }
+  }
 
   effective_labels = merge(var.labels, {
     power_policy = var.power_policy
   })
 
-  scheduled_judge_disabled = var.power_policy == "hibernate" || !var.enable_scheduled_judge
+  scheduled_judge_disabled = var.power_policy != "active" || !var.enable_scheduled_judge
 
   effective_lister_role = (
     var.create_shared_bucket_lister_role
@@ -93,13 +110,23 @@ resource "google_storage_bucket" "shared" {
     enabled = true
   }
 
-  lifecycle_rule {
-    action {
-      type = "Delete"
+  dynamic "encryption" {
+    for_each = var.kms_key_name != "" ? [1] : []
+    content {
+      default_kms_key_name = var.kms_key_name
     }
-    condition {
-      age            = var.payload_retention_days
-      matches_prefix = local.normalized_prefix != "" ? [local.normalized_prefix] : []
+  }
+
+  dynamic "lifecycle_rule" {
+    for_each = var.enable_payload_lifecycle_delete ? [1] : []
+    content {
+      action {
+        type = "Delete"
+      }
+      condition {
+        age            = var.payload_retention_days
+        matches_prefix = [local.normalized_prefix]
+      }
     }
   }
 }
@@ -183,7 +210,7 @@ resource "google_storage_bucket_iam_member" "biglake_viewer" {
     content {
       title       = "bq_eval_prefix_biglake_viewer"
       description = "Scope BigLake Object Table viewer reads strictly to the configured payload prefix."
-      expression  = "resource.name.startsWith(\"projects/_/buckets/${local.effective_bucket_name}/objects/${local.normalized_prefix}\")"
+      expression  = local.biglake_viewer_expr
     }
   }
 }
@@ -217,6 +244,62 @@ resource "google_bigquery_table" "completions" {
   ]
 }
 
+resource "google_bigquery_dataset" "silver" {
+  for_each = var.create_silver_datasets ? local.silver_datasets : {}
+
+  project                    = var.project_id
+  dataset_id                 = each.value.id
+  friendly_name              = "BQ Eval Silver (${each.key})"
+  description                = each.value.desc
+  location                   = var.dataset_location
+  delete_contents_on_destroy = !var.deletion_protection
+  labels                     = local.effective_labels
+
+  dynamic "default_encryption_configuration" {
+    for_each = var.kms_key_name != "" ? [1] : []
+    content {
+      kms_key_name = var.kms_key_name
+    }
+  }
+
+  depends_on = [google_project_service.apis]
+}
+
+resource "google_bigquery_table" "shape3_payloads" {
+  count = var.create_silver_datasets ? 1 : 0
+
+  project             = var.project_id
+  dataset_id          = google_bigquery_dataset.silver["restricted"].dataset_id
+  table_id            = "shape3_payloads"
+  description         = "Hive-partitioned BigLake external table over Shape-3 content-by-reference payloads (alongside legacy completions until M19-2)."
+  deletion_protection = var.deletion_protection
+  labels              = local.effective_labels
+
+  schema = jsonencode([
+    { name = "ref_uri", type = "STRING", mode = "NULLABLE", description = "Canonical storage URI referenced by gen_ai.*.messages_ref." },
+    { name = "payload", type = "JSON", mode = "NULLABLE", description = "Stored OTel GenAI message array payload." }
+  ])
+
+  external_data_configuration {
+    autodetect            = false
+    ignore_unknown_values = true
+    source_format         = var.silver_shape3_format
+    source_uris           = [local.shape3_source_uri]
+    connection_id         = local.effective_connection_name
+
+    hive_partitioning_options {
+      mode                     = "CUSTOM"
+      source_uri_prefix        = "${local.shape3_hive_prefix}{dt:DATE}/{hr:STRING}"
+      require_partition_filter = true
+    }
+  }
+
+  depends_on = [
+    google_storage_bucket_iam_member.biglake_viewer,
+    google_storage_bucket_iam_member.biglake_lister,
+  ]
+}
+
 resource "google_logging_project_bucket_config" "default_analytics" {
   count = var.create_logging_link ? 1 : 0
 
@@ -224,7 +307,7 @@ resource "google_logging_project_bucket_config" "default_analytics" {
   location         = "global"
   bucket_id        = "_Default"
   enable_analytics = true
-  retention_days   = 30
+  retention_days   = var.manage_default_log_retention ? var.default_log_retention_days : null
 
   depends_on = [google_project_service.apis]
 }

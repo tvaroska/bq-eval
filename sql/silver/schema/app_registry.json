@@ -1,0 +1,19 @@
+[
+  {"name": "app_id", "type": "STRING", "mode": "REQUIRED", "description": "Canonical registered application identifier."},
+  {"name": "agent_id", "type": "STRING", "mode": "NULLABLE", "description": "Optional sub-agent identifier when a registration is scoped per agent."},
+  {"name": "apphub_application_id", "type": "STRING", "mode": "NULLABLE", "description": "Primary telemetry identity matched against apphub.application.id."},
+  {"name": "service_name", "type": "STRING", "mode": "NULLABLE", "description": "Fallback telemetry service.name paired with environment when apphub.application.id is absent."},
+  {"name": "environment", "type": "STRING", "mode": "NULLABLE", "description": "Deployment environment matched against deployment.environment.name or deployment.environment."},
+  {"name": "allowed_landing_places", "type": "JSON", "mode": "NULLABLE", "description": "JSON array of authorized Bronze landing-place identifiers for ADR-040 identity binding."},
+  {"name": "owner", "type": "STRING", "mode": "NULLABLE", "description": "Owning engineering team or principal."},
+  {"name": "business_unit", "type": "STRING", "mode": "NULLABLE", "description": "Owning business unit used by silver_restricted caller filtering."},
+  {"name": "risk_tier", "type": "STRING", "mode": "NULLABLE", "description": "Risk classification tier (RL-1 through RL-5)."},
+  {"name": "payload_profile", "type": "STRING", "mode": "NULLABLE", "description": "Payload retention profile (ephemeral_sample or regulated_worm)."},
+  {"name": "sampling_mode", "type": "STRING", "mode": "NULLABLE", "description": "Declared sampling mode (full or sampled) per ADR-043."},
+  {"name": "barrier_domain", "type": "STRING", "mode": "NULLABLE", "description": "Information-barrier or MNPI clearance domain."},
+  {"name": "runtime_lane", "type": "STRING", "mode": "NULLABLE", "description": "Expected runtime execution lane (agent_runtime, managed_agents_api, agent_vms, aws_agentcore, on_prem)."},
+  {"name": "mrm_model_id", "type": "STRING", "mode": "NULLABLE", "description": "Optional Model Risk Management inventory identifier."},
+  {"name": "validation_expiry_date", "type": "DATE", "mode": "NULLABLE", "description": "Optional MRM model validation expiry date."},
+  {"name": "effective_from", "type": "TIMESTAMP", "mode": "REQUIRED", "description": "SCD-2 inclusive UTC start timestamp for this registration version."},
+  {"name": "effective_to", "type": "TIMESTAMP", "mode": "NULLABLE", "description": "SCD-2 exclusive UTC end timestamp (NULL while active)."}
+]

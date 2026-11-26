@@ -14,7 +14,9 @@ from bq_eval.cli.app import main as cli_main
 from bq_eval.demo.bundles import verify_receipt_sha256
 from bq_eval.deploy.engine.bq_client import (
     apply_bootstrap_statements,
+    apply_dataset_routine_authorizations,
     bq_cli_query_runner,
+    ensure_observability_traces_link,
     format_bq_job_labels,
 )
 from scripts.blind_sme_kit import (
@@ -98,6 +100,145 @@ def test_bq_job_labels_and_bootstrap_apply_cli(
         assert payload["live_dry_run_executed"] is False
 
     _ = tmp_path
+
+
+def test_apply_link_location_and_stop_on_first_failure(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`S-21`/`S-26`/`T-13`: opt-in link, `--location`, stop on first DDL failure, routine auth & label/JSON guards."""
+    # S-26: BigQuery label keys cannot start with a digit.
+    with pytest.raises(ValueError, match="Invalid BigQuery job label"):
+        format_bq_job_labels({"1badkey": "ok"})
+    assert format_bq_job_labels({"env_1": "2026"}) == (
+        "--label=env_1:2026",
+        "--label=workload:bq-eval",
+    )
+
+    # S-26: Unexpected non-JSON stdout raises ValueError instead of silently returning [].
+    bad_stdout_proc = MagicMock(returncode=0, stdout="<html>proxy error</html>", stderr="")
+    with (
+        patch("bq_eval.deploy.engine.bq_client.shutil.which", return_value="/usr/bin/bq"),
+        patch("bq_eval.deploy.engine.bq_client.subprocess.run", return_value=bad_stdout_proc),
+    ):
+        runner = bq_cli_query_runner("demo-proj")
+        with pytest.raises(ValueError, match="Unexpected non-JSON stdout"):
+            runner("SELECT 1")
+
+    # S-21: `ensure_observability_traces_link` checks `gcloud observability settings update` rc != 0.
+    fail_settings = MagicMock(returncode=1, stdout="", stderr="PERMISSION_DENIED on settings")
+    with (
+        patch("bq_eval.deploy.engine.bq_client.shutil.which", return_value="/usr/bin/gcloud"),
+        patch(
+            "bq_eval.deploy.engine.bq_client.subprocess.run", return_value=fail_settings
+        ) as m_run,
+    ):
+        errs = ensure_observability_traces_link("demo-proj", location="eu")
+        assert len(errs) == 1 and "observability settings update failed" in errs[0]
+        assert "--default-storage-location=eu" in m_run.call_args.args[0]
+
+    # S-21: `apply_bootstrap_statements` passes `--location` and stops on FIRST DDL failure.
+    executed: list[list[str]] = []
+
+    def _fail_first(cmd: list[str], **_kwargs: object) -> MagicMock:
+        executed.append(list(cmd))
+        return MagicMock(returncode=1, stdout="", stderr="Syntax error on stmt 1")
+
+    with (
+        patch("bq_eval.deploy.engine.bq_client.shutil.which", return_value="/usr/bin/bq"),
+        patch("bq_eval.deploy.engine.bq_client.subprocess.run", side_effect=_fail_first),
+    ):
+        errs = apply_bootstrap_statements(
+            "demo-proj",
+            [("stmt#1", "SELECT 1"), ("stmt#2", "SELECT 2"), ("stmt#3", "SELECT 3")],
+            mode="full",
+            location="EU",
+            ensure_traces_link=False,
+        )
+        assert len(errs) == 1 and "stmt#1" in errs[0]
+        assert len(executed) == 1  # Stopped immediately on first failure!
+        assert "--location=EU" in executed[0]
+
+    # S-21: `apply_dataset_routine_authorizations` re-applies routine entries cleanly & stops on error.
+    show_ok = MagicMock(
+        returncode=0,
+        stdout=json.dumps({"access": [{"role": "OWNER", "specialGroup": "projectOwners"}]}),
+        stderr="",
+    )
+    upd_ok = MagicMock(returncode=0, stdout="", stderr="")
+    with (
+        patch("bq_eval.deploy.engine.bq_client.shutil.which", return_value="/usr/bin/bq"),
+        patch("bq_eval.deploy.engine.bq_client.subprocess.run", side_effect=[show_ok, upd_ok]),
+    ):
+        auth_errs = apply_dataset_routine_authorizations(
+            "demo-proj",
+            {"obs_traces": (("demo-proj", "silver_internal", "spans"),)},
+        )
+        assert auth_errs == []
+
+    # S-21: CLI `--ensure-observability-link` is opt-in (off by default) and forwards `--location`.
+    cli_cmds: list[list[str]] = []
+
+    def _cli_ok(cmd: list[str], **_kwargs: object) -> MagicMock:
+        cli_cmds.append(list(cmd))
+        if "show" in cmd:
+            return MagicMock(returncode=0, stdout='{"access":[]}', stderr="")
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    with (
+        patch("bq_eval.deploy.engine.bq_client.shutil.which", return_value="/usr/bin/bq"),
+        patch("bq_eval.deploy.engine.bq_client.subprocess.run", side_effect=_cli_ok),
+    ):
+        rc = cli_main(
+            [
+                "bootstrap",
+                "--mode",
+                "silver",
+                "--project-id",
+                "demo-proj",
+                "--location",
+                "EU",
+                "--apply",
+                "--format",
+                "json",
+            ]
+        )
+        assert rc == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["mode"] == "silver"
+        assert payload["live_apply_executed"] is True
+        assert any("--location=EU" in c for c in cli_cmds)
+        assert not any("observability" in c for c in cli_cmds)  # opt-in only!
+        assert any("update" in c and "demo-proj:silver_internal" in c for c in cli_cmds)
+
+    # S-21: CLI `--dry-run` also forwards `--location`.
+    dry_cmds: list[list[str]] = []
+
+    def _dry_ok(cmd: list[str], **_kwargs: object) -> MagicMock:
+        dry_cmds.append(list(cmd))
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    with (
+        patch("bq_eval.cli.bootstrap_cmd.shutil.which", return_value="/usr/bin/bq"),
+        patch("bq_eval.cli.bootstrap_cmd.subprocess.run", side_effect=_dry_ok),
+    ):
+        rc_dry = cli_main(
+            [
+                "bootstrap",
+                "--mode",
+                "silver",
+                "--project-id",
+                "demo-proj",
+                "--location",
+                "EU",
+                "--dry-run",
+                "--format",
+                "json",
+            ]
+        )
+        assert rc_dry == 0
+        dry_payload = json.loads(capsys.readouterr().out)
+        assert dry_payload["live_dry_run_executed"] is True
+        assert dry_cmds and all("--location=EU" in c for c in dry_cmds)
 
 
 def _assert_blind_pack_hygiene(

@@ -4,10 +4,10 @@
 - **Decision**: Keep three repositories decoupled behind versioned **Ports, Adapters and Contracts**: (1) `bq-eval` owns Bronze/Silver SQL + Gold evaluation, monitoring, and cost add-ons; (2) `agent-evals` owns normative `EVAL-P01`–`EVAL-P11` standards, MRM playbooks, and `eval-audit`; (3) `capacity` owns Newsvendor sizing, sub-minute burst physics, gateway routing/shedding policies, and billing actuation over exported `bq-eval` payloads (never naming `bq-eval` views directly).
 
 ## ADR-002: Progressive Zero-Table Step 1 -> Step 3 View Ladder *(Superseded by `ADR-010`)*
-- **Summary**: Earlier design priced spans inside Step-1 views. Replaced by price-free Silver core + optional Gold add-ons.
+- **Summary**: Replaced by price-free Silver core + Gold add-ons.
 
 ## ADR-003: Cross-Cloud Collector Forwarding & `'unregistered_app'` Defaults *(Superseded by `ADR-010`)*
-- **Summary**: Replaced by in-cloud telemetry residency and `NULL` for missing fields.
+- **Summary**: Replaced by in-cloud residency and `NULL` for missing fields.
 
 ## ADR-004: Fail-Closed Rogan-Gladen Calibration, Rule Pre-Screening & Gwet's `AC2` *(Amended by `ADR-030`, `ADR-033`)*
 - **Decision**: Run deterministic SQL gates before LLM judging; sample `5–10%` passing baseline + `100%` passing slow/throttled tails; report conditional ($\hat{\theta}_{\text{RG}}$) and unconditional pass rates over rule-passing judged traces (billing `100%` of judge runs); fail closed to `NULL` on empty strata, missed floors, or $J / J' \le 10^{-6}$; pair Quadratic `AC2` with 95% CIs (`ADR-033` adds stratum-specific $Se_h/Sp_h$, joint CIs, and binary cut-point agreement).
@@ -52,34 +52,34 @@
 - **Summary**: Raw identities stay in-cloud; no hot external databases; `>= 5m` BigQuery floor; out-of-band KMS-HMAC hashes for cross-cloud joins.
 
 ## ADR-018: Call-Level Join/Lineage Keys & Operational-vs-Calibration Boundary *(Amended by `ADR-028`, `ADR-032`)*
-- **Summary**: Added call-level join/lineage keys and separated operational `events` feedback from Gold blind SME calibration labels.
+- **Summary**: Added call join keys; separated operational `events` feedback from Gold SME labels.
 
 ## ADR-019: Factual Tool Capabilities, Payload-Bound HITL Approvals & Scoped `capacity_pools` *(Amended by `ADR-028`, `ADR-029`, `ADR-032`)*
-- **Summary**: Kept factual capability flags in Silver `tools`, bound `outcome.approved` via `action_id` + `approved_args_sha256` (policies in Gold), split `allowed_models`/`capacity_pools`/`capacity_allocations`, and added versioned `capacity` exports.
+- **Summary**: Kept factual flags in `tools`, bound `outcome.approved` via `action_id` + hash, split capacity tables, added `capacity` exports.
 
 ## ADR-020: Silver Publishes Counts and Facts Only; Each Add-On Defines Its Own Pass
-- **Decision**: Silver holds zero pass/threshold logic (`output_kind`, turn TTFT, wait sums, `is_settled`, slow flags live in Gold). Evaluation's default: completed turn = root OK and not `app_failed`; verified outcome = every trace completed (or closing trace when retries are expected).
+- **Decision**: Silver holds zero pass/threshold logic (`output_kind`, turn TTFT, wait sums, `is_settled`, slow flags live in Gold). Evaluation default: completed turn = root OK and not `app_failed`; verified outcome = every trace completed (or closing trace when retries expected).
 
 ## ADR-021: Read Windows, 5-Minute Floor and SLA Clocks from Trace Start *(Amended by `ADR-035`, `ADR-037`)*
-- **Summary**: Explicit-window Silver reads (`start_time` filter inside `spans`), Gold daily snapshots, `>= 5m` missing-user audit floor, and SLA clocks from trace start.
+- **Summary**: Explicit-window reads (`start_time` inside `spans`), Gold snapshots, `>= 5m` floor, SLA clock from trace start.
 
 ## ADR-022: Input Table for Non-Span Records, Authority by Table & RFC 8785 Hashes *(Amended by `ADR-034`, `ADR-041`)*
-- **Summary**: Non-span records enter via isolated copies of `workflow_events` (authority by landing copy); approvals and commits carry `action_args` hashed in Silver via RFC 8785 JCS.
+- **Summary**: Isolated `workflow_events` copies (authority by table); `action_args` hashed in Silver via RFC 8785 JCS.
 
 ## ADR-023: One-Domain Core; Clouds, Capacity and Governance as Modular Extensions *(Amended by `ADR-028`, `ADR-030`, `ADR-031`)*
-- **Summary**: Kept single-domain core modular while isolating multi-cloud federation ([`specs/clouds.md`](specs/clouds.md)) and gateway/capacity governance ([`specs/capacity.md`](specs/capacity.md)).
+- **Summary**: Modular core isolating multi-cloud ([`specs/clouds.md`](specs/clouds.md)) and capacity ([`specs/capacity.md`](specs/capacity.md)).
 
 ## ADR-024: Long Text by Reference, Completeness Facts, Reference Data & Access *(Amended by `ADR-026`–`ADR-031`, `ADR-045`)*
-- **Summary**: Content by reference for oversized spans, per-part `*_read_whole` flags, tool-flagged `turn_context`, and fail-closed `sampling_probability`.
+- **Summary**: Content by reference, per-part `*_read_whole`, tool-flagged `turn_context`, fail-closed `sampling_probability`.
 
 ## ADR-025: Six Row Rules *(Amended by `ADR-026`, `ADR-029`, `ADR-032`–`ADR-034`, `ADR-037`, `ADR-045`)*
-- **Summary**: Canonical reply text, confidence rollup (`min_model_confidence` default on `outcomes`), agent attribution, child/`mcp.session.id` tool folding, turn-prompt delta rule, and root `user.id`.
+- **Summary**: Reply text, confidence rollup (`min_model_confidence`), agent attribution, child/`mcp.session.id` fold, turn-prompt delta, root `user.id`.
 
 ## ADR-026: Split Open/Restricted Datasets & Single-Pass `spans` *(Amended by `ADR-031`, `ADR-035`, `ADR-038`)*
-- **Summary**: Split `silver_open` and `silver_restricted` datasets; route shapes in one `SELECT` pass over `_AllSpans` (folding ADK Format 1 `call_llm`+`generate_content`).
+- **Summary**: Separate `silver_open`/`silver_restricted`; single-pass `SELECT` over `_AllSpans` folding ADK Format 1 `call_llm`+`generate_content`.
 
 ## ADR-027: BigLake Hive-Partitioned Shape 3 & Execution-Time RFC 8785 Hashing *(Amended by `ADR-036`, `ADR-038`, `ADR-041`, `ADR-045`)*
-- **Summary**: Require BigLake (`WITH CONNECTION`) + Hive date/hour partitions with static predicates; risk-tiered async uploads (`regulated_worm` fail-closed at proxy); execution-time RFC 8785 `bq_eval.args_sha256` on tool spans.
+- **Summary**: BigLake (`WITH CONNECTION`) + Hive date/hour partitions with static predicates; async uploads; execution-time JCS `bq_eval.args_sha256`.
 
 ## ADR-028: `1:N` Gateway `requests`, SCD-2 Governance, Hub Transfer Port & Upstream Collector Port *(Amended by `ADR-031`, `ADR-032`, `ADR-046`)*
 - **Decision**: Price each `1:N` `requests` attempt before aggregating to `model_calls` (separating `gateway_failover_attempts` from `caller_retry_count`); add `burst_metrics_1m` and SCD-2 validity windows; connect non-GCP open rows via tiered federation/transfer (`ADR-046`) with KMS-HMAC hashes and In-Cloud Judge Port; normalize non-conforming SDKs via the Collector Port.
@@ -144,5 +144,8 @@
 - **Decision**: Retire BigQuery Omni spoke SQL (lacks UDFs for `ADR-041` JCS hashing, live `JOIN`s, `AI.GENERATE_TABLE`) and route spokes via three modes ([`specs/clouds.md`](specs/clouds.md)) leaving single-domain Silver Core unchanged: (1) **Direct Cross-Cloud Bronze (`RL-4`–`RL-5`)**: read S3/ADLS Parquet/Iceberg V2+ via Hub Cross-Cloud Connections or Borderless Lakehouse (`P.C.N.T`) on GCP slots with `ADR-044` function filtering; (2) **Zero-Copy Federated `*_open` Spokes (`RL-1`–`RL-3` regional CCI Hub)**: compute Silver + **In-Cloud Judge Port** in-cloud (passing `ADR-041` JCS vectors) and federate leak-free `*_open` Iceberg V2 over CCI, materializing settled Gold windows once/day (`restrictNonCmekServices`); (3) **Staged `Hub Transfer Port`**: `STS -> GCS -> LOAD DATA` for `US`/`EU` Hubs, Azure gaps, and sovereign GCP spokes. Keep `remote_fragment_pending` (`>= 300s`), `object_storage_stats` (`0`-byte dry runs), and 4-part `P.C.N.T` support.
 
 ## ADR-047: `M18-0` Span Edge Cases, Event Ties, Hash-Free Single-Cloud Open Twins, Outcome Close Order & Entitlements
-- **Decision**: Close the 8 pre-SQL `M18-0` rules: (1) a tool span reporting positive tokens keeps `span_kind = 'tool_call'` in `tool_calls` AND sets `is_model_call = true` so its tokens also project to `model_calls`; (2) spans with non-convention `gen_ai.operation.name` and zero tokens (e.g. `invoke_node`) stay `span_kind = 'other'` (`is_model_call = false`), counted in `traces.span_count`, unflagged; (3) `workflow_events` ties on identical `(source_class, event_id, event_time)` break deterministically by canonical row-content lexical order (keeping the 20 fixed columns; no 21st column) while still incrementing `conflict_count`; (4) single-cloud `silver_open` carries no `user_id_hash`/`tenant_id_hash` (preserving `ADR-038`; single-cloud per-user cost reads `silver_restricted`, while KMS-HMAC stays in the multi-cloud extension); (5) multi-day `outcomes` pick the winning close by authority (`system_of_record > platform > application`), then earliest `event_time` (tie-break `event_id` asc), with Silver staying stateless per window (`extends_outside_window`) and Gold deduplicating by `outcome_id`; (6) `unit_entitlements` is fed by CI/directory group-expansion sync (manual SQL in dev), adds optional `tenant_id` (`'*'` wildcard for BU-wide access, explicit `tenant_id` for `UC9` per-tenant isolation), and scheduled Gold jobs read `silver_restricted` via per-business-unit Gold service accounts (plus a dedicated `'__unowned__'` admin/audit SA).
-- **Rejected Options**: dropping tool-span tokens from `model_calls`; adding a 21st `ingested_at` column to `workflow_events`; adding KMS-HMAC hash columns to single-cloud `silver_open`; latest-close overwrite on `outcomes`; one all-units central Gold SA.
+- **Decision**: Close 8 `M18-0` rules: (1) positive-token tool spans keep `span_kind = 'tool_call'` in `tool_calls` AND set `is_model_call = true` for `model_calls`; (2) non-convention zero-token ops (e.g. `invoke_node`) stay `span_kind = 'other'` (`is_model_call = false`), counted, unflagged; (3) identical `(source_class, event_id, event_time)` ties in `workflow_events` break by canonical row-content lexical order (keeping 20 fixed columns) while incrementing `conflict_count`; (4) single-cloud `silver_open` omits `user_id_hash`/`tenant_id_hash` (`ADR-038`; KMS-HMAC stays in `clouds.md`); (5) multi-day `outcomes` pick close by authority (`system_of_record > platform > application`), then earliest `event_time` (`event_id` asc), with Gold deduplicating by `outcome_id`; (6) `unit_entitlements` is directory/CI-synced with `(principal_email, business_unit, tenant_id)` (`'*'` wildcard / `UC9` tenant), read by per-BU Gold SAs plus `'__unowned__'` admin SA.
+
+## ADR-048: Silver Dataset Layout, Deploy-Time Window Constants, Python JCS UDF & Bootstrap Mode
+- **Decision**: Settle the `M18-4`/`M18-6` physical layout: (1) four datasets — `silver_internal` (internal `spans`, `jcs` UDF, `unit_entitlements`, 3 `workflow_events` copies), `silver_ref` (SCD-2 `app_registry`, `tools`, `skill_registry`), `silver_open`, and `silver_restricted` — preserving `M18-2` 2-hop authorized-routine isolation so `silver_open` callers never read `silver_internal`; (2) `read_margin` (`60m`), `settle_time` (`5m`), and `outcome_lookback_days` (`30d`) render into TVF SQL at deploy time via placeholders (`${READ_MARGIN_MINUTES}`, `${SETTLE_MINUTES}`, `${OUTCOME_LOOKBACK_DAYS}`), keeping `37x` BigQuery pruning and `(from_time, to_time)` signatures; (3) trace-store JSONL fixtures, one SQL file per Silver object under `sql/silver/`, and `bq-eval bootstrap --mode silver` (leaving legacy `--mode light` intact until `M19-2`); (4) RFC 8785 JCS hashing (`sql/silver/jcs.sql`) uses a BigQuery `LANGUAGE python` (`runtime_version = 'python-3.11'`) UDF behind a `65,532`-byte guard, sharing the exact canonicalizer algorithm with `bq_eval/runner/`.
+- **Rejected Options**: three datasets placing `spans` inside `silver_restricted`; table-driven window constants (defeats pruning); `LANGUAGE js` UDF; separate `silver-deploy` CLI verb.
