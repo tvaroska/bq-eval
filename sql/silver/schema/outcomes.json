@@ -2,7 +2,7 @@
   {"name": "outcome_id", "type": "STRING", "mode": "REQUIRED", "description": "Opaque EVAL-P11 outcome.id seen on traces, events, or closing spans inside [from_time, to_time)."},
   {"name": "is_closed", "type": "BOOL", "mode": "REQUIRED", "description": "TRUE when an outcome.closed span or event is observed within the bounded lookback window."},
   {"name": "open_time", "type": "TIMESTAMP", "mode": "NULLABLE", "description": "Earliest outcome.opened event_time (NULL when no opening event was emitted)."},
-  {"name": "close_time", "type": "TIMESTAMP", "mode": "NULLABLE", "description": "Timestamp of the winning outcome.closed record (SoR event preferred, else earliest close; NULL when open)."},
+  {"name": "close_time", "type": "TIMESTAMP", "mode": "NULLABLE", "description": "Timestamp of the winning outcome.closed record (authority system_of_record > platform > application, then earliest event_time, tie-break event_id asc; NULL when open; ADR-047)."},
   {"name": "outcome_status", "type": "STRING", "mode": "NULLABLE", "description": "Terminal outcome.status (succeeded, failed, abandoned, escalated, rejected, denied; NULL when open or unreported)."},
   {"name": "outcome_subject", "type": "STRING", "mode": "NULLABLE", "description": "Optional business case/ticket/document key from outcome.subject (restricted outcomes only; omitted from outcomes_open)."},
   {"name": "outcome_owner", "type": "STRING", "mode": "NULLABLE", "description": "Claimed owning application ID from outcome.owner."},

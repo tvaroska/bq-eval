@@ -1,0 +1,105 @@
+{
+  "spec": "RFC 8785 (JCS) + SHA-256 (ADR-041)",
+  "provenance": "spec_vector",
+  "max_input_bytes": 65532,
+  "vectors": [
+    {
+      "id": "tool_call_canonical_base",
+      "group": "transfer_funds_100",
+      "note": "Baseline ADR-041 wrapped tool_name + args object used by synthetic tool-proxy and workflow_events fixtures.",
+      "input_json": "{\"tool_name\": \"transfer_funds\", \"args\": {\"amount\": 100, \"currency\": \"USD\", \"to_account\": \"acct-9001\"}}",
+      "canonical_json": "{\"args\":{\"amount\":100,\"currency\":\"USD\",\"to_account\":\"acct-9001\"},\"tool_name\":\"transfer_funds\"}",
+      "sha256": "63c3d2b51b3e3cd9138f4652c5c00e84611a11f187560f23bd314960f8cdfcf9"
+    },
+    {
+      "id": "tool_call_float_reordered_equiv",
+      "group": "transfer_funds_100",
+      "note": "Reordered keys and float 100.0 must match tool_call_canonical_base (BigQuery TO_JSON_STRING fails this).",
+      "input_json": "{\"args\": {\"to_account\": \"acct-9001\", \"amount\": 100.0, \"currency\": \"USD\"}, \"tool_name\": \"transfer_funds\"}",
+      "canonical_json": "{\"args\":{\"amount\":100,\"currency\":\"USD\",\"to_account\":\"acct-9001\"},\"tool_name\":\"transfer_funds\"}",
+      "sha256": "63c3d2b51b3e3cd9138f4652c5c00e84611a11f187560f23bd314960f8cdfcf9"
+    },
+    {
+      "id": "tool_call_sci_notation_equiv",
+      "group": "transfer_funds_100",
+      "note": "Scientific notation 1e2 and whitespace must match tool_call_canonical_base.",
+      "input_json": "{\n  \"tool_name\" : \"transfer_funds\",\n  \"args\" : { \"currency\" : \"USD\", \"amount\" : 1e2, \"to_account\" : \"acct-9001\" }\n}",
+      "canonical_json": "{\"args\":{\"amount\":100,\"currency\":\"USD\",\"to_account\":\"acct-9001\"},\"tool_name\":\"transfer_funds\"}",
+      "sha256": "63c3d2b51b3e3cd9138f4652c5c00e84611a11f187560f23bd314960f8cdfcf9"
+    },
+    {
+      "id": "negative_zero_equiv_a",
+      "group": "zero_normalization",
+      "note": "Negative zero -0.0 and 0.0 normalize to integer 0.",
+      "input_json": "{\"tool_name\": \"set_limit\", \"args\": {\"delta\": -0.0, \"floor\": 0.0}}",
+      "canonical_json": "{\"args\":{\"delta\":0,\"floor\":0},\"tool_name\":\"set_limit\"}",
+      "sha256": "74981f3243be4bc6d213ee1d10e591b8d76605c0a96e20dc0fcc072342aa6202"
+    },
+    {
+      "id": "negative_zero_equiv_b",
+      "group": "zero_normalization",
+      "note": "Integer zeros match -0.0 and 0.0.",
+      "input_json": "{\"args\": {\"floor\": 0, \"delta\": 0}, \"tool_name\": \"set_limit\"}",
+      "canonical_json": "{\"args\":{\"delta\":0,\"floor\":0},\"tool_name\":\"set_limit\"}",
+      "sha256": "74981f3243be4bc6d213ee1d10e591b8d76605c0a96e20dc0fcc072342aa6202"
+    },
+    {
+      "id": "rfc8785_appendix_b_numbers",
+      "group": "numbers",
+      "note": "RFC 8785 Appendix B IEEE-754 ES6 number serialization edge cases.",
+      "input_json": "{\"tool_name\": \"calc_risk\", \"args\": {\"values\": [333333333.33333329, 1e30, 4.50, 2e-3, 0.000000000000000000000000001, 1e20, 1e21, 1e-6, 1e-7]}}",
+      "canonical_json": "{\"args\":{\"values\":[333333333.3333333,1e+30,4.5,0.002,1e-27,100000000000000000000,1e+21,0.000001,1e-7]},\"tool_name\":\"calc_risk\"}",
+      "sha256": "1d32ef69b9f29ae597a6528a60ba87b085a0a3ba53cfc66e8178b79828d02ab2"
+    },
+    {
+      "id": "rfc8785_utf16_key_sort",
+      "group": "utf16_sort",
+      "note": "RFC 8785 section 3.2.3 UTF-16 code-unit sort: supplementary U+1F600 (0xD83D 0xDE00) sorts before U+FB33.",
+      "input_json": "{\"tool_name\": \"unicode_op\", \"args\": {\"\\u20ac\": \"Euro\", \"\\r\": \"CR\", \"1\": \"One\", \"\\u0080\": \"Ctrl\", \"\\ufb33\": \"Hebrew\", \"\\ud83d\\ude00\": \"Emoji\", \"\\u00f6\": \"O-umlaut\", \"b\": 2, \"a\": 1}}",
+      "canonical_json": "{\"args\":{\"\\r\":\"CR\",\"1\":\"One\",\"a\":1,\"b\":2,\"\":\"Ctrl\",\"ö\":\"O-umlaut\",\"€\":\"Euro\",\"😀\":\"Emoji\",\"דּ\":\"Hebrew\"},\"tool_name\":\"unicode_op\"}",
+      "sha256": "4ea5653a35fe5dc6d42a6e1d29dd22633112860ba8ac5f68de29e2919f959e64"
+    },
+    {
+      "id": "string_escapes_and_unescaped_slash",
+      "group": "strings",
+      "note": "Control-char escaping (\\b\\f\\n\\r\\t\\u0000\\u001f), quotes, backslash, unescaped slash, and literal UTF-8.",
+      "input_json": "{\"tool_name\": \"send_notice\", \"args\": {\"ctrl\": \"\\b\\f\\n\\r\\t\\u0000\\u001f\", \"quote_bs\": \"\\\"\\\\\", \"url\": \"https:\\/\\/example.invalid\\/a\\/b\", \"utf8\": \"caf\\u00e9 \\u20ac \\ud83d\\ude00\"}}",
+      "canonical_json": "{\"args\":{\"ctrl\":\"\\b\\f\\n\\r\\t\\u0000\\u001f\",\"quote_bs\":\"\\\"\\\\\",\"url\":\"https://example.invalid/a/b\",\"utf8\":\"café € 😀\"},\"tool_name\":\"send_notice\"}",
+      "sha256": "2fdbeb85555989d7c7411d135b43b7a879881b1f7a55a1a52012a2c1d9a63d10"
+    },
+    {
+      "id": "nested_arrays_and_empty_containers",
+      "group": "containers",
+      "note": "Array order preserved; empty object, empty array, null, and booleans stay distinct.",
+      "input_json": "{\"tool_name\": \"update_profile\", \"args\": {\"order\": [3, 1, 2], \"empty_obj\": {}, \"empty_arr\": [], \"nil\": null, \"flags\": [true, false], \"nested\": {\"z\": 1, \"a\": [{\"y\": 2, \"x\": 1}]}}}",
+      "canonical_json": "{\"args\":{\"empty_arr\":[],\"empty_obj\":{},\"flags\":[true,false],\"nested\":{\"a\":[{\"x\":1,\"y\":2}],\"z\":1},\"nil\":null,\"order\":[3,1,2]},\"tool_name\":\"update_profile\"}",
+      "sha256": "7fede29a781ba107b7cdc145b1d6ef2fda5954eb08386ba21065cc72431cb58e"
+    },
+    {
+      "id": "tool_name_binding_approve",
+      "group": "tool_binding_approve",
+      "note": "Must differ from tool_name_binding_cancel even with identical args (ADR-029/ADR-041).",
+      "input_json": "{\"tool_name\": \"approve_wire\", \"args\": {\"amount\": 100}}",
+      "canonical_json": "{\"args\":{\"amount\":100},\"tool_name\":\"approve_wire\"}",
+      "sha256": "d356a299e71982a0b70a13cd2437ff8e5bff123e87af2cae83bdc020023f44e9"
+    },
+    {
+      "id": "tool_name_binding_cancel",
+      "group": "tool_binding_cancel",
+      "note": "Different tool_name with identical args produces distinct digest.",
+      "input_json": "{\"tool_name\": \"cancel_wire\", \"args\": {\"amount\": 100}}",
+      "canonical_json": "{\"args\":{\"amount\":100},\"tool_name\":\"cancel_wire\"}",
+      "sha256": "b41ca8b5a785f624fd359f6e2b1ecaa0e97423b8dae94c280b55f5d93b00ef4b"
+    }
+  ],
+  "oversize_guard": {
+    "template_prefix": "{\"args\":{\"blob\":\"",
+    "template_suffix": "\"},\"tool_name\":\"bulk_write\"}",
+    "fill_char": "x",
+    "accepted_fill_len": 65487,
+    "accepted_byte_len": 65532,
+    "accepted_sha256": "c00e4bb2d1fd0379fc2a83c6ddc73b75a533f600e3dcf01fd04aa6883e460dc4",
+    "rejected_fill_len": 65488,
+    "rejected_byte_len": 65533
+  }
+}

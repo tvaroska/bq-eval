@@ -6,7 +6,7 @@
   {"name": "response_id", "type": "STRING", "mode": "NULLABLE", "description": "gen_ai.response.id provider response identifier; never filled from client_request_id."},
   {"name": "outcome_id", "type": "STRING", "mode": "NULLABLE", "description": "Primary outcome.id of the span or enclosing trace."},
   {"name": "trace_owner_app_id", "type": "STRING", "mode": "NULLABLE", "description": "Owning application ID resolved with gateway caller_app_id precedence (NULL when unregistered)."},
-  {"name": "operation_name", "type": "STRING", "mode": "NULLABLE", "description": "gen_ai.operation.name (chat, generate_content, embeddings, or custom operation on positive-token spans)."},
+  {"name": "operation_name", "type": "STRING", "mode": "NULLABLE", "description": "gen_ai.operation.name (chat, generate_content, embeddings, or custom/tool operation on positive-token spans, ADR-047)."},
   {"name": "start_time", "type": "TIMESTAMP", "mode": "REQUIRED", "description": "Model call start UTC timestamp."},
   {"name": "end_time", "type": "TIMESTAMP", "mode": "REQUIRED", "description": "Model call end UTC timestamp."},
   {"name": "agent_id", "type": "STRING", "mode": "NULLABLE", "description": "gen_ai.agent.id on the call span, else on the nearest enclosing agent span."},

@@ -12,7 +12,7 @@ BQ Eval evaluates agent telemetry in BigQuery where it already lands, organized 
 
 - **Requirements (`specs/`):** [Layers](specs/layers.md) · [Silver contract](specs/silver.md) · [Gold add-ons](specs/gold.md) · [Feature matrix](specs/features.md) · [Telemetry shapes](specs/shapes.md) · [Attributes & events](specs/attributes.md) · [Target use cases (`UC1`–`UC11`)](specs/use-cases.md) · [Clouds & regions extension](specs/clouds.md) · [Capacity & governance extension](specs/capacity.md) · [Open questions](specs/open-questions.md)
 - **Architecture (`design/`):** [Overview](design/bq-eval.md) · [Layer dependencies](design/layers.md) · [Silver production](design/silver.md) · [Gold pipelines](design/gold.md) · [Capacity & governance](design/capacity.md) · [Multi-cloud & multi-region](design/clouds.md)
-- **Governance & Plan:** [Critical rules](CRITICAL.md) · [Decisions (`ADR-001`–`ADR-046`)](DECISIONS.md) · [Roadmap](docs/roadmap.md)
+- **Governance & Plan:** [Critical rules](CRITICAL.md) · [Decisions (`ADR-001`–`ADR-047`)](DECISIONS.md) · [Roadmap](docs/roadmap.md)
 
 ## Quick Start
 

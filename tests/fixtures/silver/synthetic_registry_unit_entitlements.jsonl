@@ -1,0 +1,5 @@
+{"business_unit": "retail", "principal_email": "gold-eval-retail@showcase-project.iam.gserviceaccount.com", "tenant_id": "*"}
+{"business_unit": "wealth", "principal_email": "gold-eval-wealth@showcase-project.iam.gserviceaccount.com", "tenant_id": "*"}
+{"business_unit": "__unowned__", "principal_email": "gold-eval-unowned@showcase-project.iam.gserviceaccount.com", "tenant_id": "*"}
+{"business_unit": "wealth", "principal_email": "analyst-tenant-a@example.invalid", "tenant_id": "tenant-acme-01"}
+{"business_unit": "operations", "principal_email": "analyst-ops@example.invalid", "tenant_id": "*"}

@@ -1,0 +1,112 @@
+{
+  "schema_version": "1",
+  "milestone": "M18-1",
+  "fixtures": [
+    {
+      "file": "recorded_allspans.jsonl",
+      "provenance": "recorded",
+      "target_table": "obs_traces._AllSpans",
+      "row_count": 95,
+      "sha256": "aa70a0a5d8fc455ea46ada4940bcabbffda1e6da987def100dcd328d6c2b218e",
+      "covers": "ADK Format 1 (2 traces), ADK Format 2 (2 traces), runtime-only duplicate keys, multi-service app duplicate keys + runtime + token-without-content + invoke_node",
+      "captured_date_utc": "2026-11-26",
+      "scrubbed": true
+    },
+    {
+      "file": "recorded_alllogs_eval.jsonl",
+      "provenance": "recorded",
+      "target_table": "obs_logs._AllLogs",
+      "row_count": 1,
+      "sha256": "d969be0a463c4780737105be3fa6fddc81732dd0c82012524d7a6244de46040f",
+      "covers": "Recorded gen_ai.evaluation.result OTLP log row with labels JSON and bare-hex trace",
+      "captured_date_utc": "2026-11-26",
+      "scrubbed": true
+    },
+    {
+      "file": "synthetic_shape3_spans.jsonl",
+      "provenance": "SYNTHETIC_UNTIL_RECORDED",
+      "target_table": "obs_traces._AllSpans",
+      "row_count": 5,
+      "sha256": "f6d2bba515e208b02eb44669665eb4f7a6900ba4f54b5b17f78d4deb183ce6de",
+      "covers": "Shape 3 *_ref spans, execute_tool with gen_ai.tool.call.id fallback, missing-ref turn, embeddings span"
+    },
+    {
+      "file": "synthetic_shape3_biglake_payloads.jsonl",
+      "provenance": "SYNTHETIC_UNTIL_RECORDED",
+      "target_table": "silver_restricted.shape3_payloads",
+      "row_count": 3,
+      "sha256": "d1b01189fd201618635c42082f81cfb48209d292872f5d4c263299ec7681d4ed",
+      "covers": "Hive-partitioned BigLake (dt, hr, ref_uri, payload) rows matching synthetic_shape3_spans with one intentional missing ref"
+    },
+    {
+      "file": "synthetic_platform_gateway_proxy_spans.jsonl",
+      "provenance": "SYNTHETIC_UNTIL_RECORDED",
+      "target_table": "platform_traces._AllSpans",
+      "row_count": 5,
+      "sha256": "dabd39b784539970f08fa617b0f4fed92f33ce82be59d21df06d38e431d1a5f7",
+      "covers": "Platform gateway + tool-proxy spans (caller_app_id, OBO, args_sha256, MCP server fold, guardrail.intervention, outcome.closed, positive-token tool span per ADR-047)"
+    },
+    {
+      "file": "synthetic_workflow_events_sor.jsonl",
+      "provenance": "SYNTHETIC_UNTIL_RECORDED",
+      "target_table": "workflow_events_sor",
+      "row_count": 10,
+      "sha256": "aef2f24b48d1e2352d709bf917710beba5a14cb5d33b656094cfd5f55fa5f89a",
+      "covers": "20-column SoR workflow_events (outcome.opened, outcome.approved, action.committed, outcome.linked, ci.verified, outcome.closed, duplicate + same-timestamp tie per ADR-047)"
+    },
+    {
+      "file": "synthetic_workflow_events_platform.jsonl",
+      "provenance": "SYNTHETIC_UNTIL_RECORDED",
+      "target_table": "workflow_events_platform",
+      "row_count": 2,
+      "sha256": "0f3b4b29dcd22da40b230ea3730555f7c3b7fac59d0992b9f734ad13b38f0121",
+      "covers": "20-column platform workflow_events (guardrail.intervention, model.approved)"
+    },
+    {
+      "file": "synthetic_workflow_events_app.jsonl",
+      "provenance": "SYNTHETIC_UNTIL_RECORDED",
+      "target_table": "workflow_events_app",
+      "row_count": 4,
+      "sha256": "5d494598308cc802583c5b71aa2e1819280e1ae90c4c0982de972d18d82bf483",
+      "covers": "20-column application workflow_events (state.transition, feedback.thumbs_down, unauthoritative ci.verified, earlier app outcome.closed)"
+    },
+    {
+      "file": "synthetic_registry_app_registry.jsonl",
+      "provenance": "SYNTHETIC_UNTIL_RECORDED",
+      "target_table": "app_registry",
+      "row_count": 6,
+      "sha256": "ef8c0ce4705c1b8faed1f898e3be8f769dfd38bf07f3f76a8d73adb21dac3482",
+      "covers": "SCD-2 application registry covering recorded and synthetic services with allowed_landing_places"
+    },
+    {
+      "file": "synthetic_registry_tools.jsonl",
+      "provenance": "SYNTHETIC_UNTIL_RECORDED",
+      "target_table": "tools",
+      "row_count": 6,
+      "sha256": "4b9040ebaa913438727c2f82c551a9551aaab5af840c01032be18a88fc49765d",
+      "covers": "SCD-2 tool capability flags (writes_state, sends_external_reply, returns_pii)"
+    },
+    {
+      "file": "synthetic_registry_skill_registry.jsonl",
+      "provenance": "SYNTHETIC_UNTIL_RECORDED",
+      "target_table": "skill_registry",
+      "row_count": 2,
+      "sha256": "4dc03632b25159e780d5462c6c87ebf625bf1025308e21906dcbd6f1e32d1ee4",
+      "covers": "SCD-2 skill_sha256 and protected_block_sha256 pins"
+    },
+    {
+      "file": "synthetic_registry_unit_entitlements.jsonl",
+      "provenance": "SYNTHETIC_UNTIL_RECORDED",
+      "target_table": "unit_entitlements",
+      "row_count": 5,
+      "sha256": "2bc134a858df9fc6dd857bfd9d7cd8e9b55fd8ff2d3cba4a4b9c19e702f0aa68",
+      "covers": "Caller entitlement rows (principal_email, business_unit, tenant_id) covering per-BU Gold SAs, UC9 tenant isolation, and __unowned__ admin (ADR-044, ADR-047)"
+    }
+  ],
+  "hash_vectors": {
+    "file": "adr041_jcs_vectors.json",
+    "provenance": "spec_vector",
+    "vector_count": 11,
+    "sha256": "91eed0bd6478c9046b75b34156b033fec9a11a7f596f753d82d83b4002264638"
+  }
+}

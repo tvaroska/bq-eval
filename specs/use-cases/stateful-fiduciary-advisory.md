@@ -15,7 +15,7 @@ tags: [bq-eval, use-cases]
 |---|---|
 | **Purpose** | Deliver personalized, regulated fiduciary/wealth-wellness guidance across multi-week client journeys where pure-text advice carries regulatory liability even with zero system-of-record writes. |
 | **Topology & state** | Stateful turn APIs (`bq_eval.previous_interaction_id`, `state_mode = 'stateful_cmek_platform' | 'stateful_cmek_gateway'`), persistent cross-session memory operations (`memory_*`), ACL-filtered vector retrieval (`data_source_id`, `corpus_digest`, `acl_dropped_count`), explicit `Guide` -> `Answer` state transitions, and warm handoffs to licensed human advisors. |
-| **Custody, privacy & RTBF** | Regulated (`RL-1`, `payload_profile = 'regulated_worm'`, `sampling_mode = 'full'`, mandatory SCD-2) under strict client-PII isolation (per-tenant/employer BigQuery Row Access Policies on `silver_restricted`, PII-masked LLM judge prompts, and PII-free **GCS Object-Lock + CMEK** WORM snapshots paired with per-client crypto-shredding DEKs for GDPR/CCPA Right-to-Be-Forgotten deletion). |
+| **Custody, privacy & RTBF** | Regulated (`RL-1`, `payload_profile = 'regulated_worm'`, `sampling_mode = 'full'`, mandatory SCD-2) under strict client-PII isolation (per-tenant `unit_entitlements.tenant_id` caller filtering on `light` `silver_restricted` functions plus BigQuery Row Access Policies on stored tables per `ADR-044`/`ADR-047`, PII-masked LLM judge prompts, and PII-free **GCS Object-Lock + CMEK** WORM snapshots paired with per-client crypto-shredding DEKs for GDPR/CCPA Right-to-Be-Forgotten deletion). |
 | **Compliance controls** | Dozens of layered deterministic, DLP, safety, and policy guardrails (`guardrail.intervention` with `control_id`, `layer`, `action`) plus `RL-1` (`>= 100` judged) dual-SME calibration and `< 2%` cohort/demographic parity monitoring. |
 
 ## Telemetry & Data Expectations
@@ -34,6 +34,6 @@ tags: [bq-eval, use-cases]
 3. **Guardrail FP/FN stratified judging & `RL-1` (`>= 100`) `SR 11-7` calibration**
    - Judge stratified samples of `guardrail.intervention` (`action = 'block'`) turns to measure false-positive over-refusal per `control_id`, alongside false-negative audits on passing turns; enforce stratum-specific $Se_h/Sp_h$, binary cut-point agreement alongside `AC2 >= 0.80`, `RL-1` (`>= 100`) SME floors, and `< 2%` cohort/demographic parity checks.
 4. **PII isolation, GCS Object-Lock WORM & RTBF compliance**
-   - Enforce per-tenant Row Access Policies on `silver_restricted`, PII-masked judge prompts, PII-free GCS Retention-Lock WORM snapshots (`snapshot_sha256`), and per-subject crypto-shredding keys for RTBF erasure.
+   - Enforce per-tenant isolation via `unit_entitlements.tenant_id` inside `light` `silver_restricted` functions (`ADR-044`, `ADR-047`) plus Row Access Policies on stored tables, PII-masked judge prompts, PII-free GCS Retention-Lock WORM snapshots (`snapshot_sha256`), and per-subject crypto-shredding keys for RTBF erasure.
 5. **Memory, vector-retrieval & session-cache cost attribution**
    - Attribute vector-retrieval, memory-store, and `previous_interaction_id` prefix-cache cliff costs alongside LLM inference into per-client advisory `CPVO`.

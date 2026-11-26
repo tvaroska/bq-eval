@@ -13,7 +13,7 @@
 
 Before editing this repository, read:
 1. [`CRITICAL.md`](CRITICAL.md) — Non-negotiable Silver/Gold, calibration, cost, boundary, and hygiene invariants.
-2. [`DECISIONS.md`](DECISIONS.md) — Architectural Decision Records (`ADR-001` through `ADR-046`).
+2. [`DECISIONS.md`](DECISIONS.md) — Architectural Decision Records (`ADR-001` through `ADR-047`).
 3. [`docs/roadmap.md`](docs/roadmap.md) — Live milestone status (`M18`–`M20`) and review backlog.
 
 ---
@@ -35,7 +35,7 @@ Before editing this repository, read:
 | [`bq_eval/deploy/`](bq_eval/deploy/__init__.py) | Bootstrap SQL rendering, offline validation ([`bootstrap.py`](bq_eval/deploy/engine/bootstrap.py)), and `bq` CLI query runner ([`bq_client.py`](bq_eval/deploy/engine/bq_client.py)). Built on `core`. |
 | [`bq_eval/demo/`](bq_eval/demo/__init__.py) | Corpus replay and HTML workbench ([`bundles.py`](bq_eval/demo/bundles.py), [`pipeline.py`](bq_eval/demo/pipeline.py), [`loadgen.py`](bq_eval/demo/loadgen.py), [`golden_seeds.py`](bq_eval/demo/golden_seeds.py), [`render/`](bq_eval/demo/render/__init__.py)). Built on `core` and `finops`. |
 | [`bq_eval/cli/`](bq_eval/cli/__init__.py) | Driving CLI ([`app.py`](bq_eval/cli/app.py), [`bootstrap_cmd.py`](bq_eval/cli/bootstrap_cmd.py), [`capacity_cmd.py`](bq_eval/cli/capacity_cmd.py)) and loopback HTTP server ([`server.py`](bq_eval/cli/server.py)). |
-| [`tests/`](tests/conftest.py) | `193` tests across Silver schema contracts ([`test_silver_contract.py`](tests/test_silver_contract.py)), SQL AST/SQLite parity, calibration, cost, quota, ports, workbench, bootstrap/wheel/Terraform, folder AST isolation ([`test_isolation_guard.py`](tests/test_isolation_guard.py)), repo/link hygiene ([`test_repo_hygiene.py`](tests/test_repo_hygiene.py)), doc contracts ([`test_doc_contract.py`](tests/test_doc_contract.py)), and `800`-line source + test hygiene (`standards_debt.json = 0`). |
+| [`tests/`](tests/conftest.py) | `195` tests across Silver schema contracts ([`test_silver_contract.py`](tests/test_silver_contract.py)), Silver fixture manifest & `ADR-041` vectors ([`test_silver_fixture_manifest.py`](tests/test_silver_fixture_manifest.py)), SQL AST/SQLite parity, calibration, cost, quota, ports, workbench, bootstrap/wheel/Terraform, folder AST isolation ([`test_isolation_guard.py`](tests/test_isolation_guard.py)), repo/link hygiene ([`test_repo_hygiene.py`](tests/test_repo_hygiene.py)), doc contracts ([`test_doc_contract.py`](tests/test_doc_contract.py)), and `800`-line source + test hygiene (`standards_debt.json = 0`). |
 
 ### Recording decisions
 
