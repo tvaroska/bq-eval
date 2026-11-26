@@ -1,19 +1,21 @@
 # Declarative Structural & Security AST Contract (ast-grep)
-# Enforces package and layer boundaries across bq_eval/{core,finops,deploy,demo,cli}/:
-# 1. bq_eval/** never imports examples/, benchmarks/, dynamic imports, or LLM SDKs.
-# 2. Packages: core imports no other package; finops and deploy build on core; demo builds on
-#    core and finops; only cli may import everything.
+# Run from the repository root (`ast-grep scan --rule specs/ast.rules.yaml`); globs use `**/bq_eval/...`
+# so both repo-relative and absolute paths match consistently across `bq_eval/{core,finops,deploy,runner,demo,cli}/`:
+# 1. bq_eval/** never imports examples/, benchmarks/, importlib/dynamic imports, 4-dot relative escapes, or LLM SDKs.
+# 2. Packages: core imports no other package; finops, deploy, and runner build on core; demo builds on
+#    core, finops, and runner; only cli may import everything.
 # 3. Layers: */contract/ imports only pydantic and contracts; */engine/ never imports pydantic,
 #    demo or cli; demo/render/ imports no calculation modules.
-# 4. SQLAlchemy ORM, shell=True subprocesses, and unparameterized SQL execute() are banned.
+# 4. Pure packages (core, finops, runner) never import/call subprocess (list or shell) or urllib;
+#    SQLAlchemy ORM, shell=True subprocesses, dynamic/formatted SQL, and variable-passed SQL execute() are banned.
 # tests/test_isolation_guard.py enforces the same rules in Python.
 
 id: library-never-imports-examples-or-dynamic
 language: Python
 severity: error
-message: "Boundary violation: bq_eval/ must never import examples/, benchmarks/, or dynamic imports."
+message: "Boundary violation: bq_eval/ must never import examples/, benchmarks/, importlib/dynamic imports, or 4-dot relative escapes."
 files:
-  - "bq_eval/**/*.py"
+  - "**/bq_eval/**/*.py"
 metadata:
   test_path: "bq_eval/core/engine/probe.py"
   invalid_examples:
@@ -23,15 +25,21 @@ metadata:
     - "from benchmarks import m2_live"
     - "__import__('bq_eval.cli')"
     - "importlib.import_module('bq_eval.cli')"
+    - "import importlib as il"
+    - "from importlib import import_module as im"
+    - "from .... import anything"
+    - "from ....demo import loadgen"
   valid_examples:
     - "from bq_eval.core.contract.otel import OTelGenAISpanRecord"
     - "import examples_helper"
 rule:
   any:
     - kind: import_statement
-      regex: "(?s)^import\\s+(.+,\\s*)*(examples|benchmarks)(\\b|\\.)"
+      regex: "(?s)^import\\s+(.+,\\s*)*(examples|benchmarks|importlib)(\\b|\\.)"
     - kind: import_from_statement
-      regex: "(?s)^from\\s+(examples|benchmarks)(\\b|\\.)"
+      regex: "(?s)^from\\s+(examples|benchmarks|importlib)(\\b|\\.)"
+    - kind: import_from_statement
+      regex: "(?s)^from\\s+\\.{4,}"
     - pattern: __import__($$$)
     - pattern: importlib.import_module($$$)
     - pattern: import_module($$$)
@@ -41,7 +49,7 @@ language: Python
 severity: error
 message: "Rule 0 violation: bq_eval/ deterministic package must never import LLM client SDKs."
 files:
-  - "bq_eval/**/*.py"
+  - "**/bq_eval/**/*.py"
 metadata:
   test_path: "bq_eval/cli/probe.py"
   invalid_examples:
@@ -66,16 +74,18 @@ rule:
 id: core-package-dependencies
 language: Python
 severity: error
-message: "Package violation (core/): bq_eval/core/ must not import bq_eval.{finops,deploy,demo,cli}."
+message: "Package violation (core/): bq_eval/core/ must not import bq_eval.{finops,deploy,runner,demo,cli}."
 files:
-  - "bq_eval/core/**/*.py"
+  - "**/bq_eval/core/**/*.py"
 metadata:
   test_path: "bq_eval/core/engine/probe.py"
   invalid_examples:
     - "from bq_eval.finops.engine.spend import compute_pareto_frontier"
     - "from bq_eval.demo.pipeline import run_showcase_pipeline"
     - "import bq_eval.deploy.engine.bootstrap"
+    - "from bq_eval.runner.engine.loader import OfflineSqlRunner"
     - "from ...demo import loadgen"
+    - "from ....runner import engine"
     - "from bq_eval import cli"
   valid_examples:
     - "from bq_eval.core.contract.otel import OTelGenAISpanRecord"
@@ -84,65 +94,97 @@ metadata:
 rule:
   any:
     - kind: import_statement
-      regex: "(?s)^import\\s+(.+,\\s*)*bq_eval\\.(finops|deploy|demo|cli)(\\b|\\.)"
+      regex: "(?s)^import\\s+(.+,\\s*)*bq_eval\\.(finops|deploy|runner|demo|cli)(\\b|\\.)"
     - kind: import_from_statement
-      regex: "(?s)^from\\s+(bq_eval\\.|\\.\\.\\.\\s*)(finops|deploy|demo|cli)(\\b|\\.)"
+      regex: "(?s)^from\\s+(bq_eval\\.|\\.{3,}\\s*)(finops|deploy|runner|demo|cli)(\\b|\\.)"
     - kind: import_from_statement
-      regex: "(?s)^from\\s+(bq_eval|\\.\\.\\.)\\s+import\\s+(.*[\\s,(])?(finops|deploy|demo|cli)\\b"
+      regex: "(?s)^from\\s+(bq_eval|\\.{3,})\\s+import\\s+(.*[\\s,(])?(finops|deploy|runner|demo|cli)\\b"
 ---
 id: finops-package-dependencies
 language: Python
 severity: error
-message: "Package violation (finops/): bq_eval/finops/ must not import bq_eval.{deploy,demo,cli}."
+message: "Package violation (finops/): bq_eval/finops/ must not import bq_eval.{deploy,runner,demo,cli}."
 files:
-  - "bq_eval/finops/**/*.py"
+  - "**/bq_eval/finops/**/*.py"
 metadata:
   test_path: "bq_eval/finops/engine/probe.py"
   invalid_examples:
     - "from bq_eval.demo import pipeline"
     - "from bq_eval.cli.app import main"
+    - "from bq_eval.runner.engine.loader import OfflineSqlRunner"
     - "from ...deploy import engine"
+    - "from ....demo import pipeline"
   valid_examples:
     - "from bq_eval.core.engine.cost import compute_span_cost_usd"
     - "from bq_eval.finops.contract.results import ModelOption"
 rule:
   any:
     - kind: import_statement
-      regex: "(?s)^import\\s+(.+,\\s*)*bq_eval\\.(deploy|demo|cli)(\\b|\\.)"
+      regex: "(?s)^import\\s+(.+,\\s*)*bq_eval\\.(deploy|runner|demo|cli)(\\b|\\.)"
     - kind: import_from_statement
-      regex: "(?s)^from\\s+(bq_eval\\.|\\.\\.\\.\\s*)(deploy|demo|cli)(\\b|\\.)"
+      regex: "(?s)^from\\s+(bq_eval\\.|\\.{3,}\\s*)(deploy|runner|demo|cli)(\\b|\\.)"
     - kind: import_from_statement
-      regex: "(?s)^from\\s+(bq_eval|\\.\\.\\.)\\s+import\\s+(.*[\\s,(])?(deploy|demo|cli)\\b"
+      regex: "(?s)^from\\s+(bq_eval|\\.{3,})\\s+import\\s+(.*[\\s,(])?(deploy|runner|demo|cli)\\b"
 ---
 id: deploy-package-dependencies
 language: Python
 severity: error
-message: "Package violation (deploy/): bq_eval/deploy/ must not import bq_eval.{finops,demo,cli}."
+message: "Package violation (deploy/): bq_eval/deploy/ must not import bq_eval.{finops,runner,demo,cli}."
 files:
-  - "bq_eval/deploy/**/*.py"
+  - "**/bq_eval/deploy/**/*.py"
 metadata:
   test_path: "bq_eval/deploy/engine/probe.py"
   invalid_examples:
     - "from bq_eval.finops.engine import spend"
     - "from bq_eval.demo.pipeline import run_showcase_pipeline"
+    - "from bq_eval.runner.engine.loader import OfflineSqlRunner"
+    - "from ....cli import app"
   valid_examples:
     - "from bq_eval.deploy.contract.bootstrap import BootstrapMode"
     - "from bq_eval.core.contract.types import NonNegFloat"
 rule:
   any:
     - kind: import_statement
-      regex: "(?s)^import\\s+(.+,\\s*)*bq_eval\\.(finops|demo|cli)(\\b|\\.)"
+      regex: "(?s)^import\\s+(.+,\\s*)*bq_eval\\.(finops|runner|demo|cli)(\\b|\\.)"
     - kind: import_from_statement
-      regex: "(?s)^from\\s+(bq_eval\\.|\\.\\.\\.\\s*)(finops|demo|cli)(\\b|\\.)"
+      regex: "(?s)^from\\s+(bq_eval\\.|\\.{3,}\\s*)(finops|runner|demo|cli)(\\b|\\.)"
     - kind: import_from_statement
-      regex: "(?s)^from\\s+(bq_eval|\\.\\.\\.)\\s+import\\s+(.*[\\s,(])?(finops|demo|cli)\\b"
+      regex: "(?s)^from\\s+(bq_eval|\\.{3,})\\s+import\\s+(.*[\\s,(])?(finops|runner|demo|cli)\\b"
+---
+id: runner-package-dependencies
+language: Python
+severity: error
+message: "Package violation (runner/): bq_eval/runner/ must not import bq_eval.{finops,deploy,demo,cli}."
+files:
+  - "**/bq_eval/runner/**/*.py"
+metadata:
+  test_path: "bq_eval/runner/engine/probe.py"
+  invalid_examples:
+    - "from bq_eval.finops.engine import spend"
+    - "from bq_eval.deploy.engine import bootstrap"
+    - "from bq_eval.demo.pipeline import run_showcase_pipeline"
+    - "from bq_eval.cli.app import main"
+    - "from ...deploy import engine"
+    - "from ....cli import app"
+  valid_examples:
+    - "from bq_eval.runner.contract.spec import RunnerConfig"
+    - "from bq_eval.core.contract.types import NonNegFloat"
+    - "import sqlglot"
+rule:
+  any:
+    - kind: import_statement
+      regex: "(?s)^import\\s+(.+,\\s*)*bq_eval\\.(finops|deploy|demo|cli)(\\b|\\.)"
+    - kind: import_from_statement
+      regex: "(?s)^from\\s+(bq_eval\\.|\\.{3,}\\s*)(finops|deploy|demo|cli)(\\b|\\.)"
+    - kind: import_from_statement
+      regex: "(?s)^from\\s+(bq_eval|\\.{3,})\\s+import\\s+(.*[\\s,(])?(finops|deploy|demo|cli)\\b"
 ---
 id: demo-package-dependencies
 language: Python
 severity: error
 message: "Package violation (demo/): bq_eval/demo/ must not import bq_eval.{deploy,cli}."
 files:
-  - "bq_eval/demo/**/*.py"
+  - "**/bq_eval/demo/**/*.py"
 metadata:
   test_path: "bq_eval/demo/probe.py"
   invalid_examples:
@@ -150,24 +192,26 @@ metadata:
     - "from bq_eval.deploy.engine.bootstrap import REPO_ROOT"
     - "from ..cli import server"
     - "from .. import cli"
+    - "from ....cli import app"
   valid_examples:
     - "from bq_eval.core.engine.sql_eval import evaluate_traces_in_sqlite"
     - "from bq_eval.finops.engine.spend import compute_pareto_frontier"
+    - "from bq_eval.runner.engine.loader import OfflineSqlRunner"
 rule:
   any:
     - kind: import_statement
       regex: "(?s)^import\\s+(.+,\\s*)*bq_eval\\.(deploy|cli)(\\b|\\.)"
     - kind: import_from_statement
-      regex: "(?s)^from\\s+(bq_eval\\.|\\.\\.\\.?\\s*)(deploy|cli)(\\b|\\.)"
+      regex: "(?s)^from\\s+(bq_eval\\.|\\.{2,}\\s*)(deploy|cli)(\\b|\\.)"
     - kind: import_from_statement
-      regex: "(?s)^from\\s+(bq_eval|\\.\\.\\.?)\\s+import\\s+(.*[\\s,(])?(deploy|cli)\\b"
+      regex: "(?s)^from\\s+(bq_eval|\\.{2,})\\s+import\\s+(.*[\\s,(])?(deploy|cli)\\b"
 ---
 id: contract-layer-imports-only-contracts
 language: Python
 severity: error
 message: "Layer violation (contract/): contract modules may import only stdlib, pydantic, and other contract modules."
 files:
-  - "bq_eval/*/contract/**/*.py"
+  - "**/bq_eval/*/contract/**/*.py"
 metadata:
   test_path: "bq_eval/core/contract/probe.py"
   invalid_examples:
@@ -177,6 +221,7 @@ metadata:
     - "from ..engine import cost"
     - "from .. import engine"
     - "from bq_eval.core import engine"
+    - "from bq_eval.runner.engine.loader import OfflineSqlRunner"
   valid_examples:
     - "from pydantic import BaseModel, ConfigDict"
     - "from bq_eval.core.contract.otel import OTelGenAISpanRecord"
@@ -188,16 +233,16 @@ rule:
     - kind: import_from_statement
       regex: "(?s)^from\\s+bq_eval\\.(\\w+\\.engine|demo\\.(pipeline|loadgen|golden_seeds|render)|cli)(\\b|\\.)"
     - kind: import_from_statement
-      regex: "(?s)^from\\s+\\.\\.\\s*engine(\\b|\\.)"
+      regex: "(?s)^from\\s+\\.{2,}\\s*engine(\\b|\\.)"
     - kind: import_from_statement
-      regex: "(?s)^from\\s+(\\.\\.|bq_eval\\.\\w+)\\s+import\\s+(.*[\\s,(])?engine\\b"
+      regex: "(?s)^from\\s+(\\.{2,}|bq_eval\\.\\w+)\\s+import\\s+(.*[\\s,(])?engine\\b"
 ---
 id: engine-layer-no-pydantic-or-app-imports
 language: Python
 severity: error
-message: "Layer violation (engine/): engine modules may import only stdlib plus contract and engine modules (no pydantic, demo or cli)."
+message: "Layer violation (engine/): engine modules may import only allowed dependencies plus contract/engine modules (no pydantic, demo or cli)."
 files:
-  - "bq_eval/*/engine/**/*.py"
+  - "**/bq_eval/*/engine/**/*.py"
 metadata:
   test_path: "bq_eval/core/engine/probe.py"
   invalid_examples:
@@ -206,6 +251,7 @@ metadata:
     - "from bq_eval.demo.pipeline import run_showcase_pipeline"
     - "from bq_eval.cli.app import main"
     - "from ...demo import loadgen"
+    - "from ....cli import app"
   valid_examples:
     - "from bq_eval.core.contract.otel import OTelGenAISpanRecord"
     - "from bq_eval.core.engine.cost import compute_span_cost_usd"
@@ -215,16 +261,16 @@ rule:
     - kind: import_statement
       regex: "(?s)^import\\s+(.+,\\s*)*(pydantic|bq_eval\\.(demo|cli))(\\b|\\.)"
     - kind: import_from_statement
-      regex: "(?s)^from\\s+(pydantic|(bq_eval\\.|\\.\\.\\.\\s*)(demo|cli))(\\b|\\.)"
+      regex: "(?s)^from\\s+(pydantic|(bq_eval\\.|\\.{3,}\\s*)(demo|cli))(\\b|\\.)"
     - kind: import_from_statement
-      regex: "(?s)^from\\s+(bq_eval|\\.\\.\\.)\\s+import\\s+(.*[\\s,(])?(demo|cli)\\b"
+      regex: "(?s)^from\\s+(bq_eval|\\.{3,})\\s+import\\s+(.*[\\s,(])?(demo|cli)\\b"
 ---
 id: renderer-imports-no-calculation
 language: Python
 severity: error
 message: "Layer violation (demo/render/): render modules may import only stdlib, pydantic, contract modules, and bq_eval.demo.render."
 files:
-  - "bq_eval/demo/render/**/*.py"
+  - "**/bq_eval/demo/render/**/*.py"
 metadata:
   test_path: "bq_eval/demo/render/renderer_probe.py"
   invalid_examples:
@@ -234,6 +280,7 @@ metadata:
     - "from ..pipeline import run_showcase_pipeline"
     - "from .. import loadgen"
     - "from ...core.engine import sql_eval"
+    - "from ....core.engine import sql_eval"
     - "from bq_eval.core import engine"
   valid_examples:
     - "from bq_eval.demo.contract.results import ShowcaseRunArtifacts"
@@ -249,18 +296,20 @@ rule:
     - kind: import_from_statement
       regex: "(?s)^from\\s+bq_eval\\.\\w+\\s+import\\s+(.*[\\s,(])?engine\\b"
     - kind: import_from_statement
-      regex: "(?s)^from\\s+(bq_eval\\.demo|\\.\\.)\\s+import\\s+(.*[\\s,(])?(pipeline|loadgen|golden_seeds)\\b"
+      regex: "(?s)^from\\s+(bq_eval\\.demo|\\.{2,})\\s+import\\s+(.*[\\s,(])?(pipeline|loadgen|golden_seeds)\\b"
     - kind: import_from_statement
-      regex: "(?s)^from\\s+\\.\\.\\s*(pipeline|loadgen|golden_seeds)(\\b|\\.)"
+      regex: "(?s)^from\\s+\\.{2,}\\s*(pipeline|loadgen|golden_seeds)(\\b|\\.)"
     - kind: import_from_statement
-      regex: "(?s)^from\\s+\\.\\.\\.\\s*(\\w+\\.engine|cli)(\\b|\\.)"
+      regex: "(?s)^from\\s+\\.{3,}\\s*(\\w+\\.engine|cli)(\\b|\\.)"
 ---
 id: no-sqlalchemy-orm
 language: Python
 severity: error
 message: "Persistence violation: sqlalchemy.orm is banned; use SQLAlchemy 2.0 Core or parameterized SQL."
+files:
+  - "**/bq_eval/**/*.py"
 ignores:
-  - "tests/**"
+  - "**/tests/**"
 metadata:
   test_path: "bq_eval/core/engine/sql_probe.py"
   invalid_examples:
@@ -281,8 +330,10 @@ id: no-subprocess-shell-true
 language: Python
 severity: error
 message: "Security violation: subprocess with shell=True or os.system() is forbidden."
+files:
+  - "**/bq_eval/**/*.py"
 ignores:
-  - "tests/**"
+  - "**/tests/**"
 metadata:
   test_path: "bq_eval/cli/proc_probe.py"
   invalid_examples:
@@ -299,21 +350,53 @@ rule:
     - pattern: subprocess.$FN(shell=True, $$$)
     - pattern: os.system($$$)
 ---
+id: no-subprocess-or-urllib-in-pure-packages
+language: Python
+severity: error
+message: "Isolation violation (A-21): pure packages (core/, finops/, runner/) must never import or invoke subprocess or urllib."
+files:
+  - "**/bq_eval/core/**/*.py"
+  - "**/bq_eval/finops/**/*.py"
+  - "**/bq_eval/runner/**/*.py"
+metadata:
+  test_path: "bq_eval/core/engine/proc_probe.py"
+  invalid_examples:
+    - 'subprocess.run(["bq", "version"], check=True)'
+    - "import subprocess"
+    - "import subprocess as sp"
+    - "from subprocess import run"
+    - "import urllib.request as req"
+    - "from urllib import request as r"
+  valid_examples:
+    - "import json"
+    - "import sqlite3"
+rule:
+  any:
+    - kind: import_statement
+      regex: "(?s)^import\\s+(.+,\\s*)*(subprocess|urllib)(\\b|\\.)"
+    - kind: import_from_statement
+      regex: "(?s)^from\\s+(subprocess|urllib)(\\b|\\.)"
+    - pattern: subprocess.$FN($$$)
+---
 id: no-dynamic-sql-execute
 language: Python
 severity: error
-message: "Security violation: dynamic f-string or concatenated SQL passed to .execute/.executemany/.executescript; use parameterized queries."
+message: "Security violation (A-21): dynamic f-string, concatenated, or .format() SQL passed to .execute/.executemany/.executescript; use parameterized queries."
+files:
+  - "**/bq_eval/**/*.py"
 ignores:
-  - "tests/**"
+  - "**/tests/**"
 metadata:
   test_path: "bq_eval/core/engine/query_probe.py"
   invalid_examples:
     - 'conn.execute(f"SELECT * FROM spans WHERE trace_id = {tid}")'
     - 'conn.execute("SELECT * FROM spans WHERE trace_id = " + tid, params)'
+    - 'conn.execute("SELECT * FROM spans WHERE trace_id = {}".format(tid))'
+    - 'conn.execute("SELECT * FROM spans WHERE trace_id = %s" % tid)'
     - 'conn.executemany(f"INSERT INTO {table} VALUES (?)", rows)'
     - 'conn.executemany("INSERT INTO " + table + " VALUES (?)", rows)'
     - 'conn.executescript(f"DELETE FROM {table};")'
-    - 'conn.executescript("DELETE FROM " + table)'
+    - 'conn.executescript("DELETE FROM {}".format(table))'
   valid_examples:
     - 'conn.execute("SELECT * FROM spans WHERE trace_id = ?", (tid,))'
     - 'conn.executemany("INSERT INTO spans VALUES (?)", rows)'
@@ -322,10 +405,59 @@ constraints:
   QUERY:
     any:
       - kind: binary_operator
+      - pattern: $FMT.format($$$)
       - has:
           kind: interpolation
       - has:
           kind: binary_operator
+      - has:
+          pattern: $FMT.format($$$)
+rule:
+  any:
+    - pattern: $DB.execute($QUERY)
+    - pattern: $DB.execute($QUERY, $$$)
+    - pattern: $DB.executemany($QUERY)
+    - pattern: $DB.executemany($QUERY, $$$)
+    - pattern: $DB.executescript($QUERY)
+---
+id: no-variable-sql-execute
+language: Python
+severity: error
+message: "Security violation (A-21): non-literal variable SQL passed to .execute/.executemany/.executescript outside bq_eval/runner/; use literal parameterized SQL or UPPER_CASE DDL constants."
+files:
+  - "**/bq_eval/core/**/*.py"
+  - "**/bq_eval/finops/**/*.py"
+  - "**/bq_eval/deploy/**/*.py"
+  - "**/bq_eval/demo/**/*.py"
+  - "**/bq_eval/cli/**/*.py"
+ignores:
+  - "**/tests/**"
+metadata:
+  test_path: "bq_eval/core/engine/query_var_probe.py"
+  invalid_examples:
+    - 'q = f"SELECT * FROM spans WHERE trace_id = {tid}"\nconn.execute(q)'
+    - 'q = "SELECT * FROM spans WHERE trace_id = {}".format(tid)\nconn.execute(q)'
+    - "conn.execute(dynamic_sql)"
+    - "conn.executemany(insert_sql, rows)"
+    - "conn.executescript(script_sql)"
+  valid_examples:
+    - 'conn.execute("SELECT * FROM spans WHERE trace_id = ?", (tid,))'
+    - 'conn.execute("SELECT * FROM spans " "WHERE trace_id = ?", (tid,))'
+    - 'conn.executescript(SQLITE_VIEWS_DDL)'
+constraints:
+  QUERY:
+    not:
+      any:
+        - kind: string
+          not:
+            has:
+              kind: interpolation
+        - kind: concatenated_string
+          not:
+            has:
+              kind: interpolation
+        - kind: identifier
+          regex: "^[A-Z][A-Z0-9_]*$"
 rule:
   any:
     - pattern: $DB.execute($QUERY)

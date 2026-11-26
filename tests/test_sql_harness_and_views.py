@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from bq_eval.runner.engine.transpiler import _sqlite_farm_fingerprint
 from tests.conftest import make_span
 from tests.sql_helpers import (
     _create_enterprise_sqlite_fixture,
@@ -17,7 +18,6 @@ from tests.sql_helpers import (
     _transpile_bq_view_to_sqlite,
     insert_enterprise_sqlite_span,
 )
-from tests.sqlite_bq_transpiler import _sqlite_farm_fingerprint
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SQL_DIR = REPO_ROOT / "sql"

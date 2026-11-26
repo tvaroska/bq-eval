@@ -13,11 +13,11 @@ from sqlglot import exp
 from bq_eval.core.contract.otel import (
     OTelGenAISpanRecord,
 )
-from scripts.bq_dry_run import split_sql_statements
-from tests.sqlite_bq_transpiler import (
+from bq_eval.runner.engine.transpiler import (
     _new_sqlite_bq_conn,
     _transpile_bq_view_to_sqlite,
 )
+from scripts.bq_dry_run import split_sql_statements
 
 __all__ = [
     "ALLOWED_BQ_PREVIEW_COMMANDS",

@@ -25,7 +25,7 @@ Break one of these and the numbers this repository reports stop being trustworth
 
 6. **Layer and package boundaries hold.**
    - Gold reads only published Silver views (never raw `spans`); sibling repos consume versioned export contracts only (`ADR-001`).
-   - Python `core` imports no sibling subpackage; `finops` and `deploy` build on `core`; `demo` builds on `core` and `finops`; only `cli` imports everything (`tests/test_isolation_guard.py`, `specs/ast.rules.yaml`).
+   - Python `core` imports no sibling subpackage; `finops`, `deploy`, and `runner` build on `core`; `demo` builds on `core`, `finops`, and `runner`; only `cli` imports everything (`tests/test_isolation_guard.py`, `specs/ast.rules.yaml`).
 
 7. **Nothing private leaks.**
    - No customer names, internal codenames, internal shortlinks, bug IDs, sibling `../` path escapes, or workstation paths (`tests/test_repo_hygiene.py`).

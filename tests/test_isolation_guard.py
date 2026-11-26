@@ -6,7 +6,8 @@ Packages (what may depend on what):
 - `core`: rule checks, judge SQL, calibration, cost per outcome. Depends on nothing else.
 - `finops`: chargeback and capacity export. Depends on `core`.
 - `deploy`: bootstrap SQL rendering. Depends on `core`.
-- `demo`: corpus replay and workbench. Depends on `core` and `finops`.
+- `runner`: offline BigQuery-to-SQLite SQL runner (`sqlglot` allowed in `runner/engine/`). Depends on `core`.
+- `demo`: corpus replay and workbench. Depends on `core`, `finops`, and `runner`.
 - `cli`: may import any package.
 
 Layers inside a package:
@@ -50,8 +51,12 @@ PACKAGE_DEPS: dict[str, tuple[str, ...]] = {
     "core": ("core",),
     "finops": ("core", "finops"),
     "deploy": ("core", "deploy"),
-    "demo": ("core", "finops", "demo"),
+    "runner": ("core", "runner"),
+    "demo": ("core", "finops", "runner", "demo"),
 }
+
+_PURE_FORBIDDEN_STDLIB: frozenset[str] = frozenset({"subprocess", "urllib", "importlib"})
+_BASE_FORBIDDEN_STDLIB: frozenset[str] = frozenset({"importlib"})
 
 
 @dataclass(frozen=True)
@@ -69,12 +74,21 @@ def _layer_prefixes(pkg: str, layers: tuple[str, ...]) -> tuple[str, ...]:
 
 def _build_folder_rules() -> dict[str, FolderRule]:
     rules: dict[str, FolderRule] = {
-        "root": FolderRule(name="root", allowed_bq_eval_prefixes=()),
-        "cli": FolderRule(name="cli", allowed_bq_eval_prefixes=("bq_eval",)),
+        "root": FolderRule(
+            name="root",
+            allowed_bq_eval_prefixes=(),
+            forbidden_stdlib_roots=_PURE_FORBIDDEN_STDLIB,
+        ),
+        "cli": FolderRule(
+            name="cli",
+            allowed_bq_eval_prefixes=("bq_eval",),
+            forbidden_stdlib_roots=_BASE_FORBIDDEN_STDLIB,
+        ),
         "demo_app": FolderRule(
             name="demo_app",
             allowed_bq_eval_prefixes=tuple(f"bq_eval.{d}" for d in PACKAGE_DEPS["demo"]),
             forbidden_bq_eval_prefixes=("bq_eval.cli",),
+            forbidden_stdlib_roots=_BASE_FORBIDDEN_STDLIB,
         ),
         "demo_render": FolderRule(
             name="demo_render",
@@ -83,20 +97,26 @@ def _build_folder_rules() -> dict[str, FolderRule]:
                 "bq_eval.demo.render",
             ),
             allowed_third_party_roots=frozenset({"pydantic"}),
+            forbidden_stdlib_roots=_PURE_FORBIDDEN_STDLIB,
         ),
     }
     for pkg in PACKAGE_DEPS:
+        is_pure = pkg in {"core", "finops", "runner"}
         rules[f"{pkg}_contract"] = FolderRule(
             name=f"{pkg}_contract",
             allowed_bq_eval_prefixes=_layer_prefixes(pkg, ("contract",)),
             allowed_third_party_roots=frozenset({"pydantic"}),
+            forbidden_stdlib_roots=_PURE_FORBIDDEN_STDLIB if is_pure else _BASE_FORBIDDEN_STDLIB,
         )
         if pkg != "demo":
             rules[f"{pkg}_engine"] = FolderRule(
                 name=f"{pkg}_engine",
                 allowed_bq_eval_prefixes=_layer_prefixes(pkg, ("contract", "engine")),
+                allowed_third_party_roots=(
+                    frozenset({"sqlglot"}) if pkg == "runner" else frozenset()
+                ),
                 forbidden_stdlib_roots=(
-                    frozenset({"subprocess"}) if pkg in {"core", "finops"} else frozenset()
+                    _PURE_FORBIDDEN_STDLIB if is_pure else _BASE_FORBIDDEN_STDLIB
                 ),
             )
     return rules
@@ -317,6 +337,28 @@ def test_unlisted_module_and_leaked_import_positive_controls(tmp_path: Path) -> 
             "import importlib\nimportlib.import_module('bq_eval.cli')",
         ),
         ("bq_eval/core/engine/probe.py", "__import__('bq_eval.cli')"),
+        (
+            "bq_eval/core/engine/probe.py",
+            "from bq_eval.runner.engine.loader import OfflineSqlRunner",
+        ),
+        ("bq_eval/core/engine/probe.py", "import sqlglot"),
+        ("bq_eval/finops/engine/probe.py", "import sqlglot"),
+        (
+            "bq_eval/finops/engine/probe.py",
+            "from bq_eval.runner.engine.loader import OfflineSqlRunner",
+        ),
+        (
+            "bq_eval/deploy/engine/probe.py",
+            "from bq_eval.runner.engine.loader import OfflineSqlRunner",
+        ),
+        ("bq_eval/runner/engine/probe.py", "from bq_eval.finops.engine import spend"),
+        ("bq_eval/runner/engine/probe.py", "from bq_eval.deploy.engine import bootstrap"),
+        ("bq_eval/runner/engine/probe.py", "from bq_eval.demo import pipeline"),
+        ("bq_eval/runner/engine/probe.py", "from bq_eval.cli.app import main"),
+        ("bq_eval/runner/engine/probe.py", "import subprocess"),
+        ("bq_eval/runner/engine/probe.py", "import urllib.request as req"),
+        ("bq_eval/core/engine/probe.py", "import urllib.request as req"),
+        ("bq_eval/core/engine/probe.py", "import importlib as il"),
         ("bq_eval/core/engine/probe.py", "from .... import anything"),
         ("bq_eval/extra_unlisted.py", "import math"),
     ],
@@ -364,6 +406,10 @@ def test_folder_guard_catches_every_forbidden_import(
             "bq_eval/demo/pipeline.py",
             "from bq_eval.core.engine.sql_eval import evaluate_traces_in_sqlite",
         ),
+        ("bq_eval/runner/contract/probe.py", "from pydantic import BaseModel"),
+        ("bq_eval/runner/engine/probe.py", "import sqlglot"),
+        ("bq_eval/runner/engine/probe.py", "from bq_eval.runner.contract.spec import RunnerConfig"),
+        ("bq_eval/demo/pipeline.py", "from bq_eval.runner.engine.loader import OfflineSqlRunner"),
         ("bq_eval/cli/app.py", "from bq_eval.demo.pipeline import run_showcase_pipeline"),
         (
             "bq_eval/cli/app.py",
@@ -397,6 +443,8 @@ def test_subfolder_probes_fail_both_python_and_ast_grep_guards(tmp_path: Path) -
         ),
         ("bq_eval/demo/render/renderer_probe.py", "from .. import pipeline\n"),
         ("bq_eval/cli/probe.py", "from google.genai import Client\n"),
+        ("bq_eval/runner/engine/probe.py", "from bq_eval.deploy.engine import bootstrap\n"),
+        ("bq_eval/core/engine/probe.py", "from bq_eval.runner.engine import loader\n"),
     )
     for rel_path, bad_import in cases:
         probe_file = tmp_path / rel_path
@@ -415,8 +463,48 @@ def test_subfolder_probes_fail_both_python_and_ast_grep_guards(tmp_path: Path) -
         probe_file.unlink()
 
 
+def test_ast_grep_flags_subprocess_in_core(tmp_path: Path) -> None:
+    """`ast-grep` catches list-subprocess, var/format SQL, aliased importlib/urllib, 4-dot escapes, and abs paths (`A-21`)."""
+    ast_grep = REPO_ROOT / ".venv" / "bin" / "ast-grep"
+    assert ast_grep.is_file(), "ast-grep binary required in .venv/bin/ast-grep"
+
+    a21_cases = (
+        ("bq_eval/core/engine/probe.py", 'subprocess.run(["bq", "version"], check=True)\n'),
+        ("bq_eval/core/engine/probe.py", "import subprocess as sp\n"),
+        ("bq_eval/core/engine/probe.py", "import urllib.request as req\n"),
+        ("bq_eval/core/engine/probe.py", "import importlib as il\n"),
+        ("bq_eval/core/engine/probe.py", "from ....demo import loadgen\n"),
+        (
+            "bq_eval/core/engine/probe.py",
+            'q = f"SELECT * FROM spans WHERE id = {tid}"\nconn.execute(q)\n',
+        ),
+        (
+            "bq_eval/core/engine/probe.py",
+            'conn.execute("SELECT * FROM spans WHERE id = {}".format(tid))\n',
+        ),
+        ("bq_eval/finops/engine/probe.py", 'subprocess.run(["echo", "hi"], check=False)\n'),
+        ("bq_eval/runner/engine/probe.py", 'subprocess.run(["echo", "hi"], check=False)\n'),
+    )
+    for rel_path, snippet in a21_cases:
+        probe_file = tmp_path / rel_path
+        probe_file.parent.mkdir(parents=True, exist_ok=True)
+        probe_file.write_text(snippet, encoding="utf-8")
+        for scan_target in (".", str(probe_file)):
+            res = subprocess.run(  # noqa: S603
+                [str(ast_grep), "scan", "--rule", str(AST_RULES_PATH), scan_target],
+                cwd=tmp_path,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            assert res.returncode == 1, (
+                f"ast-grep missed {rel_path} (target={scan_target}): {snippet!r}\n{res.stdout}"
+            )
+        probe_file.unlink()
+
+
 def test_importing_core_loads_no_other_package() -> None:
-    """Importing every `bq_eval.core` module pulls in no other bq_eval package or LLM SDK."""
+    """Importing every `bq_eval.core` module pulls in no other bq_eval package, sqlglot, or LLM SDK."""
     pure_modules = [
         _dotted_module_name(path)
         for path in _all_package_modules()
@@ -427,8 +515,8 @@ def test_importing_core_loads_no_other_package() -> None:
         "import sys\n"
         + "".join(f"import {mod}\n" for mod in pure_modules)
         + "print(sorted(m for m in sys.modules if m.startswith(("
-        "'bq_eval.finops', 'bq_eval.deploy', 'bq_eval.demo', 'bq_eval.cli', "
-        "'google.genai', 'vertexai', 'openai', 'anthropic'"
+        "'bq_eval.finops', 'bq_eval.deploy', 'bq_eval.runner', 'bq_eval.demo', 'bq_eval.cli', "
+        "'sqlglot', 'google.genai', 'vertexai', 'openai', 'anthropic'"
         "))))"
     )
     result = subprocess.run(  # noqa: S603
