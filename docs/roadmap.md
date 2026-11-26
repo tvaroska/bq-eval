@@ -2,11 +2,11 @@
 
 ## Where we are
 
-- **Last tagged release:** `v0.4.0` (`M8`–`M15`).
-- **Verified offline baseline (`local main` ahead of `origin/main`; `design/capacity.md`, `specs/use-cases/`, & `docs/roadmap.md` updated; `H-2`/`H-3` staged locally):** `scripts/gate.sh` (`193/193` pytest, `mypy --strict`, `ruff`, `ast-grep`, 9 smokes) and `terraform test` (`3/3`) pass solely against legacy `v0.4.0` SQL.
+- **Last tagged release:** `v0.4.1` (`Pre-M18`: `M16` provenance closure & `doc-hygiene` `full` tier; legacy SQL from `v0.4.0` `M8`–`M15`).
+- **Verified offline baseline:** `scripts/gate.sh` (`193/193` pytest, `mypy --strict`, `ruff`, `ast-grep`, 9 smokes), `gate doc-hygiene bq-eval`, `gate roadmap-archive bq-eval --check`, and `eval-audit` (`bq-eval` PASS) pass solely against legacy `v0.4.0` SQL.
 - **Silver status:** `12` JSON schemas + `labels_registry.json` ([`sql/silver/schema/`](../sql/silver/schema/traces.json)) and [`tests/test_silver_contract.py`](../tests/test_silver_contract.py) (`6/6`) exist locally; `0` Silver `.sql` files and `0` `tests/fixtures/silver/` fixtures exist yet.
 - **Sequencing decisions (panel consensus):**
-  1. **Retire standalone pre-Silver `v0.5.0`:** Fix `M16` provenance (`T-10`, `T-14`, `T-15`) and `doc-hygiene` blockers in **`Pre-M18` (`v0.4.1`)** without collecting SME sheets on deprecated `v0.4.0` views; defer **`M17`** (`T-11`/`T-12`/`T-16` + dual-human labeling) to **`M19` (`v0.7.0`)** over Silver/Gold `sme_labels`.
+  1. **Retire standalone pre-Silver `v0.5.0`:** Closed `M16` provenance (`T-10`, `T-14`, `T-15`) and `doc-hygiene` blockers in **`Pre-M18` (`v0.4.1`)** without collecting SME sheets on deprecated `v0.4.0` views; defer **`M17`** (`T-11`/`T-12`/`T-16` + dual-human labeling) to **`M19` (`v0.7.0`)** over Silver/Gold `sme_labels`.
   2. **Kill `S-22`:** `bqaa_adapter_views.sql` `event_id` is superseded by `ADR-011` ([`DECISIONS.md`](../DECISIONS.md)) and retires in `M19-2`.
   3. **Sequence `M20` (`v0.8.0`) AFTER `M19` (`v0.7.0`):** Gate `M18` (`v0.6.0`) on single-domain GCP `light` Silver + `< 5s` Runner Port + core infra safety (`S-21`/`S-24`/`S-25`), unblocking **`M19` (`v0.7.0`)** (`UC1`–`UC9`, `UC11`, Gold/MRM/WORM, Optimizer export, rescoped `M17`, sibling handshakes, legacy retirement) before **`M20` (`v0.8.0`)** adds `ADR-046` Multi-Cloud Modes 1–3 and multi-PiB `enterprise` compaction (amended 2026-11-26: `requests`/`burst_metrics_1m` left the `M18` gate for `M19-0`). Exclude [`sql/finops/omni_spoke_views.sql`](../sql/finops/omni_spoke_views.sql) from Silver bootstrap in `M18` and retire it in `M19-2`.
 
@@ -14,17 +14,9 @@
 
 | # | Milestone | Done when | Target |
 | :--- | :--- | :--- | :--- |
-| **Pre-M18** | Dirty-Tree Commit, `doc-hygiene` Unblock & `M16` Provenance Closure | 6 dirty/untracked spec/design files gated & committed; `T-10`, `T-14`, `T-15` closed; `S-22` marked killed; `docs/roadmap.md` `< 35,000 B`, `spec/` vs `specs/` clash resolved, `AGENTS.md` `<!-- doc-tier: full -->` passes `gate doc-hygiene`; `v0.4.1` tagged (`H-4`). | `v0.4.1` |
 | **M18** | Single-Domain GCP Silver Core, Runner Port & Core Infra | Open points decided, recorded fixtures + `ADR-041` vectors committed (`M18-0`, `M18-1`); platform probes recorded (`M18-2`); offline runner package + `A-21` green (`M18-3`); `spans` + `model_calls` proven offline and on BigQuery (`M18-4`); every other object with a named test, the same rows on BigQuery and `S-17` Silver (`M18-5`–`M18-12`); `S-21`/`S-24` (core TF/GCS)/`S-25`/`S-26` (deploy) + Cloud Build GCP probe pass (`M18-13`). | `v0.6.0` |
 | **M19** | Gold on Silver, Rescoped `M17`, Sibling Handshake & Legacy Retirement | Capacity objects (`M19-0`); Eval/MRM/WORM/Session (`M19-1a`) and Cost/3-pool `FOCUS 1.2`/Optimizer Export (`M19-1b`) read Silver only; rescoped dual-human `M17` passes on Silver/Gold (`M19-3`); `agent-evals` & `capacity` consumer handshakes pass before `M19-2` deletes legacy views & SQLite twins (`A-20`); `A-12..A-20`, `S-16..S-26`, `T-11..T-18` closed. | `v0.7.0` |
 | **M20** | Multi-Cloud Modes 1–3 (`ADR-046`) & `enterprise` Compaction | `ADR-046` Modes 1–3 cross-cloud `P.C.N.T` + Hub Transfer Port + S3/ADLS Iceberg `requests` (`M20-1`) and multi-PiB `enterprise` `MERGE` compaction soak (`M20-2`) pass offline + BigQuery gates. | `v0.8.0` |
-
-## Pre-M18 — Housekeeping, Dirty Tree Commit & `M16` Provenance Closure (`v0.4.1`)
-
-- [ ] **H-1: Gate and commit 6 dirty/untracked `design/` & `specs/use-cases/` files** *(Committed locally — pending `v0.4.1` release)* — Verified [`design/capacity.md`](../design/capacity.md), [`specs/use-cases/corporate-self-service.md`](../specs/use-cases/corporate-self-service.md), [`specs/use-cases/customer-support.md`](../specs/use-cases/customer-support.md), [`specs/use-cases/document-extraction.md`](../specs/use-cases/document-extraction.md), and `UC6`/`UC9` ([`front-office-advisory-optimizer.md`](../specs/use-cases/front-office-advisory-optimizer.md), [`stateful-fiduciary-advisory.md`](../specs/use-cases/stateful-fiduciary-advisory.md), linked in [`specs/use-cases.md`](../specs/use-cases.md)). Done when `scripts/gate.sh` and `tests/test_doc_contract.py` pass on clean git tree.
-- [ ] **H-2 (`M16-0..2`, `T-10`, `T-14`, `T-15`): Close `M16` live-proof provenance and test/doc coupling** *(Implemented locally — pending `v0.4.1` release)* — Regenerated and shuffled [`benchmarks/results/m16_anonymized_traces_100.jsonl`](../benchmarks/results/m16_anonymized_traces_100.jsonl) with opaque IDs (`T-10` P0); synced `traces_sha256` + [`benchmarks/results/SHA256SUMS`](../benchmarks/results/SHA256SUMS) + real deploy flags in [`scripts/run_m16_live_proof.py`](../scripts/run_m16_live_proof.py) (`T-15` P0); pinned [`tests/test_doc_contract.py`](../tests/test_doc_contract.py) onto [`benchmarks/results/m16_live_cloud_proof.json`](../benchmarks/results/m16_live_cloud_proof.json) + roadmap counters (`193` tests) (`T-14` P1). Verified: `test_committed_blind_traces_hide_score_order_and_slugs` ([`tests/test_m16_m17_preflight.py`](../tests/test_m16_m17_preflight.py)) and `test_every_committed_receipt_has_manifest_entry` ([`tests/test_edge_case_guards.py`](../tests/test_edge_case_guards.py)).
-- [ ] **H-3: Unblock workspace `doc-hygiene` `full` tier & sync `AGENTS.md`** *(Implemented locally — pending `v0.4.1` release)* — Keep `docs/roadmap.md < 35,000 B`, migrated `spec/` -> `specs/` across [`README.md`](../README.md), [`AGENTS.md`](../AGENTS.md), [`CRITICAL.md`](../CRITICAL.md), [`DECISIONS.md`](../DECISIONS.md), `design/`, `docs/roadmap.md`, [`tests/test_doc_contract.py`](../tests/test_doc_contract.py), brought [`specs/silver.md`](../specs/silver.md) `<= 35,000 B`, added `<!-- doc-tier: full -->` to [`AGENTS.md`](../AGENTS.md) (`193` tests), and confirmed `S-22` retired (`ADR-011`). Verified: `gate doc-hygiene bq-eval` and `gate roadmap-archive bq-eval --check` exit `0`.
-- [ ] **H-4: Release `v0.4.1`** — After review of the uncommitted `H-2`/`H-3` work: commit by path, bump the version ([`pyproject.toml`](../pyproject.toml), `bq_eval/__init__.py`, `uv.lock`), run [`scripts/gate.sh`](../scripts/gate.sh), archive (`gate roadmap-archive bq-eval --done`), tag `v0.4.1` and push.
 
 ## M18 — Single-Domain GCP Silver Core, Runner Port & Core Infra (`v0.6.0`)
 
@@ -91,9 +83,11 @@ Requirements: [`specs/clouds.md`](../specs/clouds.md), [`specs/silver.md`](../sp
 
 ## Shipped
 
+- **`v0.4.1` (`Pre-M18`)** — Committed dirty spec/design files, closed `M16` provenance (`T-10`/`T-14`/`T-15`), migrated `spec/` -> `specs/` and unblocked `full`-tier `doc-hygiene` — [archive](archive/roadmap-history.md#v041-pre-m18)
 - **`v0.4.0` (`M8`–`M15`)** — Receipt truth, workbench hardening, parameterized bootstrap with Terraform and Docker, 3-pool `FOCUS 1.2`, package and SQL split, `P0` wrong-number fixes, gate hardening, cliff cache-write pricing — [archive](archive/roadmap-history.md#delivered-milestones-v040)
 - **`v0.3.0` (`M7`)** — 4-tab `bq-eval serve` workbench, `343`-run live receipt, `capacity` & `docubridge` wire contracts — [archive](archive/roadmap-history.md#delivered-milestones-v030)
 - **`v0.2.3` (`M6`)** — Sampling debiasing, boundary-safe intervals, offline parity, `EVAL-P10` rubrics, pricing catalog, `LICENSE` — [archive](archive/roadmap-history.md#delivered-milestones-v023)
 - **`v0.2.2`** — SQL contract hardening, native SQL Gwet's `AC2`, daily quota guard, `343`-run live verification — [archive](archive/roadmap-history.md#delivered-milestones-v022)
 - **`v0.2.0` (`M5`)** — Two capture paths (light and full) and two judge engines — [archive](archive/roadmap-history.md#delivered-milestones-v020)
 - **`v0.1.0` (`M1`–`M4`)** — Single-store DDL, calibration parity, FinOps & `FOCUS 1.2`, offline showcase copy, load generator — [archive](archive/roadmap-history.md#delivered-milestones-v010)
+

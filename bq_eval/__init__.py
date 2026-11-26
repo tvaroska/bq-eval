@@ -5,6 +5,6 @@ Top-level package stays free of heavy showcase or driving-port imports so import
 never drags in seed corpora or HTTP servers.
 """
 
-__version__ = "0.4.0"
+__version__ = "0.4.1"
 
 __all__ = ["__version__"]
