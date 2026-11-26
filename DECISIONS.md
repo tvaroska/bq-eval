@@ -22,7 +22,7 @@
 - **Decision**: Attribute dedicated-capacity commitments via `FOCUS 1.2` multi-pool rules (active-hours funded share, off-peak backfill, unallocated idle pool, Priority vs. Standard PayGo spillover, reconciled to Cloud Billing) and route batch evals into off-peak valleys.
 
 ## ADR-008: Dual-Path `BQAA` `agent_events` + `_AllLogs` Switchboard *(Superseded by `ADR-011`)*
-- **Summary**: Replaced by the three shapes in [`spec/shapes.md`](spec/shapes.md).
+- **Summary**: Replaced by the three shapes in [`specs/shapes.md`](specs/shapes.md).
 
 ## ADR-009: Hand-Written Offline SQLite Runtime Twin *(Superseded by `ADR-010`)*
 - **Summary**: Replaced by translating the single BigQuery SQL implementation offline (`ADR-032` promotes it to the Local/CI Eval Runner Port).
@@ -31,7 +31,7 @@
 - **Decision**: Core is Bronze (telemetry in place) + Silver SQL in BigQuery (zero prices, zero verdicts, `NULL` for missing, one-way trust on self-reported failures). Gold add-ons read only published Silver views. BigQuery SQL is the single Silver implementation.
 
 ## ADR-011: At Most Three Telemetry Shapes & Content by Reference *(Amended by `ADR-026`, `ADR-028`, `ADR-032`, `ADR-036`)*
-- **Decision**: Silver reads at most three shapes in BigQuery SQL ([`spec/shapes.md`](spec/shapes.md)): legacy ADK, OTel GenAI inline, and OTel GenAI by reference (`file_data` URIs stay in place). Non-conforming frameworks, coding SDKs, and custom gateways normalize via the Collector Port.
+- **Decision**: Silver reads at most three shapes in BigQuery SQL ([`specs/shapes.md`](specs/shapes.md)): legacy ADK, OTel GenAI inline, and OTel GenAI by reference (`file_data` URIs stay in place). Non-conforming frameworks, coding SDKs, and custom gateways normalize via the Collector Port.
 
 ## ADR-012: Table-Function Silver Default (`light`) with Optional Span Base *(Amended by `ADR-035`)*
 - **Summary**: Default (`light`) publishes explicit-window table functions over Bronze; `enterprise` (design only) tests an append-only text-free span base against incremental tables.
@@ -43,7 +43,7 @@
 - **Summary**: Kept tool-call/repeat counts in Silver and thresholds/pass rules in Gold.
 
 ## ADR-015: Standard-First Telemetry Attributes (OTel + `EVAL-P11` + Minimal `bq_eval.*`) *(Amended by `ADR-039`, `ADR-045`)*
-- **Decision**: Read OTel (`v1.45+`), OTel GenAI (`v0.1+`), MCP, A2A, and cloud attributes verbatim, preserve `EVAL-P11` `outcome.*`, and confine custom keys strictly to `bq_eval.*` ([`spec/attributes.md`](spec/attributes.md)).
+- **Decision**: Read OTel (`v1.45+`), OTel GenAI (`v0.1+`), MCP, A2A, and cloud attributes verbatim, preserve `EVAL-P11` `outcome.*`, and confine custom keys strictly to `bq_eval.*` ([`specs/attributes.md`](specs/attributes.md)).
 
 ## ADR-016: Turn-Scoped `trace_payloads` Delta Contract *(Amended by `ADR-020`, `ADR-027`, `ADR-045`)*
 - **Summary**: One `trace_payloads` row per content-bearing turn splitting `prior_history` from turn deltas (`turn_prompt`, `turn_context`, `turn_output`, `step_outputs`, `media_uris`).
@@ -67,7 +67,7 @@
 - **Summary**: Non-span records enter via isolated copies of `workflow_events` (authority by landing copy); approvals and commits carry `action_args` hashed in Silver via RFC 8785 JCS.
 
 ## ADR-023: One-Domain Core; Clouds, Capacity and Governance as Modular Extensions *(Amended by `ADR-028`, `ADR-030`, `ADR-031`)*
-- **Summary**: Kept single-domain core modular while isolating multi-cloud federation ([`spec/clouds.md`](spec/clouds.md)) and gateway/capacity governance ([`spec/capacity.md`](spec/capacity.md)).
+- **Summary**: Kept single-domain core modular while isolating multi-cloud federation ([`specs/clouds.md`](specs/clouds.md)) and gateway/capacity governance ([`specs/capacity.md`](specs/capacity.md)).
 
 ## ADR-024: Long Text by Reference, Completeness Facts, Reference Data & Access *(Amended by `ADR-026`–`ADR-031`, `ADR-045`)*
 - **Summary**: Content by reference for oversized spans, per-part `*_read_whole` flags, tool-flagged `turn_context`, and fail-closed `sampling_probability`.
@@ -92,7 +92,7 @@
 
 ## ADR-031: Multi-Region Hub Default, Location Alignment, Multi-Project Security, Bounded `MERGE` & GCS WORM/RTBF *(Amended by `ADR-035`, `ADR-044`, `ADR-046`)*
 - **Decision**:
-  1. **Hub Location & Alignment**: Default the Hub to `US`/`EU` multi-region (or a single region when pairing regional Lakehouse catalogs + CCI, `ADR-046`); mandate strict location + KMS CMEK alignment within every domain (never mix `US` and `us-east4`); route non-hub sovereign GCP perimeters and cross-cloud spokes per [`spec/clouds.md`](spec/clouds.md).
+  1. **Hub Location & Alignment**: Default the Hub to `US`/`EU` multi-region (or a single region when pairing regional Lakehouse catalogs + CCI, `ADR-046`); mandate strict location + KMS CMEK alignment within every domain (never mix `US` and `us-east4`); route non-hub sovereign GCP perimeters and cross-cloud spokes per [`specs/clouds.md`](specs/clouds.md).
   2. **Perimeter & `MERGE` Hardening**: Keep `outcome.subject` in restricted `outcomes` only; split `enterprise` compaction SAs; enforce per-BU access (`ADR-044`); require static target `DATE(start_time)` pruning on `enterprise` `MERGE`, bounded lookbacks, and `max_bytes_billed` + `INFORMATION_SCHEMA.JOBS` slot breakers.
   3. **PII-Free GCS WORM + RTBF**: Back regulated Gold Audit Snapshots with PII-free **GCS Bucket Retention-Lock + CMEK** archives paired with per-subject crypto-shredding DEKs.
 
@@ -100,7 +100,7 @@
 - **Decision**:
   1. **Preventive Port & `< 5s` Runner**: Gateways/proxies enforce live writes, DLP, `allowed_models`, `1s/10s` `429` shedding, `optimize` daytime PT, and `100 MB` attachment streaming emitting structured `guardrail.intervention` (`control_id`/`layer`/`action`). Promote the offline SQL translator to a **`< 5s` Local/CI Eval Runner Port** (`CI_ONLY`).
   2. **Two-Speed Registry, `skill_registry` & Identity**: Add SCD-2 `skill_registry` (`protected_block_sha256`), split `tools.modifies_workspace` from `writes_state`, sync registries via Two-Speed CI/CD (`RL-1`/`RL-2` dual-signed) + dark-agent reconciliation, require structured OBO claims + `authz_mode`, and check reverse `action.committed -> tool_calls`.
-  3. **Gateway `1:N` & 3-Pool FinOps (`ADR-001` Preserved)**: Mandate `x-client-request-id` + `(trace_id, span_id)` `1:N` joins, `trace_owner_app_id` precedence, `state_mode`, core `model_calls` columns, honest 3P `inferred_ambiguous`, 3-pool `FOCUS 1.2` invoice-reconciled chargeback, `burst_metrics_1m`, and extended `allowed_models` ([`spec/capacity.md`](spec/capacity.md)).
+  3. **Gateway `1:N` & 3-Pool FinOps (`ADR-001` Preserved)**: Mandate `x-client-request-id` + `(trace_id, span_id)` `1:N` joins, `trace_owner_app_id` precedence, `state_mode`, core `model_calls` columns, honest 3P `inferred_ambiguous`, 3-pool `FOCUS 1.2` invoice-reconciled chargeback, `burst_metrics_1m`, and extended `allowed_models` ([`specs/capacity.md`](specs/capacity.md)).
 
 ## ADR-033: `SR 11-7` Stratified Calibration, Stateful Memory Reconstruction, Guardrail FP/FN & 11-Workload Use-Case Split
 - **Decision**:
@@ -126,7 +126,7 @@
 - **Rejected Options**: keyed hashes; a key hashed from the trace or outcome id, reversible by guessing.
 
 ## ADR-039: Bounded Columns, Labels and Column Corrections *(Amended by `ADR-045`)*
-- **Decision**: A value gets its own typed Silver column when Silver or a Gold add-on formula/gate computes, joins, or filters on it; pure slice-only attributes (~30 prompt, agent-version, MCP, A2A, cloud-residency, and evaluation-score keys) travel in one `labels` `JSON` column registered in `sql/silver/schema/labels_registry.json` (open-safe keys only in `*_open`). `model_calls` keeps the client request id and the provider response id in two columns, and the requested and the responding model in two columns. The retry count has one name, `caller_retry_count`, defined identically in [`spec/silver.md`](spec/silver.md) and [`spec/capacity.md`](spec/capacity.md). The cache-write split by lifetime is not published until an attribute carries it. `traces.user_turn_count` above 1 marks a trace with more than one user turn.
+- **Decision**: A value gets its own typed Silver column when Silver or a Gold add-on formula/gate computes, joins, or filters on it; pure slice-only attributes (~30 prompt, agent-version, MCP, A2A, cloud-residency, and evaluation-score keys) travel in one `labels` `JSON` column registered in `sql/silver/schema/labels_registry.json` (open-safe keys only in `*_open`). `model_calls` keeps the client request id and the provider response id in two columns, and the requested and the responding model in two columns. The retry count has one name, `caller_retry_count`, defined identically in [`specs/silver.md`](specs/silver.md) and [`specs/capacity.md`](specs/capacity.md). The cache-write split by lifetime is not published until an attribute carries it. `traces.user_turn_count` above 1 marks a trace with more than one user turn.
 
 ## ADR-040: Application Identity Through the Registry, Bound to the Landing Place
 - **Decision**: `app_registry` maps telemetry identities to applications: `apphub.application.id` first, else `service.name` plus `COALESCE(deployment.environment.name, deployment.environment)`. No match stays unregistered; nothing is invented. The registry also lists where each application's spans must land; an identity claimed from elsewhere is published as not bound. Where a rule depends on the tier, Gold treats unbound and unregistered applications as the strictest tier. Inside one landing place identity stays self-declared.
@@ -149,4 +149,4 @@
 - **Decision**: Ship the 12 core Silver BigQuery schemas and `labels_registry.json` under `sql/silver/schema/`: (1) internal `spans(from_time, to_time)` stays text-free (restricted views join text by `trace_id, span_id`); (2) list and structured columns use `JSON` (never `ARRAY`) so `NULL` stays distinct from `[]`, child-set counts default to `0`, `traces` token sums are `NULL` when `model_call_count = 0`, subject-less provenance/bound booleans are `NULL`, `embeddings` set `content_missing = false`, and trace-level multi-span precedence is gateway -> root -> earliest span; (3) `trace_payloads` builds `turn_context` from ordered tool/retrieval/memory results with `tools` flags and 5 `*_read_whole` booleans (following message refs on Hive BigLake, keeping instruction/definition refs as addresses); (4) `events` lifts `linked_outcome_id`, `outcome_status`, `feedback_reason`, and `state_transition_to` from `workflow_events.payload_json` (keeping `ci.verified` authoritative only in the SoR copy), and `outcomes` returns rows active in window aggregated over `outcome_lookback_days` with `extends_outside_window`.
 
 ## ADR-046: Tiered Multi-Cloud Routing (Cross-Cloud Connections, Borderless Lakehouse & Staged Hub Transfer)
-- **Decision**: Retire standard BigQuery Omni spoke SQL (which lacks UDFs required for `ADR-041` RFC 8785 JCS hashing, live `JOIN`s, and `AI.GENERATE_TABLE`) and route multi-cloud/multi-region spokes across three explicit modes in [`spec/clouds.md`](spec/clouds.md) while keeping single-domain Silver Core unchanged: (1) **Direct Cross-Cloud Bronze (`RL-4`–`RL-5` permissive)**: read compacted S3/ADLS Parquet or Iceberg V2+ via Hub-located **BigQuery Cross-Cloud Connections** or **Borderless Lakehouse Federated Catalogs** (`P.C.N.T`) on standard GCP slots with `ADR-044` function filtering (federated tables disallow RAPs); (2) **Zero-Copy Federated `*_open` Spokes (`RL-1`–`RL-3` regional CCI Hub)**: compute Silver + **In-Cloud Judge Port** in-cloud (Spark/Trino/Snowflake passing `ADR-041` JCS vectors) and federate only leak-free `*_open` Iceberg V2 tables over **Cross-Cloud Interconnect**, materializing settled Gold windows once/day so `restrictNonCmekServices` cache disablement stays bounded; (3) **Staged `Hub Transfer Port`**: retain `STS -> GCS -> LOAD DATA` for `US`/`EU` multi-region Hubs bridging regional CCI catalogs, Azure private gaps, and sovereign GCP regions. Preserve `remote_fragment_pending` (`>= 300s` catalog lag), `object_storage_stats` cost breakers (`0`-byte federated dry runs), and 4-part `P.C.N.T` SQL support in `bootstrap.py` and the offline translator.
+- **Decision**: Retire standard BigQuery Omni spoke SQL (which lacks UDFs required for `ADR-041` RFC 8785 JCS hashing, live `JOIN`s, and `AI.GENERATE_TABLE`) and route multi-cloud/multi-region spokes across three explicit modes in [`specs/clouds.md`](specs/clouds.md) while keeping single-domain Silver Core unchanged: (1) **Direct Cross-Cloud Bronze (`RL-4`–`RL-5` permissive)**: read compacted S3/ADLS Parquet or Iceberg V2+ via Hub-located **BigQuery Cross-Cloud Connections** or **Borderless Lakehouse Federated Catalogs** (`P.C.N.T`) on standard GCP slots with `ADR-044` function filtering (federated tables disallow RAPs); (2) **Zero-Copy Federated `*_open` Spokes (`RL-1`–`RL-3` regional CCI Hub)**: compute Silver + **In-Cloud Judge Port** in-cloud (Spark/Trino/Snowflake passing `ADR-041` JCS vectors) and federate only leak-free `*_open` Iceberg V2 tables over **Cross-Cloud Interconnect**, materializing settled Gold windows once/day so `restrictNonCmekServices` cache disablement stays bounded; (3) **Staged `Hub Transfer Port`**: retain `STS -> GCS -> LOAD DATA` for `US`/`EU` multi-region Hubs bridging regional CCI catalogs, Azure private gaps, and sovereign GCP regions. Preserve `remote_fragment_pending` (`>= 300s` catalog lag), `object_storage_stats` cost breakers (`0`-byte federated dry runs), and 4-part `P.C.N.T` SQL support in `bootstrap.py` and the offline translator.

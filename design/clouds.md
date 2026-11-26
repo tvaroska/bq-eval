@@ -6,7 +6,7 @@ tags: [bq-eval, silver, clouds, extension]
 
 # Extension: more than one cloud or region
 
-> Multi-cloud and multi-region execution routes by residency tier and Hub location ([spec/clouds.md](../spec/clouds.md)). The core in [silver](silver.md) describes one location-aligned processing domain and does not depend on this note.
+> Multi-cloud and multi-region execution routes by residency tier and Hub location ([specs/clouds.md](../specs/clouds.md)). The core in [silver](silver.md) describes one location-aligned processing domain and does not depend on this note.
 
 ## Hub Location & Why BigQuery Omni Is Replaced (`ADR-031`, `ADR-046`)
 
@@ -40,4 +40,4 @@ tags: [bq-eval, silver, clouds, extension]
 - **Skew watermarks (`remote_fragment_pending = true`):** Enforced in both staged (`transfer_watermark_utc`) and federated (`--refresh-interval >= 300s`) modes so Hub Gold never flags in-flight split traces as orphaned while remote catalog metadata lags GCP `_AllSpans`.
 - **`0`-Byte Dry-Run & Egress Telemetry:** Federated/Lakehouse `dry_run` calls return a `0`-byte lower bound; cost guards rely on static window predicates (`ADR-035`), `max_bytes_billed`, and post-job `INFORMATION_SCHEMA.JOBS_BY_PROJECT` (`total_bytes_billed` + `object_storage_stats` `object_storage_bytes_read` / `cache_bytes_read`).
 - **4-Part `P.C.N.T` SQL & Read-Only Catalogs:** `bq_eval/deploy/engine/bootstrap.py` and the offline SQLite AST translator rewrite 4-part `project.catalog.namespace.table` references alongside 3-part names; writable Gold/event tables stay in native GCP BigQuery datasets.
-- **Cross-Cloud KMS-HMAC, In-Cloud Judge Port & On-Premises Relay:** Out-of-band per-BU KMS-HMAC (`hmac_key_version`) + in-perimeter RTBF DEKs; in-VPC Bedrock / Azure OpenAI container runner (`temperature = 0`, `seed`, snapshot ID, `zdr_allowed`, per-cloud $Se/Sp$) for `RL-1`–`RL-3`; mTLS payload-stripping OTel Collector relay for on-prem. See [open questions](../spec/open-questions.md#clouds-extension).
+- **Cross-Cloud KMS-HMAC, In-Cloud Judge Port & On-Premises Relay:** Out-of-band per-BU KMS-HMAC (`hmac_key_version`) + in-perimeter RTBF DEKs; in-VPC Bedrock / Azure OpenAI container runner (`temperature = 0`, `seed`, snapshot ID, `zdr_allowed`, per-cloud $Se/Sp$) for `RL-1`–`RL-3`; mTLS payload-stripping OTel Collector relay for on-prem. See [open questions](../specs/open-questions.md#clouds-extension).

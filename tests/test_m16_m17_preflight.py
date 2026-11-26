@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -17,6 +18,7 @@ from bq_eval.deploy.engine.bq_client import (
     format_bq_job_labels,
 )
 from scripts.blind_sme_kit import (
+    _TRAP_CASE_SLUG_RE,
     export_blind_sme_kit,
     import_blind_sme_annotations,
 )
@@ -24,7 +26,11 @@ from scripts.blind_sme_kit import (
     main as blind_sme_main,
 )
 from scripts.m16_vertex_otel_probe import sanitize_text
-from scripts.run_m16_live_proof import M16LiveProofConfig
+from scripts.run_m16_live_proof import (
+    M16LiveProofConfig,
+    redact_and_shuffle_traces,
+    run_live_m16_proof,
+)
 from tests.sql_helpers import REPO_ROOT
 
 
@@ -306,3 +312,94 @@ def test_committed_m16_live_cloud_proof_receipt_and_blind_traces() -> None:
     assert sanitize_text("projects/secret-id/123456789012", ("secret-id",)) == (
         "projects/showcase-project/100000000000"
     )
+
+
+@dataclass(frozen=True)
+class _DummyCliffReport:
+    model_name: str = "gemini-3.8-flash"
+    short_arm_count: int = 30
+    long_arm_count: int = 30
+    cost_multiplier: float = 250.0
+
+
+def test_committed_blind_traces_hide_score_order_and_slugs(tmp_path: Path) -> None:
+    """Committed blind traces strip scores/slugs, shuffle rows, and default deploy status to False."""
+    anon_path = REPO_ROOT / "benchmarks" / "results" / "m16_anonymized_traces_100.jsonl"
+    raw_lines = [
+        line for line in anon_path.read_text(encoding="utf-8").splitlines() if line.strip()
+    ]
+    assert len(raw_lines) == 100
+    rows = [json.loads(line) for line in raw_lines]
+
+    for line, row in zip(raw_lines, rows, strict=True):
+        assert str(row["trace_id"]).startswith("tr-opaque-")
+        if row.get("outcome_id") is not None:
+            assert str(row["outcome_id"]).startswith("out-opaque-")
+        assert "judge_ordinal_score" not in row
+        assert "reasoning_trace" not in row
+        assert _TRAP_CASE_SLUG_RE.search(line) is None
+
+    assert any("kyc-case-redacted-" in line for line in raw_lines)
+    trace_ids = [str(r["trace_id"]) for r in rows]
+    assert trace_ids != sorted(trace_ids)
+
+    raw_sample = [
+        {
+            "trace_id": f"raw-tr-{idx:03d}",
+            "outcome_id": f"raw-out-{idx:03d}",
+            "context_id": f"ctx-raw-{idx:03d}",
+            "user_prompt": f"context=ctx-raw-{idx:03d} case=kyc-s2trap-{idx:03d}",
+            "retrieved_context": f'{{"context_id":"ctx-raw-{idx:03d}","doc_id":"kyc-clean-{idx:03d}"}}',
+            "final_response": f"trace raw-tr-{idx:03d} outcome raw-out-{idx:03d}",
+            "judge_ordinal_score": 1 if idx < 5 else 4,
+            "reasoning_trace": "SECRET_REASONING",
+        }
+        for idx in range(10)
+    ]
+    blind_a = redact_and_shuffle_traces(raw_sample)
+    blind_b = redact_and_shuffle_traces(raw_sample)
+    assert blind_a == blind_b
+    assert [r["trace_id"] for r in blind_a] != sorted(r["trace_id"] for r in blind_a)
+    for item in blind_a:
+        blob = json.dumps(item)
+        assert "raw-tr-" not in blob
+        assert "raw-out-" not in blob
+        assert "ctx-raw-" not in blob
+        assert "SECRET_REASONING" not in blob
+        assert "judge_ordinal_score" not in item
+        assert "ctx-opaque-" in item["user_prompt"]
+        assert "ctx-opaque-" in item["retrieved_context"]
+        assert _TRAP_CASE_SLUG_RE.search(blob) is None
+
+    cfg = M16LiveProofConfig(
+        target_project_id="demo-target",
+        source_project_id="demo-src",
+        provision_infra=False,
+        reuse_ingested_cliff=True,
+        receipt_out=tmp_path / "proof.json",
+        traces_out=tmp_path / "raw.jsonl",
+        anonymized_traces_out=tmp_path / "anon.jsonl",
+    )
+    with patch.multiple(
+        "scripts.run_m16_live_proof",
+        upload_seed_completion_jsonl=MagicMock(),
+        _ensure_cliff_arms=MagicMock(return_value=([], [])),
+        analyze_unconfounded_context_cliff_arms=MagicMock(return_value=_DummyCliffReport()),
+        _wait_for_live_traces=MagicMock(return_value={"span_count": 120}),
+        verify_concurrent_quota_lock_live=MagicMock(return_value={"zero_overspend": True}),
+        verify_live_views_and_sync_jobs=MagicMock(return_value={"deployed_view_count": 37}),
+        export_apphub_traces_and_sme_candidates=MagicMock(
+            return_value={"exported_trace_count": 100, "traces_sha256": "a" * 64}
+        ),
+    ):
+        receipt = run_live_m16_proof(cfg)
+
+    infra = receipt["infrastructure_bootstrap"]
+    assert infra["provision_infra_requested"] is False
+    assert infra["terraform_applied"] is False
+    assert infra["terraform_exit_code"] is None
+    assert infra["power_policy"] is None
+    assert infra["bootstrap_apply_passed"] is False
+    assert infra["bootstrap_apply_exit_code"] is None
+    assert infra["bootstrap_dry_run_passed"] is False
+    assert infra["bootstrap_dry_run_exit_code"] is None

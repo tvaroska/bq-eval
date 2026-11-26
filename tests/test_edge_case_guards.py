@@ -17,6 +17,7 @@ from bq_eval.demo.bundles import verify_receipt_sha256
 from bq_eval.finops.engine.spend import allocate_focus_hourly_chargeback
 from tests.conftest import make_span
 from tests.sql_helpers import (
+    REPO_ROOT,
     SQL_DIR,
     _create_enterprise_sqlite_fixture,
     _extract_view_sql_text,
@@ -366,3 +367,34 @@ def test_bqaa_string_typed_status_code_and_shared_pricing_view() -> None:
     assert int(sql_rows["tr-str-503"]["http_status_code"]) == 503
     # 100K * $3.00/1M + 10K * $15.00/1M = $0.30 + $0.15 = $0.45
     assert float(turn_row["trace_cost_usd"]) == pytest.approx(0.45, abs=1e-12)
+
+
+def test_every_committed_receipt_has_manifest_entry() -> None:
+    """Every `.json`/`.jsonl` receipt under `benchmarks/results/` matches `SHA256SUMS`."""
+    res_dir = REPO_ROOT / "benchmarks" / "results"
+    sha_path = res_dir / "SHA256SUMS"
+    actual_files = {
+        p.name for p in res_dir.iterdir() if p.is_file() and p.suffix in {".json", ".jsonl"}
+    }
+    assert actual_files == {
+        "bq_dry_run_receipt.json",
+        "m2_live_receipt.json",
+        "m16_live_cloud_proof.json",
+        "m16_anonymized_traces_100.jsonl",
+    }
+
+    manifest: dict[str, str] = {}
+    for raw_line in sha_path.read_text(encoding="utf-8").splitlines():
+        if not raw_line.strip():
+            continue
+        digest, filename = raw_line.split(None, 1)
+        clean_name = filename.strip()
+        manifest[clean_name] = digest.strip()
+        verify_receipt_sha256(res_dir / clean_name, sha_path)
+
+    assert set(manifest) == actual_files
+    proof = json.loads((res_dir / "m16_live_cloud_proof.json").read_text(encoding="utf-8"))
+    export_info = proof["apphub_fleet_export"]
+    assert export_info["traces_sha256"] == manifest["m16_anonymized_traces_100.jsonl"]
+    assert len(export_info["raw_traces_sha256"]) == 64
+    assert export_info["raw_traces_sha256"] != export_info["traces_sha256"]

@@ -7,10 +7,11 @@ import concurrent.futures
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -55,6 +56,88 @@ class M16LiveProofConfig:
     reuse_ingested_cliff: bool = False
     receipt_out: Path = Path("benchmarks/results/m16_live_cloud_proof.json")
     traces_out: Path = Path("benchmarks/results/m16_live_traces_120.jsonl")
+    anonymized_traces_out: Path | None = None
+
+
+_BLIND_SLUG_RE = re.compile(
+    r"\bkyc-(?:s2trap|clean|pobox|ocr|struct)[a-z0-9-]*\b",
+    re.IGNORECASE,
+)
+_CTX_ASSIGN_RE = re.compile(r"\bcontext=([A-Za-z0-9_-]+)")
+_CTX_JSON_RE = re.compile(r'"context_id"\s*:\s*"([^"]+)"')
+_SENSITIVE_TRACE_KEYS = ("judge_ordinal_score", "reasoning_trace")
+
+
+def _opaque_digest(namespace: str, raw_value: str, length: int = 16) -> str:
+    return hashlib.sha256(f"m16-{namespace}:{raw_value}".encode()).hexdigest()[:length]
+
+
+def _opaque_id(namespace: str, prefix: str, raw_value: str) -> str:
+    if raw_value.startswith(prefix):
+        return raw_value
+    return f"{prefix}{_opaque_digest(namespace, raw_value)}"
+
+
+def _scrub_blind_payload(
+    text: str,
+    raw_to_opaque: dict[str, str],
+) -> str:
+    scrubbed = _BLIND_SLUG_RE.sub(
+        lambda m: f"kyc-case-redacted-{_opaque_digest('slug', m.group(0).lower(), 8)}",
+        text,
+    )
+    scrubbed = _CTX_ASSIGN_RE.sub(
+        lambda m: f"context={_opaque_id('context', 'ctx-opaque-', m.group(1))}",
+        scrubbed,
+    )
+    scrubbed = _CTX_JSON_RE.sub(
+        lambda m: m.group(0).replace(
+            m.group(1),
+            _opaque_id("context", "ctx-opaque-", m.group(1)),
+        ),
+        scrubbed,
+    )
+    for raw_id, opaque_id in raw_to_opaque.items():
+        if len(raw_id) >= 4 and raw_id in scrubbed:
+            scrubbed = scrubbed.replace(raw_id, opaque_id)
+    return scrubbed
+
+
+def redact_and_shuffle_traces(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Strip judge scores/reasoning, opacify trace/outcome/context IDs & scenario slugs, and shuffle."""
+    keyed_rows: list[tuple[str, dict[str, Any]]] = []
+    for row in rows:
+        item = {k: v for k, v in row.items() if k not in _SENSITIVE_TRACE_KEYS}
+        raw_trace_id = str(item["trace_id"])
+        shuffle_key = hashlib.sha256(f"m16-blind-shuffle:{raw_trace_id}".encode()).hexdigest()
+
+        raw_to_opaque: dict[str, str] = {}
+        opaque_trace_id = _opaque_id("trace", "tr-opaque-", raw_trace_id)
+        raw_to_opaque[raw_trace_id] = opaque_trace_id
+        item["trace_id"] = opaque_trace_id
+
+        raw_outcome_id = item.get("outcome_id")
+        if raw_outcome_id:
+            raw_out_str = str(raw_outcome_id)
+            opaque_outcome_id = _opaque_id("outcome", "out-opaque-", raw_out_str)
+            raw_to_opaque[raw_out_str] = opaque_outcome_id
+            item["outcome_id"] = opaque_outcome_id
+
+        raw_context_id = item.get("context_id")
+        if raw_context_id:
+            raw_ctx_str = str(raw_context_id)
+            opaque_context_id = _opaque_id("context", "ctx-opaque-", raw_ctx_str)
+            raw_to_opaque[raw_ctx_str] = opaque_context_id
+            item["context_id"] = opaque_context_id
+
+        for text_key in ("user_prompt", "retrieved_context", "final_response"):
+            if text_key in item and item[text_key] is not None:
+                item[text_key] = _scrub_blind_payload(str(item[text_key]), raw_to_opaque)
+
+        keyed_rows.append((shuffle_key, item))
+
+    keyed_rows.sort(key=lambda pair: pair[0])
+    return [item for _, item in keyed_rows]
 
 
 def _wait_for_live_traces(
@@ -265,6 +348,7 @@ def export_apphub_traces_and_sme_candidates(
     source_project_id: str,
     source_dataset_id: str,
     traces_out: Path,
+    anonymized_traces_out: Path | None = None,
     limit: int = 120,
 ) -> dict[str, Any]:
     """Export `N >= 100` anonymized real traces + App Hub ownership join receipts from Scratchpad fleet."""
@@ -315,6 +399,7 @@ def export_apphub_traces_and_sme_candidates(
         )
 
     traces_out.parent.mkdir(parents=True, exist_ok=True)
+    clean_rows: list[dict[str, Any]] = []
     sanitized_lines: list[str] = []
     for row in joined_rows:
         clean_row = {
@@ -332,14 +417,27 @@ def export_apphub_traces_and_sme_candidates(
             "rubric_id": str(row["rubric_id"]),
             "judge_ordinal_score": to_int(row.get("judge_ordinal_score")),
         }
+        clean_rows.append(clean_row)
         sanitized_lines.append(json.dumps(clean_row, sort_keys=True))
 
     traces_bytes = ("\n".join(sanitized_lines) + "\n").encode("utf-8")
     traces_out.write_bytes(traces_bytes)
 
+    anon_path = (
+        anonymized_traces_out
+        if anonymized_traces_out is not None
+        else traces_out.with_name(f"{traces_out.stem}_anonymized.jsonl")
+    )
+    anon_path.parent.mkdir(parents=True, exist_ok=True)
+    blind_rows = redact_and_shuffle_traces(clean_rows)
+    anon_lines = [json.dumps(item, sort_keys=True) for item in blind_rows]
+    anon_bytes = ("\n".join(anon_lines) + "\n").encode("utf-8")
+    anon_path.write_bytes(anon_bytes)
+
     return {
-        "exported_trace_count": len(sanitized_lines),
-        "traces_sha256": hashlib.sha256(traces_bytes).hexdigest(),
+        "exported_trace_count": len(blind_rows),
+        "raw_traces_sha256": hashlib.sha256(traces_bytes).hexdigest(),
+        "traces_sha256": hashlib.sha256(anon_bytes).hexdigest(),
         "apphub_attribution_coverage": [
             {
                 "apphub_application_id": sanitize_text(c["apphub_application_id"], sensitive),
@@ -388,37 +486,46 @@ def apply_terraform_and_bootstrap(
         text=True,
         check=False,
     )
-    if proc.returncode != 0:
-        raise RuntimeError(f"terraform apply failed:\n{proc.stdout}\n{proc.stderr}")
+    tf_rc = int(proc.returncode)
+    if tf_rc != 0:
+        raise RuntimeError(f"terraform apply failed (rc={tf_rc}):\n{proc.stdout}\n{proc.stderr}")
 
+    bootstrap_rcs: dict[str, int] = {}
     for flag, label in (("--apply", "apply"), ("--dry-run", "dry-run")):
         rc = 1
         for attempt in range(4):
-            rc = cli_main(
-                [
-                    "bootstrap",
-                    "--mode",
-                    "full",
-                    "--project-id",
-                    project_id,
-                    "--dataset-id",
-                    dataset_id,
-                    flag,
-                    "--format",
-                    "json",
-                ]
+            rc = int(
+                cli_main(
+                    [
+                        "bootstrap",
+                        "--mode",
+                        "full",
+                        "--project-id",
+                        project_id,
+                        "--dataset-id",
+                        dataset_id,
+                        flag,
+                        "--format",
+                        "json",
+                    ]
+                )
             )
             if rc == 0:
                 break
             time.sleep(10.0 * (attempt + 1))
+        bootstrap_rcs[label] = rc
         if rc != 0:
-            raise RuntimeError(f"`bq-eval bootstrap --mode full {label}` exited non-zero.")
+            raise RuntimeError(f"`bq-eval bootstrap --mode full {label}` exited {rc}.")
 
     return {
-        "terraform_applied": True,
+        "provision_infra_requested": True,
+        "terraform_applied": tf_rc == 0,
+        "terraform_exit_code": tf_rc,
         "power_policy": "hibernate",
-        "bootstrap_apply_passed": True,
-        "bootstrap_dry_run_passed": True,
+        "bootstrap_apply_passed": bootstrap_rcs["apply"] == 0,
+        "bootstrap_apply_exit_code": bootstrap_rcs["apply"],
+        "bootstrap_dry_run_passed": bootstrap_rcs["dry-run"] == 0,
+        "bootstrap_dry_run_exit_code": bootstrap_rcs["dry-run"],
     }
 
 
@@ -475,10 +582,14 @@ def run_live_m16_proof(cfg: M16LiveProofConfig) -> dict[str, Any]:
     upload_seed_completion_jsonl(cfg.target_project_id)
 
     deploy_status: dict[str, Any] = {
-        "terraform_applied": True,
-        "power_policy": "hibernate",
-        "bootstrap_apply_passed": True,
-        "bootstrap_dry_run_passed": True,
+        "provision_infra_requested": False,
+        "terraform_applied": False,
+        "terraform_exit_code": None,
+        "power_policy": None,
+        "bootstrap_apply_passed": False,
+        "bootstrap_apply_exit_code": None,
+        "bootstrap_dry_run_passed": False,
+        "bootstrap_dry_run_exit_code": None,
     }
     if cfg.provision_infra:
         deploy_status = apply_terraform_and_bootstrap(
@@ -505,6 +616,7 @@ def run_live_m16_proof(cfg: M16LiveProofConfig) -> dict[str, Any]:
         source_project_id=cfg.source_project_id,
         source_dataset_id=cfg.dataset_id,
         traces_out=cfg.traces_out,
+        anonymized_traces_out=cfg.anonymized_traces_out,
         limit=120,
     )
 
@@ -546,6 +658,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         type=Path,
         default=Path("benchmarks/results/m16_live_traces_120.jsonl"),
     )
+    parser.add_argument(
+        "--anonymized-traces-out",
+        type=Path,
+        default=Path("benchmarks/results/m16_anonymized_traces_100.jsonl"),
+    )
     args = parser.parse_args(argv)
     receipt = run_live_m16_proof(
         M16LiveProofConfig(
@@ -559,6 +676,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             reuse_ingested_cliff=bool(args.reuse_ingested_cliff),
             receipt_out=args.receipt_out,
             traces_out=args.traces_out,
+            anonymized_traces_out=args.anonymized_traces_out,
         )
     )
     print(json.dumps(receipt, indent=2, sort_keys=True))

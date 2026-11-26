@@ -6,7 +6,7 @@ tags: [bq-eval, silver, capacity, extension]
 
 # Extension: capacity and governance
 
-> How custom-proxy `requests`, 3-pool `FOCUS 1.2` chargeback, and scoped model governance are built alongside [Silver](silver.md) without bloating the core or breaking `ADR-001` repository separation. Contract: [spec/capacity.md](../spec/capacity.md).
+> How custom-proxy `requests`, 3-pool `FOCUS 1.2` chargeback, and scoped model governance are built alongside [Silver](silver.md) without bloating the core or breaking `ADR-001` repository separation. Contract: [specs/capacity.md](../specs/capacity.md).
 
 ## Custom Proxy Bronze Contract, `requests` view & `1:N` failover reconciliation
 

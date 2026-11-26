@@ -1,8 +1,9 @@
-"""Documentation, `spec/` & `design/` tree, and receipt-provenance contract tests."""
+"""Documentation, `specs/` & `design/` tree, and receipt-provenance contract tests."""
 
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import re
 import subprocess
@@ -216,7 +217,7 @@ def _assert_design_tree(design_files: list[Path]) -> None:
 
 
 def test_spec_and_design_front_matter_and_tree_contract() -> None:
-    """`spec/` and `design/` carry valid bidirectional front-matter, stay status-free, and omit retired docs."""
+    """`specs/` and `design/` carry valid bidirectional front-matter, stay status-free, and omit retired docs."""
     for retired in (
         "docs/architecture-and-sql.md",
         "docs/bqaa-and-dual-path-architecture.md",
@@ -231,7 +232,7 @@ def test_spec_and_design_front_matter_and_tree_contract() -> None:
         assert not (REPO_ROOT / retired).exists(), f"Retired doc file still present: {retired}"
 
     design_files = sorted((REPO_ROOT / "design").rglob("*.md"))
-    spec_files = sorted((REPO_ROOT / "spec").rglob("*.md"))
+    spec_files = sorted((REPO_ROOT / "specs").rglob("*.md"))
     assert design_files and spec_files
     _assert_design_tree(design_files)
 
@@ -316,8 +317,7 @@ def test_license_present_and_apache_2() -> None:
     assert "Apache License" in license_path.read_text(encoding="utf-8")
 
 
-def test_documented_test_count_matches_pytest_collection() -> None:
-    """Test count cited in `AGENTS.md` matches actual collected pytest items."""
+def _collect_pytest_count() -> int:
     res = subprocess.run(
         [sys.executable, "-m", "pytest", "--collect-only", "-q", "-p", "no:cacheprovider"],
         cwd=REPO_ROOT,
@@ -328,9 +328,40 @@ def test_documented_test_count_matches_pytest_collection() -> None:
     assert res.returncode == 0, res.stdout + res.stderr
     m = re.search(r"(\d+)\s+tests?\s+collected", res.stdout)
     assert m is not None, f"Could not parse pytest collection output:\n{res.stdout}"
-    collected = int(m.group(1))
+    return int(m.group(1))
 
+
+def test_documented_test_count_matches_pytest_collection() -> None:
+    """Test count cited in `AGENTS.md` matches actual collected pytest items."""
+    collected = _collect_pytest_count()
     agents_md = (REPO_ROOT / "AGENTS.md").read_text(encoding="utf-8")
     assert f"`{collected}` tests" in agents_md, (
         f"AGENTS.md test count out of sync with collected={collected}"
     )
+
+
+def test_roadmap_baseline_and_m16_receipt_contract() -> None:
+    """`docs/roadmap.md` baseline counters and `m16_live_cloud_proof.json` invariants stay pinned."""
+    collected = _collect_pytest_count()
+    roadmap_md = (REPO_ROOT / "docs" / "roadmap.md").read_text(encoding="utf-8")
+    assert f"`{collected}/{collected}` pytest" in roadmap_md, (
+        f"docs/roadmap.md pytest baseline out of sync with collected={collected}"
+    )
+    schema_files = [
+        p
+        for p in (REPO_ROOT / "sql" / "silver" / "schema").glob("*.json")
+        if p.name != "labels_registry.json"
+    ]
+    assert f"`{len(schema_files)}` JSON schemas" in roadmap_md
+
+    res_dir = REPO_ROOT / "benchmarks" / "results"
+    proof = json.loads((res_dir / "m16_live_cloud_proof.json").read_text(encoding="utf-8"))
+    anon_sha = hashlib.sha256(
+        (res_dir / "m16_anonymized_traces_100.jsonl").read_bytes()
+    ).hexdigest()
+    assert proof["apphub_fleet_export"]["traces_sha256"] == anon_sha
+    assert proof["unconfounded_context_cliff"]["short_arm_count"] == 30
+    assert proof["unconfounded_context_cliff"]["long_arm_count"] == 30
+    assert proof["unconfounded_context_cliff"]["cost_multiplier"] > 200.0
+    assert proof["s5_concurrent_quota_lock"]["zero_overspend"] is True
+    assert proof["s15_views_and_job_costs"]["deployed_view_count"] >= 37

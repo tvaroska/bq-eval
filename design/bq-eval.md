@@ -13,4 +13,4 @@ tags: [bq-eval]
 
 **How it works.** Three layers. Bronze is the telemetry, left in place. Silver is the core: SQL in BigQuery that normalizes every accepted telemetry shape into the same objects and publishes counts and facts for every trace. Gold is a set of add-ons that read Silver and decide what passes. See [layers](layers.md).
 
-**What is in these notes.** The requirements are in [spec/](../spec/layers.md). These notes describe how the design meets them. Status is kept out of both; it belongs in the [roadmap](../docs/roadmap.md).
+**What is in these notes.** The requirements are in [specs/](../specs/layers.md). These notes describe how the design meets them. Status is kept out of both; it belongs in the [roadmap](../docs/roadmap.md).

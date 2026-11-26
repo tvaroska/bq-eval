@@ -6,7 +6,7 @@ tags: [bq-eval, gold]
 
 # Gold Add-Ons
 
-> How the Evaluation, Monitoring, and Cost add-ons are built over the published Silver views. Contract: [spec/gold.md](../spec/gold.md).
+> How the Evaluation, Monitoring, and Cost add-ons are built over the published Silver views. Contract: [specs/gold.md](../specs/gold.md).
 
 ## Shared structure
 

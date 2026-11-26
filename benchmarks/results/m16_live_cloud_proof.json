@@ -43,7 +43,8 @@
       }
     ],
     "exported_trace_count": 100,
-    "traces_sha256": "7fccf5ada2ef6d9b9369310686a404b9cb7cc5255f83fc3aeb4eaa28fa92007d"
+    "raw_traces_sha256": "7fccf5ada2ef6d9b9369310686a404b9cb7cc5255f83fc3aeb4eaa28fa92007d",
+    "traces_sha256": "1c7ec1a7f7860e44561d5355a8988093a38299f7520361c6c56198f52f319c73"
   },
   "captured_date_utc": "2026-11-24",
   "infrastructure_bootstrap": {

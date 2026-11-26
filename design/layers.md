@@ -11,7 +11,7 @@ tags: [bq-eval, layers]
 
 # Layers
 
-> How Bronze, Silver, and Gold fit together, what runs where, and which way the dependencies point. Requirements: [spec/layers.md](../spec/layers.md).
+> How Bronze, Silver, and Gold fit together, what runs where, and which way the dependencies point. Requirements: [specs/layers.md](../specs/layers.md).
 
 ```
 Preventive Request-Path Port (Gateways / Proxies: <1m blocking, inline DLP, HITL, 1s/10s shedding)
