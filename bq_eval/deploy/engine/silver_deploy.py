@@ -18,6 +18,7 @@ SILVER_SQL_ORDER: tuple[str, ...] = (
     "silver/model_calls.sql",
     "silver/tool_calls.sql",
     "silver/events.sql",
+    "silver/trace_aux.sql",
     "silver/traces.sql",
     "silver/trace_payloads.sql",
     "silver/outcomes.sql",
@@ -28,7 +29,8 @@ SILVER_SQL_ORDER: tuple[str, ...] = (
 
 _IDENT_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]{0,127}$")
 _LOCATION_RE = re.compile(r"^[a-zA-Z0-9_-]{2,32}$")
-_SHAPE3_FMT_ALLOWED = frozenset({"JSON", "PARQUET", "NEWLINE_DELIMITED_JSON"})
+_SHAPE3_FMT_ALLOWED = frozenset({"JSON", "PARQUET", "NEWLINE_DELIMITED_JSON", "ICEBERG"})
+_SHAPE3_CACHE_MODES = frozenset({"", "MANUAL", "AUTOMATIC"})
 _TOKEN_RE = re.compile(
     r"""
     (?P<comment_line>(?:--|\#)[^\n]*)
@@ -207,7 +209,7 @@ _SILVER_TVF_SCHEMAS: frozenset[str] = frozenset(
     }
 )
 _SILVER_INTERNAL_BASES: frozenset[str] = frozenset(
-    {"spans", "tool_calls_base", "events_base", "traces_base", "outcomes_base"}
+    {"spans", "tool_calls_base", "events_base", "trace_aux_agg", "traces_base", "outcomes_base"}
 )
 _FORBIDDEN_OPEN_COLS: frozenset[str] = frozenset(
     {
@@ -294,6 +296,7 @@ def build_silver_routine_authorizations(  # noqa: PLR0913
         (project_id, silver_internal_dataset, "spans"),
         (project_id, silver_internal_dataset, "tool_calls_base"),
         (project_id, silver_internal_dataset, "events_base"),
+        (project_id, silver_internal_dataset, "trace_aux_agg"),
         (project_id, silver_internal_dataset, "traces_base"),
     )
     restricted_bronze_tvfs = (
@@ -346,11 +349,38 @@ def build_silver_routine_authorizations(  # noqa: PLR0913
         ),
     )
     if gold_dataset_id is not None:
-        gold_routine = (project_id, gold_dataset_id, "gold_call_costs")
-        ref_reading_tvfs.append(gold_routine)
-        _add(silver_open_dataset, (gold_routine,))
+        gold_routines = (
+            (project_id, gold_dataset_id, "gold_call_costs"),
+            (project_id, gold_dataset_id, "gold_trace_waterfall"),
+            (project_id, gold_dataset_id, "gold_trace_sql_evaluation"),
+        )
+        ref_reading_tvfs.extend(gold_routines)
+        _add(silver_open_dataset, gold_routines)
     _add(silver_ref_dataset, ref_reading_tvfs)
     _add(silver_internal_dataset, (*outer_open_tvfs, *outer_restricted_tvfs))
+    return {ds: tuple(entries) for ds, entries in auth_lists.items() if entries}
+
+
+def build_gold_view_authorizations(
+    *,
+    project_id: str,
+    gold_dataset_id: str = "agent_eval",
+    gold_internal_dataset: str = "agent_eval_internal",
+    silver_internal_dataset: str = "silver_internal",
+) -> dict[str, tuple[tuple[str, str, str], ...]]:
+    """Return `{target_dataset: ((project_id, view_dataset, view_id), ...)}` for 2-hop Gold staging views."""
+    staged_views = (
+        (project_id, gold_dataset_id, "v_staged_trace_eval"),
+        (project_id, gold_dataset_id, "v_staged_agent_eval_and_finops_summary"),
+    )
+    auth_lists: dict[str, list[tuple[str, str, str]]] = {}
+    for target_ds in (gold_internal_dataset, silver_internal_dataset):
+        if target_ds == gold_dataset_id:
+            continue
+        bucket = auth_lists.setdefault(target_ds, [])
+        for entry in staged_views:
+            if entry not in bucket:
+                bucket.append(entry)
     return {ds: tuple(entries) for ds, entries in auth_lists.items() if entries}
 
 
@@ -362,6 +392,7 @@ def render_silver_params(  # noqa: PLR0913
     silver_ref_dataset: str = "silver_ref",
     silver_open_dataset: str = "silver_open",
     silver_restricted_dataset: str = "silver_restricted",
+    gold_internal_dataset: str = "agent_eval_internal",
     traces_dataset_id: str = "obs_traces",
     platform_traces_dataset_id: str = "silver_internal",
     platform_traces_table_id: str = "platform_spans",
@@ -370,6 +401,8 @@ def render_silver_params(  # noqa: PLR0913
     payload_bucket: str | None = None,
     shape3_prefix: str = "bq-eval/shape3/",
     shape3_format: str = "JSON",
+    shape3_metadata_cache_mode: str = "",
+    shape3_max_staleness_minutes: int = 30,
     read_margin_minutes: int = 60,
     settle_minutes: int = 5,
     outcome_lookback_days: int = 30,
@@ -382,6 +415,7 @@ def render_silver_params(  # noqa: PLR0913
         ("silver_ref_dataset", silver_ref_dataset),
         ("silver_open_dataset", silver_open_dataset),
         ("silver_restricted_dataset", silver_restricted_dataset),
+        ("gold_internal_dataset", gold_internal_dataset),
         ("traces_dataset_id", traces_dataset_id),
         ("platform_traces_dataset_id", platform_traces_dataset_id),
         ("platform_traces_table_id", platform_traces_table_id),
@@ -392,16 +426,27 @@ def render_silver_params(  # noqa: PLR0913
     fmt = shape3_format.strip().upper()
     if fmt not in _SHAPE3_FMT_ALLOWED:
         raise ValueError(f"Invalid shape3_format: {shape3_format!r}")
+    raw_cache = shape3_metadata_cache_mode.strip().upper()
+    eff_cache = raw_cache or ("MANUAL" if fmt == "PARQUET" else "")
+    if eff_cache not in _SHAPE3_CACHE_MODES:
+        raise ValueError(f"Invalid shape3_metadata_cache_mode: {shape3_metadata_cache_mode!r}")
     for name, num in (
         ("read_margin_minutes", read_margin_minutes),
         ("settle_minutes", settle_minutes),
         ("outcome_lookback_days", outcome_lookback_days),
+        ("shape3_max_staleness_minutes", shape3_max_staleness_minutes),
     ):
         if num <= 0:
             raise ValueError(f"{name} must be positive, got {num}")
     clean_prefix = shape3_prefix.strip().lstrip("/")
     if clean_prefix and not clean_prefix.endswith("/"):
         clean_prefix += "/"
+    cache_options = (
+        f",\n  metadata_cache_mode = '{eff_cache}',\n"
+        f"  max_staleness = INTERVAL {shape3_max_staleness_minutes} MINUTE"
+        if eff_cache
+        else ""
+    )
     return {
         "PROJECT_ID": project_id.strip(),
         "LOCATION": location.strip(),
@@ -409,6 +454,7 @@ def render_silver_params(  # noqa: PLR0913
         "SILVER_REF_DATASET": silver_ref_dataset.strip(),
         "SILVER_OPEN_DATASET": silver_open_dataset.strip(),
         "SILVER_RESTRICTED_DATASET": silver_restricted_dataset.strip(),
+        "GOLD_INTERNAL_DATASET": gold_internal_dataset.strip(),
         "TRACES_DATASET_ID": traces_dataset_id.strip(),
         "PLATFORM_TRACES_DATASET_ID": platform_traces_dataset_id.strip(),
         "PLATFORM_TRACES_TABLE_ID": platform_traces_table_id.strip(),
@@ -417,6 +463,7 @@ def render_silver_params(  # noqa: PLR0913
         "PAYLOAD_BUCKET": (payload_bucket or project_id).strip(),
         "SHAPE3_PREFIX": clean_prefix,
         "SHAPE3_FORMAT": fmt,
+        "SHAPE3_CACHE_OPTIONS": cache_options,
         "READ_MARGIN_MINUTES": str(read_margin_minutes),
         "SETTLE_MINUTES": str(settle_minutes),
         "OUTCOME_LOOKBACK_DAYS": str(outcome_lookback_days),

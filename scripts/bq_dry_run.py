@@ -77,6 +77,8 @@ def qualify_project_datasets(  # noqa: PLR0913
         .replace("${GOLD_LOOKBACK_HOURS}", "720")
         .replace("${SHAPE3_PREFIX}", "bq-eval/shape3/")
         .replace("${SHAPE3_FORMAT}", "JSON")
+        .replace("${SHAPE3_CACHE_OPTIONS}", "")
+        .replace("${GOLD_INTERNAL_DATASET}", "agent_eval_internal")
     )
     for dataset in DATASET_PREFIXES:
         target_ds = dataset_id if dataset == "agent_eval" else dataset

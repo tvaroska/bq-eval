@@ -1,6 +1,6 @@
 -- Silver Internal Text-Free Spans Table Function (`ADR-026`, `ADR-035`–`ADR-045`, `ADR-047`, `ADR-048`).
 -- Single-pass shape routing per landing place with inside-window start_time pruning,
--- latest-arrival deduplication, 6-hop innermost token-span detection, ADK Format 1 fold, and SCD-2 app lookup.
+-- latest-arrival deduplication, 6-hop innermost token-span detection, single-pass ADK Format 1 fold, and SCD-2 app lookup.
 
 CREATE OR REPLACE TABLE FUNCTION `${PROJECT_ID}.${SILVER_INTERNAL_DATASET}.spans`(
   from_time TIMESTAMP,
@@ -62,41 +62,6 @@ CREATE OR REPLACE TABLE FUNCTION `${PROJECT_ID}.${SILVER_INTERNAL_DATASET}.spans
       WHERE d.cross_rn = 1
     )
     WHERE trace_first_start_time >= from_time AND trace_first_start_time < to_time
-  ),
-  adk_parents AS (
-    SELECT
-      w.trace_id, w.span_id,
-      CASE
-        WHEN JSON_VALUE(w.attributes, '$."gen_ai.input.messages_ref"') IS NOT NULL
-          OR JSON_VALUE(w.attributes, '$."gen_ai.output.messages_ref"') IS NOT NULL THEN 'otel_ref'
-        WHEN NULLIF(TO_JSON_STRING(JSON_QUERY(w.attributes, '$."gen_ai.input.messages"')), 'null') IS NOT NULL
-          OR NULLIF(TO_JSON_STRING(JSON_QUERY(w.attributes, '$."gen_ai.output.messages"')), 'null') IS NOT NULL
-          OR NULLIF(TO_JSON_STRING(JSON_QUERY(w.attributes, '$."gen_ai.tool.call.arguments"')), 'null') IS NOT NULL
-          OR NULLIF(TO_JSON_STRING(JSON_QUERY(w.attributes, '$."gen_ai.tool.call.result"')), 'null') IS NOT NULL THEN 'otel_inline'
-        WHEN NULLIF(JSON_VALUE(w.attributes, '$."gcp.vertex.agent.llm_request"'), '{}') IS NOT NULL
-          OR NULLIF(JSON_VALUE(w.attributes, '$."gcp.vertex.agent.llm_response"'), '{}') IS NOT NULL
-          OR JSON_VALUE(w.attributes, '$."gcp.vertex.agent.tool_call_args"') IS NOT NULL
-          OR JSON_VALUE(w.attributes, '$."gcp.vertex.agent.tool_response"') IS NOT NULL THEN 'adk_legacy'
-        ELSE CAST(NULL AS STRING)
-      END AS raw_shape,
-      COALESCE(JSON_VALUE(w.attributes, '$."gen_ai.conversation.id"'), JSON_VALUE(w.attributes, '$."gcp.vertex.agent.session_id"')) AS raw_conversation_id,
-      COALESCE(JSON_VALUE(w.attributes, '$."gen_ai.response.finish_reasons"[0]'), JSON_VALUE(w.attributes, '$."gen_ai.response.finish_reasons"')) AS raw_finish_reason,
-      (
-        NULLIF(TO_JSON_STRING(JSON_QUERY(w.attributes, '$."gen_ai.input.messages"')), 'null') IS NOT NULL
-        OR NULLIF(TO_JSON_STRING(JSON_QUERY(w.attributes, '$."gen_ai.output.messages"')), 'null') IS NOT NULL
-        OR NULLIF(JSON_VALUE(w.attributes, '$."gcp.vertex.agent.llm_request"'), '{}') IS NOT NULL
-        OR NULLIF(JSON_VALUE(w.attributes, '$."gcp.vertex.agent.llm_response"'), '{}') IS NOT NULL
-      ) AS has_model_inline_content
-    FROM (
-      SELECT r.*,
-        ROW_NUMBER() OVER (
-          PARTITION BY r.trace_id, r.span_id
-          ORDER BY CASE WHEN r.source_class = 'platform' THEN 0 WHEN r.source_class = 'application' THEN 1 ELSE 2 END,
-            r.receive_time DESC, r.end_time DESC, r.span_id ASC
-        ) AS rn
-      FROM raw_union AS r
-    ) AS w
-    WHERE w.rn = 1 AND w.span_name = 'call_llm'
   ),
   parsed_raw AS (
     SELECT
@@ -296,48 +261,38 @@ CREATE OR REPLACE TABLE FUNCTION `${PROJECT_ID}.${SILVER_INTERNAL_DATASET}.spans
   parsed_anc1 AS (
     SELECT
       pr.*,
-      STRING_AGG(IF(pr.has_tok AND pr.parent_span_id IS NOT NULL AND pr.parent_span_id != '', pr.parent_span_id, NULL), '|') OVER (PARTITION BY pr.trace_id) AS tok_pids,
+      STRING_AGG(IF(pr.has_tok AND pr.parent_span_id IS NOT NULL AND pr.parent_span_id != '', pr.parent_span_id, NULL), '|') OVER (PARTITION BY pr.trace_id) AS tok_p1,
       STRING_AGG(IF(pr.operation_name = 'generate_content' AND pr.parent_span_id IS NOT NULL AND pr.parent_span_id != '', pr.parent_span_id, NULL), '|') OVER (PARTITION BY pr.trace_id) AS gc_pids
     FROM parsed_raw AS pr
   ),
   parsed AS (
     SELECT
       pa.*,
-      STRING_AGG(
-        IF(
-          pa.span_id IS NOT NULL AND pa.span_id != ''
-            AND STRPOS(CONCAT('|', COALESCE(pa.tok_pids, ''), '|'), CONCAT('|', pa.span_id, '|')) > 0
-            AND pa.parent_span_id IS NOT NULL AND pa.parent_span_id != '',
-          pa.parent_span_id,
-          NULL
-        ),
-        '|'
-      ) OVER (PARTITION BY pa.trace_id) AS tok_gpids
-    FROM parsed_anc1 AS pa
-  ),
-  folded AS (
-    SELECT
-      p.*,
-      CASE WHEN p.operation_name = 'generate_content' AND ap.span_id IS NOT NULL THEN COALESCE(p.raw_shape, ap.raw_shape) ELSE p.raw_shape END AS shape,
-      CASE WHEN p.operation_name = 'generate_content' AND ap.span_id IS NOT NULL THEN COALESCE(p.raw_conversation_id, ap.raw_conversation_id) ELSE p.raw_conversation_id END AS conversation_id,
-      CASE WHEN p.operation_name = 'generate_content' AND ap.span_id IS NOT NULL THEN COALESCE(p.raw_finish_reason, ap.raw_finish_reason) ELSE p.raw_finish_reason END AS finish_reason,
       CASE
-        WHEN p.span_id IS NOT NULL AND p.span_id != '' AND (
-          STRPOS(CONCAT('|', COALESCE(p.tok_pids, ''), '|'), CONCAT('|', p.span_id, '|')) > 0
-          OR (p.span_name = 'call_llm' AND STRPOS(CONCAT('|', COALESCE(p.gc_pids, ''), '|'), CONCAT('|', p.span_id, '|')) > 0)
-          OR STRPOS(CONCAT('|', COALESCE(p.tok_gpids, ''), '|'), CONCAT('|', p.span_id, '|')) > 0
+        WHEN pa.span_id IS NOT NULL AND pa.span_id != '' AND (
+          STRPOS(CONCAT('|', COALESCE(pa.tok_p1, ''), '|', COALESCE(pa.tok_p2, ''), '|', COALESCE(pa.tok_p3, ''), '|', COALESCE(pa.tok_p4, ''), '|', COALESCE(pa.tok_p5, ''), '|', COALESCE(pa.tok_p6, ''), '|'), CONCAT('|', pa.span_id, '|')) > 0
+          OR (pa.span_name = 'call_llm' AND STRPOS(CONCAT('|', COALESCE(pa.gc_pids, ''), '|'), CONCAT('|', pa.span_id, '|')) > 0)
         ) THEN FALSE
-        WHEN p.span_kind IN ('model_call', 'embedding')
-          OR p.has_tok THEN TRUE
+        WHEN pa.span_kind IN ('model_call', 'embedding') OR pa.has_tok THEN TRUE
         ELSE FALSE
       END AS is_model_call,
-      CASE
-        WHEN p.operation_name = 'generate_content' AND ap.span_id IS NOT NULL THEN (p.has_model_inline_content OR COALESCE(ap.has_model_inline_content, FALSE))
-        ELSE p.has_model_inline_content
-      END AS effective_model_inline_content,
-      MAX(CASE WHEN p.has_msg_ref THEN 1 ELSE 0 END) OVER (PARTITION BY p.trace_id) = 1 AS trace_has_shape3_ref
-    FROM parsed AS p
-    LEFT JOIN adk_parents AS ap ON ap.trace_id = p.trace_id AND ap.span_id = p.parent_span_id
+      CASE WHEN TO_JSON_STRING(pa.stripped_labels) = '{}' THEN CAST(NULL AS JSON) ELSE pa.stripped_labels END AS labels
+    FROM (
+      SELECT pa5.*, STRING_AGG(IF(pa5.span_id IS NOT NULL AND pa5.span_id != '' AND STRPOS(CONCAT('|', COALESCE(pa5.tok_p5, ''), '|'), CONCAT('|', pa5.span_id, '|')) > 0 AND pa5.parent_span_id IS NOT NULL AND pa5.parent_span_id != '', pa5.parent_span_id, NULL), '|') OVER (PARTITION BY pa5.trace_id) AS tok_p6
+      FROM (
+        SELECT pa4.*, STRING_AGG(IF(pa4.span_id IS NOT NULL AND pa4.span_id != '' AND STRPOS(CONCAT('|', COALESCE(pa4.tok_p4, ''), '|'), CONCAT('|', pa4.span_id, '|')) > 0 AND pa4.parent_span_id IS NOT NULL AND pa4.parent_span_id != '', pa4.parent_span_id, NULL), '|') OVER (PARTITION BY pa4.trace_id) AS tok_p5
+        FROM (
+          SELECT pa3.*, STRING_AGG(IF(pa3.span_id IS NOT NULL AND pa3.span_id != '' AND STRPOS(CONCAT('|', COALESCE(pa3.tok_p3, ''), '|'), CONCAT('|', pa3.span_id, '|')) > 0 AND pa3.parent_span_id IS NOT NULL AND pa3.parent_span_id != '', pa3.parent_span_id, NULL), '|') OVER (PARTITION BY pa3.trace_id) AS tok_p4
+          FROM (
+            SELECT pa2.*, STRING_AGG(IF(pa2.span_id IS NOT NULL AND pa2.span_id != '' AND STRPOS(CONCAT('|', COALESCE(pa2.tok_p2, ''), '|'), CONCAT('|', pa2.span_id, '|')) > 0 AND pa2.parent_span_id IS NOT NULL AND pa2.parent_span_id != '', pa2.parent_span_id, NULL), '|') OVER (PARTITION BY pa2.trace_id) AS tok_p3
+            FROM (
+              SELECT pa1.*, STRING_AGG(IF(pa1.span_id IS NOT NULL AND pa1.span_id != '' AND STRPOS(CONCAT('|', COALESCE(pa1.tok_p1, ''), '|'), CONCAT('|', pa1.span_id, '|')) > 0 AND pa1.parent_span_id IS NOT NULL AND pa1.parent_span_id != '', pa1.parent_span_id, NULL), '|') OVER (PARTITION BY pa1.trace_id) AS tok_p2
+              FROM parsed_anc1 AS pa1
+            ) AS pa2
+          ) AS pa3
+        ) AS pa4
+      ) AS pa5
+    ) AS pa
   ),
   with_app AS (
     SELECT
@@ -354,7 +309,7 @@ CREATE OR REPLACE TABLE FUNCTION `${PROJECT_ID}.${SILVER_INTERNAL_DATASET}.spans
           CASE WHEN f.agent_id IS NOT NULL AND r.agent_id = f.agent_id THEN 0 WHEN r.agent_id IS NULL THEN 1 ELSE 2 END,
           r.effective_from DESC, r.app_id ASC
       ) AS match_rn
-    FROM folded AS f
+    FROM parsed AS f
     LEFT JOIN `${PROJECT_ID}.${SILVER_REF_DATASET}.app_registry` AS r
       ON f.source_class IS NOT NULL
       AND r.effective_from <= f.start_time AND (r.effective_to IS NULL OR f.start_time < r.effective_to)
@@ -362,34 +317,81 @@ CREATE OR REPLACE TABLE FUNCTION `${PROJECT_ID}.${SILVER_INTERNAL_DATASET}.spans
         (f.apphub_app_id IS NOT NULL AND r.apphub_application_id = f.apphub_app_id)
         OR (f.res_service_name IS NOT NULL AND r.service_name = f.res_service_name AND (r.environment IS NULL AND f.res_environment IS NULL OR r.environment = f.res_environment))
       )
+  ),
+  by_trace AS (
+    SELECT
+      f.trace_id,
+      MAX(CASE WHEN f.has_msg_ref THEN 1 ELSE 0 END) = 1 AS trace_has_shape3_ref,
+      ARRAY_AGG(
+        IF(
+          f.span_name = 'call_llm',
+          STRUCT(f.span_id, f.raw_shape, f.raw_conversation_id, f.raw_finish_reason, f.has_model_inline_content),
+          NULL
+        ) IGNORE NULLS
+      ) AS call_llm_arr,
+      ARRAY_AGG(
+        STRUCT(
+          f.span_id, f.parent_span_id, f.span_name, f.otel_kind, f.start_time, f.end_time, f.receive_time,
+          f.duration_ms, f.span_status, f.duplicate_count, f.trace_state, f.raw_shape, f.raw_conversation_id,
+          f.raw_finish_reason, f.has_msg_ref, f.has_model_inline_content, f.has_tool_inline_content,
+          f.span_kind, f.is_model_call, f.operation_name, f.source_class, f.app_id, f.app_identity_bound,
+          f.caller_app_id, f.user_id, f.tenant_id, f.trigger_principal, f.agent_principal, f.act_chain,
+          f.auth_method, f.auth_issuer, f.auth_audience, f.delegation_chain_hash, f.authz_mode,
+          f.outcome_id, f.outcome_owner, f.outcome_status, f.outcome_subject, f.outcome_parent_id,
+          f.client_request_id, f.response_id, f.previous_interaction_id, f.workspace_session_id,
+          f.shadow_of_trace_id, f.experiment_id, f.variant_id, f.case_id, f.eval_run_id, f.eval_split,
+          f.mcp_session_id, f.agent_id, f.agent_name, f.skill_name, f.skill_version, f.skill_sha256,
+          f.protected_block_sha256, f.mounted_skills, f.request_model, f.response_model, f.provider,
+          f.upstream_endpoint_location, f.runtime_lane, f.state_mode, f.serving_tier, f.traffic_type,
+          f.thought_signature_present, f.tool_definitions_sha256, f.available_tool_count, f.selected_tool_names,
+          f.input_tokens, f.output_tokens, f.cache_read_tokens, f.cache_write_tokens, f.reasoning_tokens,
+          f.time_to_first_chunk, f.http_status_code, f.error_type, f.model_confidence, f.cascade_tier,
+          f.escalation_reason, f.tool_name, f.tool_call_id, f.action_id, f.idempotency_key, f.emitted_args_sha256,
+          f.data_source_id, f.corpus_digest, f.acl_dropped_count, f.memory_op, f.memory_id, f.memory_sha256,
+          f.memory_source_provenance, f.job_id, f.bytes_scanned, f.bytes_billed, f.slot_ms, f.devai_diff_stats,
+          f.devai_test_summary, f.devai_sast_findings, f.sandbox_status, f.sandbox_cpu_sec, f.sandbox_mem_gb_sec,
+          f.page_count, f.document_bytes, f.attachment_sha256, f.nudge_id, f.app_failed, f.app_failure_reason,
+          f.sampling_probability, f.labels
+        )
+      ) AS spans_arr
+    FROM with_app AS f
+    WHERE f.match_rn = 1
+    GROUP BY f.trace_id
   )
   SELECT
-    f.trace_id, f.span_id, f.parent_span_id, f.span_name, f.otel_kind, f.start_time, f.end_time, f.receive_time,
-    f.duration_ms, f.span_status, f.duplicate_count, f.trace_state, f.shape, f.span_kind, f.is_model_call,
+    bt.trace_id, p.span_id, p.parent_span_id, p.span_name, p.otel_kind, p.start_time, p.end_time, p.receive_time,
+    p.duration_ms, p.span_status, p.duplicate_count, p.trace_state,
+    CASE WHEN p.operation_name = 'generate_content' AND ap.span_id IS NOT NULL THEN COALESCE(p.raw_shape, ap.raw_shape) ELSE p.raw_shape END AS shape,
+    p.span_kind, p.is_model_call,
     CASE
-      WHEN f.span_kind = 'embedding' THEN FALSE
-      WHEN f.is_model_call THEN NOT (f.effective_model_inline_content OR f.has_msg_ref OR f.has_tool_inline_content)
-      WHEN f.span_kind IN ('tool_call', 'retrieval', 'memory') THEN NOT (f.has_tool_inline_content OR f.trace_has_shape3_ref)
+      WHEN p.span_kind = 'embedding' THEN FALSE
+      WHEN p.is_model_call THEN NOT (
+        (CASE WHEN p.operation_name = 'generate_content' AND ap.span_id IS NOT NULL THEN (p.has_model_inline_content OR COALESCE(ap.has_model_inline_content, FALSE)) ELSE p.has_model_inline_content END)
+        OR p.has_msg_ref OR p.has_tool_inline_content
+      )
+      WHEN p.span_kind IN ('tool_call', 'retrieval', 'memory') THEN NOT (p.has_tool_inline_content OR bt.trace_has_shape3_ref)
       ELSE FALSE
     END AS content_missing,
-    f.operation_name, f.source_class, f.app_id, f.app_identity_bound, f.caller_app_id, f.user_id, f.tenant_id,
-    f.trigger_principal, f.agent_principal, f.act_chain, f.auth_method, f.auth_issuer, f.auth_audience,
-    f.delegation_chain_hash, f.authz_mode, f.conversation_id, f.outcome_id, f.outcome_owner, f.outcome_status,
-    f.outcome_subject, f.outcome_parent_id, f.client_request_id, f.response_id, f.previous_interaction_id,
-    f.workspace_session_id, f.shadow_of_trace_id, f.experiment_id, f.variant_id, f.case_id, f.eval_run_id,
-    f.eval_split, f.mcp_session_id, f.agent_id, f.agent_name, f.skill_name, f.skill_version, f.skill_sha256,
-    f.protected_block_sha256, f.mounted_skills, f.request_model, f.response_model, f.provider,
-    f.upstream_endpoint_location, f.runtime_lane, f.state_mode, f.serving_tier, f.traffic_type,
-    f.thought_signature_present, f.tool_definitions_sha256, f.available_tool_count, f.selected_tool_names,
-    f.input_tokens, f.output_tokens, f.cache_read_tokens, f.cache_write_tokens, f.reasoning_tokens,
-    f.time_to_first_chunk, f.finish_reason, f.http_status_code, f.error_type, f.model_confidence, f.cascade_tier,
-    f.escalation_reason, f.tool_name, f.tool_call_id, f.action_id, f.idempotency_key, f.emitted_args_sha256,
-    f.data_source_id, f.corpus_digest, f.acl_dropped_count, f.memory_op, f.memory_id, f.memory_sha256,
-    f.memory_source_provenance, f.job_id, f.bytes_scanned, f.bytes_billed, f.slot_ms, f.devai_diff_stats,
-    f.devai_test_summary, f.devai_sast_findings, f.sandbox_status, f.sandbox_cpu_sec, f.sandbox_mem_gb_sec,
-    f.page_count, f.document_bytes, f.attachment_sha256, f.nudge_id, f.app_failed, f.app_failure_reason,
-    f.sampling_probability,
-    CASE WHEN TO_JSON_STRING(f.stripped_labels) = '{}' THEN CAST(NULL AS JSON) ELSE f.stripped_labels END AS labels
-  FROM with_app AS f
-  WHERE f.match_rn = 1
+    p.operation_name, p.source_class, p.app_id, p.app_identity_bound, p.caller_app_id, p.user_id, p.tenant_id,
+    p.trigger_principal, p.agent_principal, p.act_chain, p.auth_method, p.auth_issuer, p.auth_audience,
+    p.delegation_chain_hash, p.authz_mode,
+    CASE WHEN p.operation_name = 'generate_content' AND ap.span_id IS NOT NULL THEN COALESCE(p.raw_conversation_id, ap.raw_conversation_id) ELSE p.raw_conversation_id END AS conversation_id,
+    p.outcome_id, p.outcome_owner, p.outcome_status, p.outcome_subject, p.outcome_parent_id, p.client_request_id,
+    p.response_id, p.previous_interaction_id, p.workspace_session_id, p.shadow_of_trace_id, p.experiment_id,
+    p.variant_id, p.case_id, p.eval_run_id, p.eval_split, p.mcp_session_id, p.agent_id, p.agent_name,
+    p.skill_name, p.skill_version, p.skill_sha256, p.protected_block_sha256, p.mounted_skills, p.request_model,
+    p.response_model, p.provider, p.upstream_endpoint_location, p.runtime_lane, p.state_mode, p.serving_tier,
+    p.traffic_type, p.thought_signature_present, p.tool_definitions_sha256, p.available_tool_count,
+    p.selected_tool_names, p.input_tokens, p.output_tokens, p.cache_read_tokens, p.cache_write_tokens,
+    p.reasoning_tokens, p.time_to_first_chunk,
+    CASE WHEN p.operation_name = 'generate_content' AND ap.span_id IS NOT NULL THEN COALESCE(p.raw_finish_reason, ap.raw_finish_reason) ELSE p.raw_finish_reason END AS finish_reason,
+    p.http_status_code, p.error_type, p.model_confidence, p.cascade_tier, p.escalation_reason, p.tool_name,
+    p.tool_call_id, p.action_id, p.idempotency_key, p.emitted_args_sha256, p.data_source_id, p.corpus_digest,
+    p.acl_dropped_count, p.memory_op, p.memory_id, p.memory_sha256, p.memory_source_provenance, p.job_id,
+    p.bytes_scanned, p.bytes_billed, p.slot_ms, p.devai_diff_stats, p.devai_test_summary, p.devai_sast_findings,
+    p.sandbox_status, p.sandbox_cpu_sec, p.sandbox_mem_gb_sec, p.page_count, p.document_bytes, p.attachment_sha256,
+    p.nudge_id, p.app_failed, p.app_failure_reason, p.sampling_probability, p.labels
+  FROM by_trace AS bt
+  CROSS JOIN UNNEST(bt.spans_arr) AS p
+  LEFT JOIN UNNEST(bt.call_llm_arr) AS ap ON ap.span_id = p.parent_span_id
 );

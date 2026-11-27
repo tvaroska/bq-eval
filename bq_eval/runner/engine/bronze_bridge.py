@@ -29,6 +29,7 @@ SILVER_BOOT_ORDER: tuple[str, ...] = (
     "silver/model_calls.sql",
     "silver/tool_calls.sql",
     "silver/events.sql",
+    "silver/trace_aux.sql",
     "silver/traces.sql",
     "silver/trace_payloads.sql",
     "silver/outcomes.sql",
@@ -46,6 +47,8 @@ GOLD_BOOT_ORDER: tuple[str, ...] = (
     "core/step3_saved_results.sql",
     "core/step3_daily_quota_guard.sql",
     "core/summary_views.sql",
+    "core/gold_staging_open.sql",
+    "core/gold_staging_restricted.sql",
     "finops/capacity_views.sql",
 )
 

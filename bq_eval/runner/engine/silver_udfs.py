@@ -37,7 +37,9 @@ DEFAULT_SILVER_SQL_PARAMS: Mapping[str, str] = {
     "PAYLOAD_BUCKET": "showcase-project-payloads",
     "SHAPE3_PREFIX": "",
     "SHAPE3_FORMAT": "JSON",
+    "SHAPE3_CACHE_OPTIONS": "",
     "DATASET_ID": "agent_eval",
+    "GOLD_INTERNAL_DATASET": "agent_eval_internal",
     "GOLD_LOOKBACK_HOURS": "720",
 }
 
@@ -57,6 +59,7 @@ SILVER_MANIFEST_TABLE_MAP: Mapping[str, str] = {
 
 _SCALAR_UDF_MAP: Mapping[str, str] = {
     "jcs_canonicalize": "BQ_JCS_CANONICALIZE",
+    "jcs_tool_args_canonicalize": "BQ_JCS_TOOL_ARGS_CANONICALIZE",
     "jcs_sha256": "BQ_JCS_SHA256",
     "jcs_tool_args_sha256": "BQ_JCS_TOOL_ARGS_SHA256",
 }
@@ -186,7 +189,7 @@ def jcs_sha256_str(raw_json: object) -> str | None:
 
 
 @functools.lru_cache(maxsize=4096)
-def _cached_jcs_tool_args_sha256(tool_name: str, raw_args: str) -> str | None:
+def _cached_jcs_tool_args_canonicalize(tool_name: str, raw_args: str) -> str | None:
     try:
         if (
             _has_lone_surrogate(tool_name)
@@ -195,12 +198,24 @@ def _cached_jcs_tool_args_sha256(tool_name: str, raw_args: str) -> str | None:
         ):
             return None
         canon = _jcs_canonicalize_obj({"tool_name": tool_name, "args": json.loads(raw_args)})
-        if canon is None:
+        if canon is None or len(canon.encode("utf-8")) > MAX_JCS_INPUT_BYTES:
             return None
-        encoded = canon.encode("utf-8")
-        return None if len(encoded) > MAX_JCS_INPUT_BYTES else hashlib.sha256(encoded).hexdigest()
+        return canon
     except Exception:  # noqa: BLE001
         return None
+
+
+def jcs_tool_args_canonicalize_str(tool_name: object, raw_args: object) -> str | None:
+    """RFC 8785 JCS canonical JSON of `{\"tool_name\": ..., \"args\": ...}` (`ADR-041`)."""
+    if not isinstance(tool_name, str) or not isinstance(raw_args, str):
+        return None
+    return _cached_jcs_tool_args_canonicalize(tool_name, raw_args)
+
+
+@functools.lru_cache(maxsize=4096)
+def _cached_jcs_tool_args_sha256(tool_name: str, raw_args: str) -> str | None:
+    canon = _cached_jcs_tool_args_canonicalize(tool_name, raw_args)
+    return None if canon is None else hashlib.sha256(canon.encode("utf-8")).hexdigest()
 
 
 def jcs_tool_args_sha256_str(tool_name: object, raw_args: object) -> str | None:
@@ -263,6 +278,31 @@ def _sqlite_parse_json(raw: object) -> str | None:
 
 def _sqlite_json_array(*args: object) -> str:
     return _compact_json(list(args))
+
+
+def _sqlite_struct_object(*args: object) -> str:
+    """Encode a BigQuery `STRUCT(...)` as JSON while preserving raw string fields verbatim."""
+    out: dict[str, object] = {}
+    for idx in range(0, len(args) - 1, 2):
+        key = args[idx]
+        if key is None:
+            continue
+        val = args[idx + 1]
+        if val == _BQ_JSON_BOOL_TRUE:
+            out[str(key)] = True
+        elif val == _BQ_JSON_BOOL_FALSE:
+            out[str(key)] = False
+        else:
+            out[str(key)] = val
+    return _compact_json(out)
+
+
+def _sqlite_byte_length(raw: object) -> int | None:
+    if raw is None:
+        return None
+    if isinstance(raw, (bytes, bytearray)):
+        return len(raw)
+    return len(str(raw).encode("utf-8"))
 
 
 def _sqlite_json_object(*args: object) -> str:
@@ -458,6 +498,9 @@ def register_silver_sqlite_udfs(
     conn.create_function("BQ_PARSE_JSON", 1, _sqlite_parse_json)
     conn.create_function("BQ_JSON_ARRAY", -1, _sqlite_json_array)
     conn.create_function("BQ_JSON_OBJECT", -1, _sqlite_json_object)
+    conn.create_function("BQ_STRUCT_OBJECT", -1, _sqlite_struct_object)
+    conn.create_function("BQ_BYTE_LENGTH", 1, _sqlite_byte_length)
+    conn.create_function("BYTE_LENGTH", 1, _sqlite_byte_length)
     conn.create_function("JSON_STRIP_NULLS", 1, _sqlite_json_strip_nulls)
     conn.create_function("BQ_JSON_STRIP_NULLS", 1, _sqlite_json_strip_nulls)
     conn.create_function("BQ_JSON_ARRAY_CONTAINS", 2, _sqlite_json_array_contains)
@@ -465,6 +508,7 @@ def register_silver_sqlite_udfs(
     conn.create_function("BQ_GREATEST", -1, _sqlite_greatest)
     conn.create_function("BQ_LEAST", -1, _sqlite_least)
     conn.create_function("BQ_JCS_CANONICALIZE", 1, jcs_canonicalize_str)
+    conn.create_function("BQ_JCS_TOOL_ARGS_CANONICALIZE", 2, jcs_tool_args_canonicalize_str)
     conn.create_function("BQ_JCS_SHA256", 1, jcs_sha256_str)
     conn.create_function("BQ_JCS_TOOL_ARGS_SHA256", 2, jcs_tool_args_sha256_str)
     conn.create_function("BQ_SHA256_HEX", 1, _sqlite_sha256_hex)
@@ -610,12 +654,40 @@ def _rewrite_json_object_ast(node: exp.JSONObject) -> exp.Expr:
     return exp.Anonymous(this="BQ_JSON_OBJECT", expressions=_rewrite_json_object_pairs(raw_kv))
 
 
+def _rewrite_struct_ast(node: exp.Struct) -> exp.Expr:
+    kv_exprs: list[exp.Expr] = []
+    for idx, item in enumerate(node.expressions):
+        if isinstance(item, exp.PropertyEQ) and item.expression is not None:
+            field_name = item.this.name if isinstance(item.this, exp.Expr) else str(item.this)
+            val_expr = item.expression
+        elif isinstance(item, exp.Alias) and item.this is not None:
+            field_name = item.alias or f"_field_{idx}"
+            val_expr = item.this
+        elif isinstance(item, exp.Column) and item.name:
+            field_name = item.name
+            val_expr = item
+        else:
+            field_name = f"_field_{idx}"
+            val_expr = item
+        kv_exprs.extend([exp.Literal.string(field_name), _wrap_json_object_val(val_expr)])
+    return exp.Anonymous(this="BQ_STRUCT_OBJECT", expressions=kv_exprs)
+
+
+def _is_standalone_array_agg(node: exp.Expr) -> bool:
+    parent = node.parent
+    if isinstance(parent, (exp.Bracket, exp.IgnoreNulls, exp.JSONFormat)):
+        return False
+    return not (isinstance(parent, exp.Anonymous) and parent.name.upper() == "TO_JSON")
+
+
 def _rewrite_silver_anonymous(node: exp.Anonymous) -> exp.Expr | None:
     upper = node.name.upper()
     out: exp.Expr | None = None
     single_arg_map = {
         "JSON_STRIP_NULLS": "BQ_JSON_STRIP_NULLS",
         "PARSE_JSON": "BQ_PARSE_JSON",
+        "BYTE_LENGTH": "BQ_BYTE_LENGTH",
+        "OCTET_LENGTH": "BQ_BYTE_LENGTH",
     }
     if upper in single_arg_map and node.expressions:
         out = exp.Anonymous(this=single_arg_map[upper], expressions=[node.expressions[0].copy()])
@@ -655,6 +727,15 @@ def _rewrite_silver_json_ast(
         out = exp.Anonymous(this="BQ_JSON_ARRAY", expressions=[e.copy() for e in node.expressions])
     elif isinstance(node, exp.JSONObject):
         out = _rewrite_json_object_ast(node)
+    elif isinstance(node, exp.Struct):
+        out = _rewrite_struct_ast(node)
+    elif isinstance(node, exp.ByteLength) and node.this is not None:
+        out = exp.Anonymous(this="BQ_BYTE_LENGTH", expressions=[node.this.copy()])
+    elif (
+        isinstance(node, exp.ArrayAgg)
+        or (isinstance(node, exp.IgnoreNulls) and isinstance(node.this, exp.ArrayAgg))
+    ) and _is_standalone_array_agg(node):
+        out = _rewrite_to_json_array_agg(node)
     return out
 
 

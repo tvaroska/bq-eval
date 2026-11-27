@@ -51,6 +51,7 @@ def _assert_shape3_sql_rows() -> None:
             "model_calls.sql",
             "tool_calls.sql",
             "events.sql",
+            "trace_aux.sql",
             "traces.sql",
             "trace_payloads.sql",
         ):

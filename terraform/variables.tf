@@ -25,6 +25,12 @@ variable "eval_dataset_id" {
   default     = "agent_eval"
 }
 
+variable "eval_internal_dataset_id" {
+  description = "Hidden BigQuery dataset ID hosting trace/outcome-grain restricted Gold staging tables accessed only via Authorized Views."
+  type        = string
+  default     = "agent_eval_internal"
+}
+
 variable "manage_apis" {
   description = "Whether this module enables required Google Cloud APIs (set false when APIs are managed externally)."
   type        = bool
@@ -238,13 +244,29 @@ variable "silver_shape3_prefix" {
 }
 
 variable "silver_shape3_format" {
-  description = "BigLake source format for Shape-3 payloads (PARQUET or NEWLINE_DELIMITED_JSON)."
+  description = "BigLake source format for Shape-3 payloads (PARQUET, NEWLINE_DELIMITED_JSON, or ICEBERG)."
   type        = string
   default     = "NEWLINE_DELIMITED_JSON"
   validation {
-    condition     = contains(["PARQUET", "NEWLINE_DELIMITED_JSON"], var.silver_shape3_format)
-    error_message = "silver_shape3_format must be PARQUET or NEWLINE_DELIMITED_JSON."
+    condition     = contains(["PARQUET", "NEWLINE_DELIMITED_JSON", "ICEBERG"], var.silver_shape3_format)
+    error_message = "silver_shape3_format must be PARQUET, NEWLINE_DELIMITED_JSON, or ICEBERG."
   }
+}
+
+variable "silver_shape3_metadata_cache_mode" {
+  description = "BigLake metadata cache mode for shape3_payloads (empty defaults to MANUAL when format is PARQUET; otherwise omitted)."
+  type        = string
+  default     = ""
+  validation {
+    condition     = contains(["", "MANUAL", "AUTOMATIC"], var.silver_shape3_metadata_cache_mode)
+    error_message = "silver_shape3_metadata_cache_mode must be '', MANUAL, or AUTOMATIC."
+  }
+}
+
+variable "silver_shape3_max_staleness" {
+  description = "BigQuery max_staleness interval string applied when metadata_cache_mode is active (default: 30 minutes)."
+  type        = string
+  default     = "0-0 0 0:30:0"
 }
 
 variable "kms_key_name" {

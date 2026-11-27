@@ -535,3 +535,72 @@ def test_runner_full_offline_fixture_run_under_five_seconds() -> None:
     assert summary["fixture_tables"] == 17
     assert summary["span_count"] == 100
     assert float(str(summary["elapsed_sec"])) < 5.0
+
+
+def test_runner_struct_array_agg_unnest_and_byte_length() -> None:
+    """Offline runner supports `STRUCT`, `ARRAY_AGG(STRUCT(...))` self-unnest, and UTF-8 `BYTE_LENGTH`."""
+    with OfflineSqlRunner(RunnerConfig(current_date_utc="2026-11-27")) as runner:
+        runner.load_rows(
+            "obs_traces.span_tree",
+            [
+                {
+                    "trace_id": "t1",
+                    "span_id": "s_root",
+                    "parent_span_id": None,
+                    "agent_name": "planner",
+                    "is_model": False,
+                    "raw_args": '{"b": 1, "a": 2}',
+                },
+                {
+                    "trace_id": "t1",
+                    "span_id": "s_child",
+                    "parent_span_id": "s_root",
+                    "agent_name": None,
+                    "is_model": True,
+                    "raw_args": '{"emoji":"😀"}',
+                },
+            ],
+        )
+        res = runner.query(
+            """
+            WITH by_trace AS (
+              SELECT
+                trace_id,
+                ARRAY_AGG(
+                  STRUCT(
+                    span_id,
+                    parent_span_id,
+                    agent_name,
+                    is_model,
+                    raw_args
+                  )
+                ) AS spans_arr
+              FROM `obs_traces.span_tree`
+              GROUP BY trace_id
+            )
+            SELECT
+              bt.trace_id,
+              s.span_id,
+              COALESCE(s.agent_name, p.agent_name) AS resolved_agent,
+              p.raw_args AS parent_raw_args,
+              BYTE_LENGTH(s.raw_args) AS utf8_bytes,
+              CHAR_LENGTH(s.raw_args) AS char_len,
+              BYTE_LENGTH(CAST(NULL AS STRING)) AS null_bytes
+            FROM by_trace AS bt
+            CROSS JOIN UNNEST(bt.spans_arr) AS s
+            LEFT JOIN UNNEST(bt.spans_arr) AS p
+              ON p.span_id = s.parent_span_id
+            WHERE s.is_model IS TRUE
+            """
+        )
+        assert res.rows == (
+            {
+                "trace_id": "t1",
+                "span_id": "s_child",
+                "resolved_agent": "planner",
+                "parent_raw_args": '{"b": 1, "a": 2}',
+                "utf8_bytes": 16,
+                "char_len": 13,
+                "null_bytes": None,
+            },
+        )

@@ -13,7 +13,10 @@ from pathlib import Path
 from bq_eval.core.engine.ports import QueryRunner
 from bq_eval.core.engine.sql_eval import _validate_sql_identifier
 from bq_eval.deploy.contract.bootstrap import BootstrapMode
-from bq_eval.deploy.engine.silver_deploy import build_silver_routine_authorizations
+from bq_eval.deploy.engine.silver_deploy import (
+    build_gold_view_authorizations,
+    build_silver_routine_authorizations,
+)
 
 _BQ_LABEL_KEY_RE = re.compile(r"^[a-z][a-z0-9_-]{0,62}$")
 _BQ_LABEL_VAL_RE = re.compile(r"^[a-z0-9_-]{0,63}$")
@@ -248,21 +251,68 @@ def ensure_observability_traces_link(
     return []
 
 
+def _merge_dataset_access_entries(
+    access: Sequence[dict[str, object]],
+    validated_routines: Sequence[tuple[str, str, str]],
+    validated_views: Sequence[tuple[str, str, str]],
+) -> list[dict[str, object]]:
+    desired_rkeys = set(validated_routines)
+    desired_vkeys = set(validated_views)
+    filtered: list[dict[str, object]] = []
+    for entry in access:
+        routine_obj = entry.get("routine")
+        if (
+            isinstance(routine_obj, dict)
+            and (
+                routine_obj.get("projectId"),
+                routine_obj.get("datasetId"),
+                routine_obj.get("routineId"),
+            )
+            in desired_rkeys
+        ):
+            continue
+        view_obj = entry.get("view")
+        if (
+            isinstance(view_obj, dict)
+            and (
+                view_obj.get("projectId"),
+                view_obj.get("datasetId"),
+                view_obj.get("tableId"),
+            )
+            in desired_vkeys
+        ):
+            continue
+        filtered.append(entry)
+    filtered.extend(
+        {"routine": {"projectId": rp, "datasetId": rd, "routineId": rn}}
+        for rp, rd, rn in validated_routines
+    )
+    filtered.extend(
+        {"view": {"projectId": vp, "datasetId": vd, "tableId": vt}}
+        for vp, vd, vt in validated_views
+    )
+    return filtered
+
+
 def apply_dataset_routine_authorizations(
     project_id: str,
     authorizations: Mapping[str, Sequence[tuple[str, str, str]]],
     *,
+    view_authorizations: Mapping[str, Sequence[tuple[str, str, str]]] | None = None,
     which_fn: WhichFn = shutil.which,
     run_cmd: SubprocessRunner = subprocess.run,
 ) -> list[str]:
-    """Re-apply BigQuery dataset routine authorizations after `CREATE OR REPLACE TABLE FUNCTION` (`S-21`)."""
+    """Re-apply BigQuery dataset routine & authorized-view ACLs after DDL updates (`S-21`)."""
     valid_project = _validate_sql_identifier(project_id, "project_id", allow_hyphen=True)
     bq_bin = which_fn("bq")
     if bq_bin is None:
         return ["`bq` CLI not found on PATH; cannot apply dataset routine authorizations."]
 
-    for target_dataset, routines in authorizations.items():
-        if not routines:
+    view_map = view_authorizations or {}
+    for target_dataset in dict.fromkeys((*authorizations.keys(), *view_map.keys())):
+        routines = authorizations.get(target_dataset, ())
+        views = view_map.get(target_dataset, ())
+        if not routines and not views:
             continue
         valid_target = _validate_sql_identifier(target_dataset, "target_dataset")
         validated_routines = tuple(
@@ -272,6 +322,14 @@ def apply_dataset_routine_authorizations(
                 _validate_sql_identifier(rn, "routine_id"),
             )
             for rp, rd, rn in routines
+        )
+        validated_views = tuple(
+            (
+                _validate_sql_identifier(vp, "view_project", allow_hyphen=True),
+                _validate_sql_identifier(vd, "view_dataset"),
+                _validate_sql_identifier(vt, "table_id"),
+            )
+            for vp, vd, vt in views
         )
         show = run_cmd(
             [bq_bin, "show", "--format=prettyjson", f"{valid_project}:{valid_target}"],
@@ -283,27 +341,13 @@ def apply_dataset_routine_authorizations(
             detail = (show.stderr or show.stdout).strip()
             return [f"routine-auth show {valid_target} failed: {detail[:240]}"]
         meta = json.loads(show.stdout)
-        access: list[dict[str, object]] = list(meta.get("access", []))
-        desired_keys = set(validated_routines)
-        filtered: list[dict[str, object]] = []
-        for entry in access:
-            routine_obj = entry.get("routine")
-            if isinstance(routine_obj, dict):
-                rkey = (
-                    routine_obj.get("projectId"),
-                    routine_obj.get("datasetId"),
-                    routine_obj.get("routineId"),
-                )
-                if rkey in desired_keys:
-                    continue
-            filtered.append(entry)
-        for rp, rd, rn in validated_routines:
-            filtered.append({"routine": {"projectId": rp, "datasetId": rd, "routineId": rn}})
-        meta["access"] = filtered
+        merged_access = _merge_dataset_access_entries(
+            list(meta.get("access", [])), validated_routines, validated_views
+        )
         with tempfile.NamedTemporaryFile(
             mode="w", suffix=".json", encoding="utf-8", delete=False
         ) as tmp:
-            json.dump({"access": filtered}, tmp)
+            json.dump({"access": merged_access}, tmp)
             tmp_path = Path(tmp.name)
         try:
             upd = run_cmd(
@@ -362,6 +406,7 @@ def apply_bootstrap_statements(  # noqa: PLR0913
     silver_ref_dataset: str = "silver_ref",
     silver_open_dataset: str = "silver_open",
     silver_restricted_dataset: str = "silver_restricted",
+    gold_internal_dataset: str = "agent_eval_internal",
     traces_dataset_id: str = "obs_traces",
     platform_traces_dataset_id: str = "silver_internal",
     logs_dataset_id: str = "obs_logs",
@@ -432,9 +477,20 @@ def apply_bootstrap_statements(  # noqa: PLR0913
             logs_dataset_id=logs_dataset_id,
             gold_dataset_id=valid_dataset if mode == "gold" else None,
         )
+        view_auth_map = (
+            build_gold_view_authorizations(
+                project_id=valid_project,
+                gold_dataset_id=valid_dataset,
+                gold_internal_dataset=gold_internal_dataset,
+                silver_internal_dataset=silver_internal_dataset,
+            )
+            if mode == "gold"
+            else None
+        )
         return apply_dataset_routine_authorizations(
             valid_project,
             auth_map,
+            view_authorizations=view_auth_map,
             which_fn=which_fn,
             run_cmd=run_cmd,
         )

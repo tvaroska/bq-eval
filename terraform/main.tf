@@ -58,6 +58,12 @@ locals {
     : data.google_bigquery_dataset.agent_eval[0].dataset_id
   )
 
+  effective_eval_internal_dataset_id = (
+    var.create_eval_dataset
+    ? google_bigquery_dataset.agent_eval_internal[0].dataset_id
+    : data.google_bigquery_dataset.agent_eval_internal[0].dataset_id
+  )
+
   effective_connection_name = (
     var.create_vertex_connection
     ? google_bigquery_connection.vertex_ai[0].name
@@ -71,7 +77,12 @@ locals {
   )
 
   shape3_hive_prefix = "gs://${local.effective_bucket_name}/${local.normalized_shape3}"
-  shape3_source_uri  = "${local.shape3_hive_prefix}*"
+  shape3_source_uri  = var.silver_shape3_format == "ICEBERG" ? "${local.shape3_hive_prefix}metadata/v1.metadata.json" : "${local.shape3_hive_prefix}*"
+  effective_shape3_cache_mode = (
+    var.silver_shape3_metadata_cache_mode != ""
+    ? var.silver_shape3_metadata_cache_mode
+    : (var.silver_shape3_format == "PARQUET" ? "MANUAL" : null)
+  )
 
   silver_datasets = {
     internal   = { id = var.silver_internal_dataset_id, desc = "Silver internal spans, JCS UDF, unit_entitlements, and workflow_events copies." }
@@ -212,11 +223,39 @@ resource "google_bigquery_dataset" "agent_eval" {
   depends_on = [google_project_service.apis]
 }
 
+resource "google_bigquery_dataset" "agent_eval_internal" {
+  count = var.create_eval_dataset ? 1 : 0
+
+  project                    = var.project_id
+  dataset_id                 = var.eval_internal_dataset_id
+  friendly_name              = "BQ Eval Internal Staging (Gold)"
+  description                = "Hidden trace/outcome-grain Gold staging tables accessed exclusively via 2-hop Authorized Views in agent_eval."
+  location                   = var.dataset_location
+  delete_contents_on_destroy = !var.deletion_protection
+  labels                     = local.effective_labels
+
+  dynamic "default_encryption_configuration" {
+    for_each = var.kms_key_name != "" ? [1] : []
+    content {
+      kms_key_name = var.kms_key_name
+    }
+  }
+
+  depends_on = [google_project_service.apis]
+}
+
 data "google_bigquery_dataset" "agent_eval" {
   count = var.create_eval_dataset ? 0 : 1
 
   project    = var.project_id
   dataset_id = var.eval_dataset_id
+}
+
+data "google_bigquery_dataset" "agent_eval_internal" {
+  count = var.create_eval_dataset ? 0 : 1
+
+  project    = var.project_id
+  dataset_id = var.eval_internal_dataset_id
 }
 
 resource "google_bigquery_connection" "vertex_ai" {
@@ -325,22 +364,27 @@ resource "google_bigquery_table" "shape3_payloads" {
   deletion_protection = var.deletion_protection
   labels              = local.effective_labels
 
-  schema = jsonencode([
+  schema = var.silver_shape3_format == "ICEBERG" ? null : jsonencode([
     { name = "ref_uri", type = "STRING", mode = "NULLABLE", description = "Canonical storage URI referenced by gen_ai.*.messages_ref." },
     { name = "payload", type = "JSON", mode = "NULLABLE", description = "Stored OTel GenAI message array payload." }
   ])
+  max_staleness = local.effective_shape3_cache_mode != null ? var.silver_shape3_max_staleness : null
 
   external_data_configuration {
     autodetect            = false
-    ignore_unknown_values = true
+    ignore_unknown_values = var.silver_shape3_format == "ICEBERG" ? false : true
     source_format         = var.silver_shape3_format
     source_uris           = [local.shape3_source_uri]
     connection_id         = local.effective_connection_name
+    metadata_cache_mode   = local.effective_shape3_cache_mode
 
-    hive_partitioning_options {
-      mode                     = "CUSTOM"
-      source_uri_prefix        = "${local.shape3_hive_prefix}{dt:DATE}/{hr:STRING}"
-      require_partition_filter = true
+    dynamic "hive_partitioning_options" {
+      for_each = var.silver_shape3_format == "ICEBERG" ? [] : [1]
+      content {
+        mode                     = "CUSTOM"
+        source_uri_prefix        = "${local.shape3_hive_prefix}{dt:DATE}/{hr:STRING}"
+        require_partition_filter = true
+      }
     }
   }
 

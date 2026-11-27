@@ -18,6 +18,11 @@ output "eval_dataset_id" {
   value       = local.effective_eval_dataset_id
 }
 
+output "eval_internal_dataset_id" {
+  description = "Effective hidden BigQuery dataset ID for Gold restricted staging tables."
+  value       = local.effective_eval_internal_dataset_id
+}
+
 output "vertex_connection_name" {
   description = "Effective BigQuery Cloud Resource connection name."
   value       = local.effective_connection_name

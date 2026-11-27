@@ -123,30 +123,36 @@ def _sqlite_json_value(raw_json: str | None, path: str) -> str | None:
     return _cached_json_value(raw_json, path)
 
 
+@functools.lru_cache(maxsize=8192)
+def _cached_load_struct(raw_json: str) -> object:
+    try:
+        return json.loads(raw_json)
+    except json.JSONDecodeError:
+        return None
+
+
+def _coerce_struct_scalar(cur: object) -> SqliteValue:
+    if cur is None:
+        return None
+    if isinstance(cur, bool):
+        return 1 if cur else 0
+    if isinstance(cur, (dict, list)):
+        return json.dumps(cur, sort_keys=True)
+    return cur if isinstance(cur, (str, int, float, bytes)) else str(cur)
+
+
 def _sqlite_struct_field(raw_json: object, dotted_path: str) -> SqliteValue:
     """Extract a nested field from a JSON-encoded BigQuery STRUCT stored in SQLite."""
     if not isinstance(raw_json, str):
         return None
-    try:
-        cur: object = json.loads(raw_json)
-    except json.JSONDecodeError:
-        return None
+    cur: object = _cached_load_struct(raw_json)
     for part in dotted_path.split("."):
+        if isinstance(cur, str) and cur[:1] == "{":
+            cur = _cached_load_struct(cur)
         if not (isinstance(cur, dict) and part in cur):
             return None
         cur = cur[part]
-    result: SqliteValue
-    if cur is None:
-        result = None
-    elif isinstance(cur, bool):
-        result = 1 if cur else 0
-    elif isinstance(cur, (dict, list)):
-        result = json.dumps(cur, sort_keys=True)
-    elif isinstance(cur, (str, int, float, bytes)):
-        result = cur
-    else:
-        result = str(cur)
-    return result
+    return _coerce_struct_scalar(cur)
 
 
 def _sqlite_array_length(raw_json: object) -> int | None:

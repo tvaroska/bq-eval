@@ -13,6 +13,13 @@ steps:
     args:
       - "scripts/gate.sh"
 
+  - name: "node:22-slim"
+    id: "jcs-js-v8-parity"
+    waitFor: ["-"]
+    entrypoint: "node"
+    args:
+      - "scripts/verify_jcs_js_parity.mjs"
+
   - name: "hashicorp/terraform:1.9.8"
     id: "terraform-test"
     waitFor: ["-"]
@@ -27,7 +34,7 @@ steps:
 
   - name: "gcr.io/cloud-builders/docker"
     id: "docker-build"
-    waitFor: ["lint-and-test"]
+    waitFor: ["lint-and-test", "jcs-js-v8-parity"]
     entrypoint: "bash"
     env:
       - "DOCKER_BUILDKIT=1"

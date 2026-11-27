@@ -1,15 +1,90 @@
 -- Silver Tool Calls (`tool_calls_base`, `silver_open.tool_calls_open`, `silver_restricted.tool_calls`).
--- Implements W3C-chained server-into-client folding lifting proxy/server attributes (`ADR-025`, `ADR-034`),
--- SCD-2 `tools` flags (`ADR-019`), four RFC 8785 hash sources & `repeat_number` (`ADR-038`, `ADR-041`),
+-- Single-pass trace-grouped W3C server-into-client folding (`ADR-025`, `ADR-034`),
+-- SCD-2 `tools` flags (`ADR-019`), proxy-first V8 JS RFC 8785 hash sources & `repeat_number` (`ADR-038`, `ADR-041`),
 -- Shape-3 Hive `dt`/`hr` static-pruned message fallback (`ADR-027`), and `ADR-044`/`ADR-047` caller filtering.
 
 CREATE OR REPLACE TABLE FUNCTION `${PROJECT_ID}.${SILVER_INTERNAL_DATASET}.tool_calls_base`(
   from_time TIMESTAMP,
   to_time TIMESTAMP
 ) AS (
-  WITH base_spans AS (
-    SELECT *
-    FROM `${PROJECT_ID}.${SILVER_INTERNAL_DATASET}.spans`(from_time, to_time)
+  WITH by_trace AS (
+    SELECT
+      s.trace_id,
+      MIN(s.start_time) AS trace_start_time,
+      MAX(CASE WHEN s.root_rn = 1 AND s.source_class IS NOT NULL THEN s.app_id END) AS root_app_id,
+      MAX(CASE WHEN s.root_rn = 1 AND s.source_class IS NOT NULL THEN s.user_id END) AS root_user_id,
+      MAX(CASE WHEN s.root_rn = 1 AND s.source_class IS NOT NULL THEN s.tenant_id END) AS root_tenant_id,
+      MAX(CASE WHEN s.source_class = 'platform' AND s.caller_app_id IS NOT NULL THEN 1 ELSE 0 END) = 1 AS has_gw_caller,
+      ARRAY_AGG(CASE WHEN s.source_class = 'platform' THEN s.caller_app_id END IGNORE NULLS ORDER BY s.start_time ASC, s.span_id ASC LIMIT 1)[SAFE_OFFSET(0)] AS gw_caller_app_id,
+      ARRAY_AGG(CASE WHEN s.source_class = 'platform' AND s.caller_app_id IS NOT NULL THEN s.start_time END IGNORE NULLS ORDER BY s.start_time ASC, s.span_id ASC LIMIT 1)[SAFE_OFFSET(0)] AS gw_start_time,
+      ARRAY_AGG(CASE WHEN s.source_class = 'platform' THEN s.tenant_id END IGNORE NULLS ORDER BY s.start_time ASC, s.span_id ASC LIMIT 1)[SAFE_OFFSET(0)] AS gw_tenant_id,
+      ARRAY_AGG(s.outcome_id IGNORE NULLS ORDER BY s.start_time ASC, s.span_id ASC LIMIT 1)[SAFE_OFFSET(0)] AS earliest_outcome_id,
+      ARRAY_AGG(s.tenant_id IGNORE NULLS ORDER BY s.start_time ASC, s.span_id ASC LIMIT 1)[SAFE_OFFSET(0)] AS earliest_tenant_id,
+      ARRAY_AGG(
+        STRUCT(
+          s.span_id, s.parent_span_id, s.span_kind,
+          s.agent_id, s.agent_name, s.skill_name, s.skill_version, s.skill_sha256
+        )
+      ) AS anc_spans,
+      ARRAY_AGG(
+        IF(
+          s.span_kind IN ('tool_call', 'retrieval', 'memory'),
+          STRUCT(
+            s.span_id, s.parent_span_id, s.outcome_id, s.tool_call_id, s.operation_name,
+            s.start_time, s.end_time, s.duration_ms, s.agent_id, s.agent_name,
+            s.skill_name, s.skill_version, s.skill_sha256, s.tool_name, s.span_status,
+            s.otel_kind, s.mcp_session_id, s.source_class, s.idempotency_key, s.action_id,
+            s.emitted_args_sha256, s.authz_mode, s.data_source_id, s.corpus_digest,
+            s.acl_dropped_count, s.memory_op, s.memory_id, s.memory_sha256,
+            s.memory_source_provenance, s.job_id, s.bytes_scanned, s.bytes_billed,
+            s.slot_ms, s.devai_diff_stats, s.devai_test_summary, s.devai_sast_findings,
+            s.sandbox_cpu_sec, s.sandbox_mem_gb_sec, s.sandbox_status, s.content_missing,
+            s.is_model_call, s.http_status_code, s.error_type, s.labels
+          ),
+          NULL
+        ) IGNORE NULLS
+      ) AS tool_spans_arr
+    FROM (
+      SELECT
+        sp.*,
+        ROW_NUMBER() OVER (
+          PARTITION BY sp.trace_id
+          ORDER BY CASE WHEN sp.source_class IS NOT NULL THEN 0 ELSE 1 END, sp.start_time ASC, sp.span_id ASC
+        ) AS root_rn
+      FROM `${PROJECT_ID}.${SILVER_INTERNAL_DATASET}.spans`(from_time, to_time) AS sp
+    ) AS s
+    GROUP BY s.trace_id
+    HAVING COUNTIF(s.span_kind IN ('tool_call', 'retrieval', 'memory')) > 0
+  ),
+  trace_owner AS (
+    SELECT
+      tm.trace_id,
+      CASE WHEN tm.has_gw_caller THEN gw_r.app_id ELSE tm.root_app_id END AS trace_owner_app_id,
+      tm.root_user_id AS trace_user_id,
+      COALESCE(tm.gw_tenant_id, tm.root_tenant_id, tm.earliest_tenant_id) AS trace_tenant_id,
+      tm.earliest_outcome_id AS trace_outcome_id,
+      tm.trace_start_time,
+      tm.anc_spans,
+      tm.tool_spans_arr,
+      ROW_NUMBER() OVER (PARTITION BY tm.trace_id ORDER BY gw_r.effective_from DESC) AS gw_reg_rn
+    FROM by_trace AS tm
+    LEFT JOIN `${PROJECT_ID}.${SILVER_REF_DATASET}.app_registry` AS gw_r
+      ON tm.gw_caller_app_id IS NOT NULL
+      AND gw_r.app_id = tm.gw_caller_app_id
+      AND gw_r.effective_from <= tm.gw_start_time
+      AND (gw_r.effective_to IS NULL OR tm.gw_start_time < gw_r.effective_to)
+  ),
+  owner_bu AS (
+    SELECT
+      o.trace_id, o.trace_owner_app_id, o.trace_user_id, o.trace_tenant_id, o.trace_outcome_id,
+      r.business_unit, o.anc_spans, o.tool_spans_arr,
+      ROW_NUMBER() OVER (PARTITION BY o.trace_id ORDER BY r.effective_from DESC) AS bu_rn
+    FROM trace_owner AS o
+    LEFT JOIN `${PROJECT_ID}.${SILVER_REF_DATASET}.app_registry` AS r
+      ON r.app_id = o.trace_owner_app_id
+      AND r.effective_from <= o.trace_start_time
+      AND (r.effective_to IS NULL OR o.trace_start_time < r.effective_to)
+    WHERE o.gw_reg_rn = 1
   ),
   raw_inline AS (
     SELECT
@@ -42,81 +117,83 @@ CREATE OR REPLACE TABLE FUNCTION `${PROJECT_ID}.${SILVER_INTERNAL_DATASET}.tool_
         AND start_time < TIMESTAMP_ADD(to_time, INTERVAL ${READ_MARGIN_MINUTES} MINUTE)
     )
   ),
-  -- Per-attribute gateway -> root -> earliest precedence (avoids single-row platform shadowing).
-  trace_meta AS (
+  tool_enriched AS (
     SELECT
-      s.trace_id,
-      MIN(s.start_time) AS trace_start_time,
-      MAX(CASE WHEN s.root_rn = 1 AND s.source_class IS NOT NULL THEN s.app_id END) AS root_app_id,
-      MAX(CASE WHEN s.root_rn = 1 AND s.source_class IS NOT NULL THEN s.user_id END) AS root_user_id,
-      MAX(CASE WHEN s.root_rn = 1 AND s.source_class IS NOT NULL THEN s.tenant_id END) AS root_tenant_id,
-      MAX(CASE WHEN s.source_class = 'platform' AND s.caller_app_id IS NOT NULL THEN 1 ELSE 0 END) = 1 AS has_gw_caller,
-      ARRAY_AGG(CASE WHEN s.source_class = 'platform' THEN s.caller_app_id END IGNORE NULLS ORDER BY s.start_time ASC, s.span_id ASC LIMIT 1)[SAFE_OFFSET(0)] AS gw_caller_app_id,
-      ARRAY_AGG(CASE WHEN s.source_class = 'platform' AND s.caller_app_id IS NOT NULL THEN s.start_time END IGNORE NULLS ORDER BY s.start_time ASC, s.span_id ASC LIMIT 1)[SAFE_OFFSET(0)] AS gw_start_time,
-      ARRAY_AGG(CASE WHEN s.source_class = 'platform' THEN s.tenant_id END IGNORE NULLS ORDER BY s.start_time ASC, s.span_id ASC LIMIT 1)[SAFE_OFFSET(0)] AS gw_tenant_id,
-      ARRAY_AGG(s.outcome_id IGNORE NULLS ORDER BY s.start_time ASC, s.span_id ASC LIMIT 1)[SAFE_OFFSET(0)] AS earliest_outcome_id,
-      ARRAY_AGG(s.tenant_id IGNORE NULLS ORDER BY s.start_time ASC, s.span_id ASC LIMIT 1)[SAFE_OFFSET(0)] AS earliest_tenant_id
-    FROM (
-      SELECT
-        trace_id, span_id, start_time, source_class, app_id, caller_app_id, user_id, tenant_id, outcome_id,
-        ROW_NUMBER() OVER (
-          PARTITION BY trace_id
-          ORDER BY CASE WHEN source_class IS NOT NULL THEN 0 ELSE 1 END, start_time ASC, span_id ASC
-        ) AS root_rn
-      FROM base_spans
-    ) AS s
-    GROUP BY s.trace_id
+      ob.trace_id,
+      ob.trace_owner_app_id,
+      ob.trace_user_id,
+      ob.trace_tenant_id,
+      ob.trace_outcome_id,
+      ob.business_unit,
+      s.span_id, s.parent_span_id, p1.parent_span_id AS p2_id,
+      s.outcome_id, s.tool_call_id, s.operation_name,
+      s.start_time, s.end_time, s.duration_ms,
+      COALESCE(s.agent_id, CASE WHEN p1.span_kind = 'agent' THEN p1.agent_id END, CASE WHEN p2.span_kind = 'agent' THEN p2.agent_id END, p1.agent_id, p2.agent_id) AS resolved_agent_id,
+      COALESCE(s.agent_name, CASE WHEN p1.span_kind = 'agent' THEN p1.agent_name END, CASE WHEN p2.span_kind = 'agent' THEN p2.agent_name END, p1.agent_name, p2.agent_name) AS resolved_agent_name,
+      COALESCE(s.skill_name, CASE WHEN p1.span_kind = 'agent' THEN p1.skill_name END, CASE WHEN p2.span_kind = 'agent' THEN p2.skill_name END, p1.skill_name, p2.skill_name) AS resolved_skill_name,
+      COALESCE(s.skill_version, CASE WHEN p1.span_kind = 'agent' THEN p1.skill_version END, CASE WHEN p2.span_kind = 'agent' THEN p2.skill_version END, p1.skill_version, p2.skill_version) AS resolved_skill_version,
+      COALESCE(s.skill_sha256, CASE WHEN p1.span_kind = 'agent' THEN p1.skill_sha256 END, CASE WHEN p2.span_kind = 'agent' THEN p2.skill_sha256 END, p1.skill_sha256, p2.skill_sha256) AS resolved_skill_sha256,
+      s.tool_name, s.span_status, s.otel_kind, s.mcp_session_id, s.source_class,
+      s.idempotency_key, s.action_id, s.emitted_args_sha256, s.authz_mode, s.data_source_id,
+      s.corpus_digest, s.acl_dropped_count, s.memory_op, s.memory_id, s.memory_sha256,
+      s.memory_source_provenance, s.job_id, s.bytes_scanned, s.bytes_billed, s.slot_ms,
+      s.devai_diff_stats, s.devai_test_summary, s.devai_sast_findings,
+      s.sandbox_cpu_sec, s.sandbox_mem_gb_sec, s.sandbox_status, s.content_missing,
+      s.is_model_call, s.http_status_code, s.error_type, s.labels,
+      ri.inline_arguments, ri.inline_results
+    FROM owner_bu AS ob
+    CROSS JOIN UNNEST(ob.tool_spans_arr) AS s
+    LEFT JOIN UNNEST(ob.anc_spans) AS p1 ON p1.span_id = s.parent_span_id
+    LEFT JOIN UNNEST(ob.anc_spans) AS p2 ON p2.span_id = p1.parent_span_id
+    LEFT JOIN raw_inline AS ri ON ri.trace_id = ob.trace_id AND ri.span_id = s.span_id AND ri.rn = 1
+    WHERE ob.bu_rn = 1
   ),
-  trace_owner AS (
+  -- Group tool spans per trace once so W3C server-into-client folding adds zero extra base scans.
+  tool_by_trace AS (
     SELECT
-      tm.trace_id,
-      CASE WHEN tm.has_gw_caller THEN gw_r.app_id ELSE tm.root_app_id END AS trace_owner_app_id,
-      tm.root_user_id AS trace_user_id,
-      COALESCE(tm.gw_tenant_id, tm.root_tenant_id, tm.earliest_tenant_id) AS trace_tenant_id,
-      tm.earliest_outcome_id AS trace_outcome_id,
-      tm.trace_start_time,
-      ROW_NUMBER() OVER (PARTITION BY tm.trace_id ORDER BY gw_r.effective_from DESC) AS gw_reg_rn
-    FROM trace_meta AS tm
-    LEFT JOIN `${PROJECT_ID}.${SILVER_REF_DATASET}.app_registry` AS gw_r
-      ON tm.gw_caller_app_id IS NOT NULL
-      AND gw_r.app_id = tm.gw_caller_app_id
-      AND gw_r.effective_from <= tm.gw_start_time
-      AND (gw_r.effective_to IS NULL OR tm.gw_start_time < gw_r.effective_to)
+      trace_id,
+      ARRAY_AGG(
+        STRUCT(
+          trace_owner_app_id, trace_user_id, trace_tenant_id, trace_outcome_id, business_unit,
+          span_id, parent_span_id, p2_id, outcome_id, tool_call_id, operation_name,
+          start_time, end_time, duration_ms, resolved_agent_id, resolved_agent_name,
+          resolved_skill_name, resolved_skill_version, resolved_skill_sha256,
+          tool_name, span_status, otel_kind, mcp_session_id, source_class,
+          idempotency_key, action_id, emitted_args_sha256, authz_mode, data_source_id,
+          corpus_digest, acl_dropped_count, memory_op, memory_id, memory_sha256,
+          memory_source_provenance, job_id, bytes_scanned, bytes_billed, slot_ms,
+          devai_diff_stats, devai_test_summary, devai_sast_findings,
+          sandbox_cpu_sec, sandbox_mem_gb_sec, sandbox_status, content_missing,
+          is_model_call, http_status_code, error_type, labels,
+          inline_arguments, inline_results
+        )
+      ) AS tools_arr,
+      ARRAY_AGG(
+        STRUCT(
+          span_id, parent_span_id, p2_id, otel_kind, mcp_session_id, source_class, span_status,
+          emitted_args_sha256, authz_mode, job_id, bytes_scanned, bytes_billed, slot_ms,
+          acl_dropped_count, corpus_digest, sandbox_cpu_sec, sandbox_mem_gb_sec, sandbox_status,
+          inline_arguments, inline_results
+        )
+      ) AS peers_arr
+    FROM tool_enriched
+    GROUP BY trace_id
   ),
-  owner_bu AS (
-    SELECT
-      o.trace_id, o.trace_owner_app_id, o.trace_user_id, o.trace_tenant_id, o.trace_outcome_id,
-      r.business_unit,
-      ROW_NUMBER() OVER (PARTITION BY o.trace_id ORDER BY r.effective_from DESC) AS bu_rn
-    FROM trace_owner AS o
-    LEFT JOIN `${PROJECT_ID}.${SILVER_REF_DATASET}.app_registry` AS r
-      ON r.app_id = o.trace_owner_app_id
-      AND r.effective_from <= o.trace_start_time
-      AND (r.effective_to IS NULL OR o.trace_start_time < r.effective_to)
-    WHERE o.gw_reg_rn = 1
-  ),
-  -- Enrich tool spans with inline payloads and 1-hop parent before server-into-client folding.
-  tool_spans AS (
-    SELECT
-      s.*,
-      p1.parent_span_id AS p2_id,
-      p1.span_kind AS p1_span_kind,
-      p1.agent_id AS p1_agent_id,
-      p1.agent_name AS p1_agent_name,
-      p1.skill_name AS p1_skill_name,
-      p1.skill_version AS p1_skill_version,
-      p1.skill_sha256 AS p1_skill_sha256,
-      ri.inline_arguments,
-      ri.inline_results
-    FROM base_spans AS s
-    LEFT JOIN raw_inline AS ri ON ri.trace_id = s.trace_id AND ri.span_id = s.span_id AND ri.rn = 1
-    LEFT JOIN base_spans AS p1 ON p1.trace_id = s.trace_id AND p1.span_id = s.parent_span_id
-    WHERE s.span_kind IN ('tool_call', 'retrieval', 'memory')
-  ),
-  -- Server-into-client fold strictly via W3C parent chain (never name/args), lifting proxy hashes & server metrics.
   folded_tools AS (
     SELECT
-      s.*,
+      tb.trace_id,
+      s.trace_owner_app_id, s.trace_user_id, s.trace_tenant_id, s.trace_outcome_id, s.business_unit,
+      s.span_id, s.parent_span_id, s.outcome_id, s.tool_call_id, s.operation_name,
+      s.start_time, s.end_time, s.duration_ms, s.resolved_agent_id, s.resolved_agent_name,
+      s.resolved_skill_name, s.resolved_skill_version, s.resolved_skill_sha256,
+      s.tool_name, s.span_status, s.source_class, s.idempotency_key, s.action_id,
+      s.emitted_args_sha256, s.authz_mode, s.data_source_id, s.corpus_digest,
+      s.acl_dropped_count, s.memory_op, s.memory_id, s.memory_sha256,
+      s.memory_source_provenance, s.job_id, s.bytes_scanned, s.bytes_billed, s.slot_ms,
+      s.devai_diff_stats, s.devai_test_summary, s.devai_sast_findings,
+      s.sandbox_cpu_sec, s.sandbox_mem_gb_sec, s.sandbox_status, s.content_missing,
+      s.is_model_call, s.http_status_code, s.error_type, s.labels,
+      s.inline_arguments, s.inline_results,
       CASE WHEN s.otel_kind = 'SERVER' AND peer.span_id IS NOT NULL THEN 1 ELSE 0 END AS is_folded_server,
       CASE WHEN COALESCE(s.otel_kind, '') != 'SERVER' AND peer.span_status = 'ERROR' THEN 1 ELSE 0 END AS has_srv_error,
       CASE WHEN COALESCE(s.otel_kind, '') != 'SERVER' AND peer.source_class = 'platform' THEN peer.emitted_args_sha256 END AS srv_proxy_sha,
@@ -133,16 +210,16 @@ CREATE OR REPLACE TABLE FUNCTION `${PROJECT_ID}.${SILVER_INTERNAL_DATASET}.tool_
       CASE WHEN COALESCE(s.otel_kind, '') != 'SERVER' THEN peer.inline_arguments END AS srv_inline_arguments,
       CASE WHEN COALESCE(s.otel_kind, '') != 'SERVER' THEN peer.inline_results END AS srv_inline_results,
       ROW_NUMBER() OVER (
-        PARTITION BY s.trace_id, s.span_id
+        PARTITION BY tb.trace_id, s.span_id
         ORDER BY
           CASE WHEN peer.source_class = 'platform' THEN 0 ELSE 1 END ASC,
           CASE WHEN peer.span_status = 'ERROR' THEN 0 ELSE 1 END ASC,
           peer.span_id ASC
       ) AS peer_rn
-    FROM tool_spans AS s
-    LEFT JOIN tool_spans AS peer
-      ON peer.trace_id = s.trace_id
-      AND peer.span_id != s.span_id
+    FROM tool_by_trace AS tb
+    CROSS JOIN UNNEST(tb.tools_arr) AS s
+    LEFT JOIN UNNEST(tb.peers_arr) AS peer
+      ON peer.span_id != s.span_id
       AND (
         (
           s.otel_kind = 'SERVER'
@@ -165,23 +242,22 @@ CREATE OR REPLACE TABLE FUNCTION `${PROJECT_ID}.${SILVER_INTERNAL_DATASET}.tool_
   kept_tools AS (
     SELECT
       s.*,
-      COALESCE(s.agent_id, CASE WHEN s.p1_span_kind = 'agent' THEN s.p1_agent_id END, CASE WHEN p2.span_kind = 'agent' THEN p2.agent_id END, s.p1_agent_id, p2.agent_id) AS resolved_agent_id,
-      COALESCE(s.agent_name, CASE WHEN s.p1_span_kind = 'agent' THEN s.p1_agent_name END, CASE WHEN p2.span_kind = 'agent' THEN p2.agent_name END, s.p1_agent_name, p2.agent_name) AS resolved_agent_name,
-      COALESCE(s.skill_name, CASE WHEN s.p1_span_kind = 'agent' THEN s.p1_skill_name END, CASE WHEN p2.span_kind = 'agent' THEN p2.skill_name END, s.p1_skill_name, p2.skill_name) AS resolved_skill_name,
-      COALESCE(s.skill_version, CASE WHEN s.p1_span_kind = 'agent' THEN s.p1_skill_version END, CASE WHEN p2.span_kind = 'agent' THEN p2.skill_version END, s.p1_skill_version, p2.skill_version) AS resolved_skill_version,
-      COALESCE(s.skill_sha256, CASE WHEN s.p1_span_kind = 'agent' THEN s.p1_skill_sha256 END, CASE WHEN p2.span_kind = 'agent' THEN p2.skill_sha256 END, s.p1_skill_sha256, p2.skill_sha256) AS resolved_skill_sha256,
-      ob.trace_owner_app_id,
-      ob.trace_user_id,
-      ob.trace_tenant_id,
-      ob.trace_outcome_id,
-      ob.business_unit,
       COALESCE(s.inline_arguments, s.srv_inline_arguments) AS eff_inline_arguments,
       COALESCE(s.inline_results, s.srv_inline_results) AS eff_inline_results,
       CASE WHEN s.span_status = 'ERROR' OR s.has_srv_error = 1 THEN 'ERROR' ELSE s.span_status END AS effective_span_status,
-      `${PROJECT_ID}.${SILVER_INTERNAL_DATASET}.jcs_tool_args_sha256`(s.tool_name, COALESCE(s.inline_arguments, s.srv_inline_arguments)) AS silver_jcs_sha256
+      -- Proxy-first guard skips V8 JS JCS canonicalization whenever a gateway proxy hash already won or inputs are null.
+      CASE
+        WHEN (s.source_class = 'platform' AND s.emitted_args_sha256 IS NOT NULL)
+          OR s.srv_proxy_sha IS NOT NULL
+          OR s.tool_name IS NULL
+          OR COALESCE(s.inline_arguments, s.srv_inline_arguments) IS NULL
+          THEN CAST(NULL AS STRING)
+        ELSE `${PROJECT_ID}.${SILVER_INTERNAL_DATASET}.jcs_tool_args_sha256`(
+          s.tool_name,
+          COALESCE(s.inline_arguments, s.srv_inline_arguments)
+        )
+      END AS silver_jcs_sha256
     FROM folded_tools AS s
-    LEFT JOIN base_spans AS p2 ON p2.trace_id = s.trace_id AND p2.span_id = s.p2_id
-    LEFT JOIN owner_bu AS ob ON ob.trace_id = s.trace_id AND ob.bu_rn = 1
     WHERE s.peer_rn = 1
       AND s.is_folded_server = 0
   ),

@@ -18,20 +18,23 @@ FROM cm AS c
 LEFT JOIN tc AS t ON c.action_id IS NOT NULL AND c.action_id = t.action_id AND (c.trace_id IS NULL OR c.trace_id = t.trace_id)
 WHERE t.span_id IS NULL OR (c.committed_args_sha256 IS NOT NULL AND COALESCE(t.args_sha256, '') != c.committed_args_sha256);
 
-CREATE OR REPLACE VIEW `agent_eval.v_trace_sql_evaluation` AS
+CREATE OR REPLACE TABLE FUNCTION `agent_eval.gold_trace_sql_evaluation`(
+  from_time TIMESTAMP,
+  to_time TIMESTAMP
+) AS (
 WITH st AS (
-  SELECT * FROM `${PROJECT_ID}.${SILVER_RESTRICTED_DATASET}.traces`(TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL ${GOLD_LOOKBACK_HOURS} HOUR), CURRENT_TIMESTAMP())
+  SELECT * FROM `${PROJECT_ID}.${SILVER_RESTRICTED_DATASET}.traces`(from_time, to_time)
 ),
 stc AS (
-  SELECT * FROM `${PROJECT_ID}.${SILVER_RESTRICTED_DATASET}.tool_calls`(TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL ${GOLD_LOOKBACK_HOURS} HOUR), CURRENT_TIMESTAMP())
-),
-sev AS (
-  SELECT * FROM `${PROJECT_ID}.${SILVER_RESTRICTED_DATASET}.events`(TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL ${GOLD_LOOKBACK_HOURS} HOUR), CURRENT_TIMESTAMP())
+  SELECT * FROM `${PROJECT_ID}.${SILVER_RESTRICTED_DATASET}.tool_calls`(from_time, to_time)
 ),
 ae AS (
-  SELECT action_id, event_id, event_type, event_time, trace_id, approved_args_sha256, committed_args_sha256, approved_expires_at, actor_id,
+  SELECT action_id, event_id, event_type, event_time, trace_id, source_class, control_action,
+    approved_args_sha256, committed_args_sha256, approved_expires_at, actor_id,
     COUNT(*) OVER (PARTITION BY event_type, event_id) AS evc
-  FROM sev WHERE is_authoritative IS TRUE AND action_id IS NOT NULL AND event_type IN ('outcome.approved', 'action.committed')
+  FROM `${PROJECT_ID}.${SILVER_RESTRICTED_DATASET}.events`(from_time, to_time)
+  WHERE (is_authoritative IS TRUE AND action_id IS NOT NULL AND event_type IN ('outcome.approved', 'action.committed'))
+    OR (event_type = 'guardrail.intervention' AND source_class = 'platform' AND control_action = 'block' AND trace_id IS NOT NULL)
 ),
 tgr AS (
   SELECT trace_id,
@@ -42,6 +45,7 @@ tgr AS (
     COUNTIF(has_tc AND trn = 1 AND COALESCE(acl_dropped_count, 0) > 0 AND (results IS NULL OR TRIM(results) IN ('', '[]', '{}', 'null'))) AS ser_c,
     COUNTIF(has_tc AND trn = 1 AND COALESCE(writes_state, FALSE) AND NOT aok) AS uw_c,
     COUNTIF(iscm AND crn = 1 AND NOT cok) AS oc_c,
+    COUNTIF(ispgb) AS pgb,
     MAX(IF(has_tc, args_sha256, NULL)) AS sa_s,
     MAX(IF(has_tc AND isap, approved_args_sha256, NULL)) AS saa_s
   FROM (
@@ -53,22 +57,22 @@ tgr AS (
         tc.span_id IS NOT NULL AS has_tc, tc.span_status, SAFE_CAST(JSON_VALUE(tc.labels, '$.tool_http_status_code') AS INT64) AS thttp,
         tc.skill_version, tc.executes_code, tc.sandbox_status, tc.acl_dropped_count, tc.results, tc.writes_state, tc.args_sha256,
         (ae.event_type = 'outcome.approved') AS isap, (ae.event_type = 'action.committed' AND ae.trace_id IS NOT NULL) AS iscm,
+        (ae.event_type = 'guardrail.intervention' AND ae.source_class = 'platform' AND ae.control_action = 'block') AS ispgb,
         ae.approved_args_sha256,
         (tc.action_id IS NOT NULL AND tc.args_sha256 IS NOT NULL AND tc.args_hash_source != 'none' AND ae.event_type = 'outcome.approved' AND ae.evc = 1 AND ae.approved_args_sha256 = tc.args_sha256 AND ae.event_time < tc.start_time AND (ae.approved_expires_at IS NULL OR tc.start_time <= ae.approved_expires_at) AND ae.actor_id IS NOT NULL AND ae.actor_id != COALESCE(tc.user_id, '')) AS aok,
         (tc.span_id IS NOT NULL AND (ae.trace_id IS NULL OR ae.trace_id = tc.trace_id) AND (ae.committed_args_sha256 IS NULL OR COALESCE(tc.args_sha256, '') = ae.committed_args_sha256)) AS cok
       FROM stc AS tc
-      FULL OUTER JOIN ae ON tc.action_id IS NOT NULL AND tc.action_id = ae.action_id AND (ae.event_type = 'outcome.approved' OR ae.trace_id IS NULL OR ae.trace_id = tc.trace_id)
+      FULL OUTER JOIN ae
+        ON ae.event_type IN ('outcome.approved', 'action.committed')
+        AND tc.action_id IS NOT NULL AND tc.action_id = ae.action_id
+        AND (ae.event_type = 'outcome.approved' OR ae.trace_id IS NULL OR ae.trace_id = tc.trace_id)
       WHERE COALESCE(tc.trace_id, ae.trace_id) IS NOT NULL
     ) AS j
   ) GROUP BY trace_id
 ),
-gr AS (
-  SELECT trace_id, COUNTIF(event_type = 'guardrail.intervention' AND source_class = 'platform' AND control_action = 'block') AS pgb
-  FROM sev WHERE trace_id IS NOT NULL GROUP BY trace_id
-),
 outs AS (
   SELECT outcome_id, outcome_owner
-  FROM `${PROJECT_ID}.${SILVER_OPEN_DATASET}.outcomes_open`(TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL ${GOLD_LOOKBACK_HOURS} HOUR), CURRENT_TIMESTAMP())
+  FROM `${PROJECT_ID}.${SILVER_OPEN_DATASET}.outcomes_open`(from_time, to_time)
   QUALIFY ROW_NUMBER() OVER (PARTITION BY outcome_id ORDER BY close_time DESC) = 1
 ),
 wwa AS (
@@ -79,7 +83,7 @@ wwa AS (
         IF(COALESCE(am.is_allowed AND am.invokable_status = 'active' AND (am.eol_date IS NULL OR am.eol_date >= CURRENT_DATE('UTC')), FALSE), 0, 1) ASC,
         am.effective_from DESC
     ) AS arn
-  FROM `agent_eval.gold_call_costs`(TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL ${GOLD_LOOKBACK_HOURS} HOUR), CURRENT_TIMESTAMP()) AS w
+  FROM `agent_eval.gold_call_costs`(from_time, to_time) AS w
   CROSS JOIN (SELECT COUNT(*) > 0 AS hr FROM `${PROJECT_ID}.${SILVER_REF_DATASET}.allowed_models` WHERE effective_to IS NULL) AS ama
   LEFT JOIN `${PROJECT_ID}.${SILVER_REF_DATASET}.allowed_models` AS am
     ON w.model_name IS NOT NULL AND w.model_name != 'none' AND am.effective_to IS NULL
@@ -144,7 +148,7 @@ be AS (
     COALESCE(tgr.te_c, 0) AS tool_error_count,
     (COALESCE(wf.h429, 0) + COALESCE(tgr.t4_c, 0) + IF(COALESCE(t.throttle_count, 0) > 0 AND COALESCE(wf.h429, 0) + COALESCE(tgr.t4_c, 0) = 0, 1, 0)) AS http_429_count,
     COALESCE(wf.ssc, 0) AS spillover_span_count, t.content_missing_call_count,
-    COALESCE(gr.pgb, 0) AS platform_guardrail_blocks,
+    COALESCE(tgr.pgb, 0) AS platform_guardrail_blocks,
     COALESCE(tgr.ser_c, 0) AS silent_empty_rag_count, COALESCE(tgr.uw_c, 0) AS unauthorized_write_count, COALESCE(tgr.oc_c, 0) AS orphan_commit_count,
     tgr.sa_s AS sample_args_sha256, tgr.saa_s AS sample_approved_args_sha256,
     JSON_VALUE(t.labels, '$.agent_version') AS agent_version,
@@ -184,7 +188,6 @@ be AS (
   LEFT JOIN outs ON t.outcome_id = outs.outcome_id
   LEFT JOIN wfr AS wf ON t.trace_id = wf.trace_id
   LEFT JOIN tgr ON t.trace_id = tgr.trace_id
-  LEFT JOIN gr ON t.trace_id = gr.trace_id
   LEFT JOIN aa AS ar ON t.trace_owner_app_id = ar.app_id
   LEFT JOIN ask AS sk ON t.trace_owner_app_id = sk.app_id AND t.skill_name = sk.skill_name
   LEFT JOIN `agent_eval.workload_thresholds` AS wt ON COALESCE(t.trace_owner_app_id, 'unregistered_app') = wt.apphub_application_id
@@ -211,7 +214,15 @@ SELECT
   b.production_inference_usd, b.conflict_escalation_usd, b.agent_gym_eval_usd, b.span_autorater_judge_usd, b.optimize_usd, b.unclassified_usd,
   b.unpriced_spans, b.trace_span_cost_usd, b.sampling_mode, b.sampling_probability, b.scaled_trace_weight, b.scaled_trace_span_cost_usd,
   b.cache_hit_ratio, b.thinking_token_ratio
-FROM be AS b;
+FROM be AS b
+);
+
+CREATE OR REPLACE VIEW `agent_eval.v_trace_sql_evaluation` AS
+SELECT *
+FROM `agent_eval.gold_trace_sql_evaluation`(
+  TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL ${GOLD_LOOKBACK_HOURS} HOUR),
+  CURRENT_TIMESTAMP()
+);
 
 CREATE OR REPLACE VIEW `agent_eval.v_step1_trace_eval` AS
 SELECT
@@ -281,38 +292,38 @@ WITH ro AS (
   SELECT * FROM `${PROJECT_ID}.${SILVER_OPEN_DATASET}.outcomes_open`(TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL ${GOLD_LOOKBACK_HOURS} HOUR), CURRENT_TIMESTAMP())
   QUALIFY ROW_NUMBER() OVER (PARTITION BY outcome_id ORDER BY is_closed DESC, close_time DESC) = 1
 ),
-re AS (
-  SELECT outcome_id, trace_id, event_type, labels
-  FROM `${PROJECT_ID}.${SILVER_OPEN_DATASET}.events_open`(TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL ${GOLD_LOOKBACK_HOURS} HOUR), CURRENT_TIMESTAMP())
-  WHERE outcome_id IS NOT NULL
-),
 dot AS (
-  SELECT DISTINCT outcome_id, trace_id FROM (
-    SELECT outcome_id, trace_id FROM `${PROJECT_ID}.${SILVER_OPEN_DATASET}.traces_open`(TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL ${GOLD_LOOKBACK_HOURS} HOUR), CURRENT_TIMESTAMP()) WHERE outcome_id IS NOT NULL
-    UNION DISTINCT
-    SELECT outcome_id, trace_id FROM `${PROJECT_ID}.${SILVER_OPEN_DATASET}.model_calls`(TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL ${GOLD_LOOKBACK_HOURS} HOUR), CURRENT_TIMESTAMP()) WHERE outcome_id IS NOT NULL
-    UNION DISTINCT
-    SELECT outcome_id, trace_id FROM `${PROJECT_ID}.${SILVER_OPEN_DATASET}.tool_calls_open`(TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL ${GOLD_LOOKBACK_HOURS} HOUR), CURRENT_TIMESTAMP()) WHERE outcome_id IS NOT NULL
-    UNION DISTINCT
-    SELECT outcome_id, trace_id FROM re WHERE trace_id IS NOT NULL
-  )
+  SELECT outcome_id, trace_id, LOGICAL_AND(ev_ok) AS ev_ok FROM (
+    SELECT outcome_id, trace_id, TRUE AS ev_ok FROM `${PROJECT_ID}.${SILVER_OPEN_DATASET}.traces_open`(TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL ${GOLD_LOOKBACK_HOURS} HOUR), CURRENT_TIMESTAMP()) WHERE outcome_id IS NOT NULL AND trace_id IS NOT NULL
+    UNION ALL
+    SELECT outcome_id, trace_id, TRUE AS ev_ok FROM `${PROJECT_ID}.${SILVER_OPEN_DATASET}.model_calls`(TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL ${GOLD_LOOKBACK_HOURS} HOUR), CURRENT_TIMESTAMP()) WHERE outcome_id IS NOT NULL AND trace_id IS NOT NULL
+    UNION ALL
+    SELECT outcome_id, trace_id, TRUE AS ev_ok FROM `${PROJECT_ID}.${SILVER_OPEN_DATASET}.tool_calls_open`(TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL ${GOLD_LOOKBACK_HOURS} HOUR), CURRENT_TIMESTAMP()) WHERE outcome_id IS NOT NULL AND trace_id IS NOT NULL
+    UNION ALL
+    SELECT outcome_id, trace_id,
+      CASE
+        WHEN event_type IN ('outcome.closed', 'gen_ai.evaluation.result')
+          AND JSON_VALUE(labels, '$.evaluation_score_label') IS NOT NULL
+          AND LOWER(JSON_VALUE(labels, '$.evaluation_score_label')) NOT IN ('true', 'verified', 'pass') THEN FALSE
+        ELSE TRUE
+      END AS ev_ok
+    FROM `${PROJECT_ID}.${SILVER_OPEN_DATASET}.events_open`(TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL ${GOLD_LOOKBACK_HOURS} HOUR), CURRENT_TIMESTAMP())
+    WHERE outcome_id IS NOT NULL
+  ) GROUP BY outcome_id, trace_id
 ),
 otg AS (
-  SELECT dot.outcome_id, COUNT(*) AS mtc, LOGICAL_AND(COALESCE(t.rule0_pass, FALSE)) AS ar0,
+  SELECT dot.outcome_id, COUNTIF(dot.trace_id IS NOT NULL) AS mtc,
+    COALESCE(LOGICAL_AND(IF(dot.trace_id IS NOT NULL, COALESCE(t.rule0_pass, FALSE), NULL)), FALSE) AS ar0,
+    COALESCE(LOGICAL_AND(dot.ev_ok), TRUE) AS ev_ok,
     MAX(t.source_mode) AS source_mode, MAX(t.skill_id) AS skill_id, MAX(t.skill_version) AS skill_version, MAX(t.apphub_application_id) AS fb_owner
-  FROM dot LEFT JOIN `agent_eval.v_trace_sql_evaluation` AS t ON dot.trace_id = t.trace_id GROUP BY dot.outcome_id
-),
-ecf AS (
-  SELECT outcome_id,
-    LOGICAL_AND(CASE WHEN JSON_VALUE(labels, '$.evaluation_score_label') IS NULL THEN TRUE WHEN LOWER(JSON_VALUE(labels, '$.evaluation_score_label')) IN ('true', 'verified', 'pass') THEN TRUE ELSE FALSE END) AS ev_ok
-  FROM re WHERE event_type IN ('outcome.closed', 'gen_ai.evaluation.result') GROUP BY outcome_id
+  FROM dot LEFT JOIN `agent_eval.v_trace_sql_evaluation` AS t ON dot.trace_id IS NOT NULL AND dot.trace_id = t.trace_id GROUP BY dot.outcome_id
 )
 SELECT
   o.outcome_id, COALESCE(o.outcome_status, IF(o.is_closed, 'unknown', 'open')) AS outcome_status,
   o.outcome_parent_id, COALESCE(o.outcome_owner, otg.fb_owner, 'unregistered_app') AS outcome_owner,
   o.close_time AS closed_at, o.closing_trace_id, otg.source_mode, otg.skill_id, otg.skill_version,
-  (o.is_closed AND COALESCE(o.outcome_status, 'unknown') = 'succeeded' AND COALESCE(otg.mtc, 0) > 0 AND COALESCE(otg.ar0, FALSE) AND o.root_error_trace_count = 0 AND o.failed_trace_count = 0 AND o.rootless_trace_count = 0 AND COALESCE(ecf.ev_ok, TRUE)) AS is_verified
-FROM ro AS o LEFT JOIN otg ON o.outcome_id = otg.outcome_id LEFT JOIN ecf ON o.outcome_id = ecf.outcome_id;
+  (o.is_closed AND COALESCE(o.outcome_status, 'unknown') = 'succeeded' AND COALESCE(otg.mtc, 0) > 0 AND COALESCE(otg.ar0, FALSE) AND o.root_error_trace_count = 0 AND o.failed_trace_count = 0 AND o.rootless_trace_count = 0 AND COALESCE(otg.ev_ok, TRUE)) AS is_verified
+FROM ro AS o LEFT JOIN otg ON o.outcome_id = otg.outcome_id;
 
 CREATE OR REPLACE VIEW `agent_eval.v_cost_per_verified_outcome` AS
 WITH os0 AS (

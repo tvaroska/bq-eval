@@ -12,51 +12,25 @@ CREATE OR REPLACE TABLE FUNCTION `agent_eval.gold_call_costs`(
   ),
   req_attempts AS (
     SELECT
-      r.client_request_id,
-      r.span_id,
-      r.attempt_index,
-      r.request_time,
-      r.response_model,
-      r.request_model,
-      r.serving_tier,
-      r.tier_source,
-      r.pool_id,
-      r.runtime_pool_id,
-      r.http_status_code,
-      r.traffic_type,
+      r.client_request_id, r.span_id, r.attempt_index, r.request_time, r.response_model, r.request_model,
+      r.serving_tier, r.tier_source, r.pool_id, r.runtime_pool_id, r.http_status_code, r.traffic_type,
       JSON_VALUE(r.labels, '$.request_type_header') AS request_type_header,
-      GREATEST(
-        0,
-        COALESCE(r.input_tokens, 0)
-          - COALESCE(r.cache_read_tokens, 0)
-          - COALESCE(r.cache_write_5m_tokens, 0)
-          - COALESCE(r.cache_write_1h_tokens, 0)
-      ) AS att_uncached_tokens,
+      GREATEST(0, COALESCE(r.input_tokens, 0) - COALESCE(r.cache_read_tokens, 0) - COALESCE(r.cache_write_5m_tokens, 0) - COALESCE(r.cache_write_1h_tokens, 0)) AS att_uncached_tokens,
       COALESCE(r.cache_read_tokens, 0) AS att_cache_read_tokens,
       COALESCE(r.cache_write_5m_tokens, 0) AS att_cw5m_tokens,
       COALESCE(r.cache_write_1h_tokens, 0) AS att_cw1h_tokens,
       COALESCE(r.output_tokens, 0) AS att_output_tokens,
       COALESCE(r.reasoning_tokens, 0) AS att_thinking_tokens,
-      GREATEST(
-        COALESCE(r.input_tokens, 0),
-        COALESCE(r.cache_read_tokens, 0)
-          + COALESCE(r.cache_write_5m_tokens, 0)
-          + COALESCE(r.cache_write_1h_tokens, 0)
-      ) AS att_prompt_context_tokens
+      GREATEST(COALESCE(r.input_tokens, 0), COALESCE(r.cache_read_tokens, 0) + COALESCE(r.cache_write_5m_tokens, 0) + COALESCE(r.cache_write_1h_tokens, 0)) AS att_prompt_context_tokens
     FROM `${PROJECT_ID}.${SILVER_OPEN_DATASET}.requests`(from_time, to_time) AS r
   ),
   req_collapsed AS (
     SELECT
-      client_request_id,
-      span_id,
-      COUNT(*) AS upstream_attempt_count,
-      GREATEST(0, COUNT(*) - 1) AS gateway_failover_attempts,
-      SUM(att_uncached_tokens) AS req_uncached_tokens,
-      SUM(att_cache_read_tokens) AS req_cache_read_tokens,
-      SUM(att_cw5m_tokens) AS req_cw5m_tokens,
-      SUM(att_cw1h_tokens) AS req_cw1h_tokens,
-      SUM(att_output_tokens) AS req_output_tokens,
-      SUM(att_thinking_tokens) AS req_thinking_tokens,
+      client_request_id, span_id,
+      COUNT(*) AS upstream_attempt_count, GREATEST(0, COUNT(*) - 1) AS gateway_failover_attempts,
+      SUM(att_uncached_tokens) AS req_uncached_tokens, SUM(att_cache_read_tokens) AS req_cache_read_tokens,
+      SUM(att_cw5m_tokens) AS req_cw5m_tokens, SUM(att_cw1h_tokens) AS req_cw1h_tokens,
+      SUM(att_output_tokens) AS req_output_tokens, SUM(att_thinking_tokens) AS req_thinking_tokens,
       MAX(att_prompt_context_tokens) AS max_att_prompt_context_tokens,
       ARRAY_AGG(serving_tier IGNORE NULLS ORDER BY attempt_index DESC LIMIT 1)[SAFE_OFFSET(0)] AS req_serving_tier,
       ARRAY_AGG(tier_source IGNORE NULLS ORDER BY attempt_index DESC LIMIT 1)[SAFE_OFFSET(0)] AS req_tier_source,
@@ -69,51 +43,23 @@ CREATE OR REPLACE TABLE FUNCTION `agent_eval.gold_call_costs`(
   ),
   joined_calls AS (
     SELECT
-      mc.trace_id,
-      mc.span_id,
-      mc.parent_span_id,
-      mc.outcome_id,
-      mc.trace_owner_app_id,
-      mc.operation_name,
-      mc.start_time,
-      mc.end_time,
-      mc.latency_ms,
-      mc.agent_id,
-      mc.agent_name,
-      mc.skill_name,
-      mc.skill_version,
-      mc.skill_sha256,
+      mc.trace_id, mc.span_id, mc.parent_span_id, mc.outcome_id, mc.trace_owner_app_id, mc.operation_name,
+      mc.start_time, mc.end_time, mc.latency_ms, mc.agent_id, mc.agent_name, mc.skill_name, mc.skill_version, mc.skill_sha256,
       COALESCE(mc.response_model, mc.request_model, 'none') AS model_name,
       IF(
         STARTS_WITH(REGEXP_REPLACE(REGEXP_REPLACE(TRIM(COALESCE(mc.response_model, mc.request_model, 'none')), r'@.*$', ''), r'^.*/', ''), 'text-embedding-'),
         REGEXP_REPLACE(REGEXP_REPLACE(REGEXP_REPLACE(TRIM(COALESCE(mc.response_model, mc.request_model, 'none')), r'@.*$', ''), r'^.*/', ''), r'-(?:ga|rc|qcd|preview)$', ''),
-        REGEXP_REPLACE(
-          REGEXP_REPLACE(REGEXP_REPLACE(TRIM(COALESCE(mc.response_model, mc.request_model, 'none')), r'@.*$', ''), r'^.*/', ''),
-          r'-(?:\d{3}|ga|rc|qcd|preview)$',
-          ''
-        )
+        REGEXP_REPLACE(REGEXP_REPLACE(REGEXP_REPLACE(TRIM(COALESCE(mc.response_model, mc.request_model, 'none')), r'@.*$', ''), r'^.*/', ''), r'-(?:\d{3}|ga|rc|qcd|preview)$', '')
       ) AS norm_model_name,
-      mc.provider AS span_provider,
-      mc.runtime_lane,
-      mc.state_mode,
+      mc.provider AS span_provider, mc.runtime_lane, mc.state_mode,
       COALESCE(rc.req_serving_tier, mc.serving_tier, 'STANDARD') AS serving_traffic_type,
       COALESCE(rc.req_tier_source, 'span') AS tier_source,
-      rc.req_pool_id AS pool_id,
-      rc.req_runtime_pool_id AS runtime_pool_id,
-      rc.req_type_header AS request_type_header,
+      rc.req_pool_id AS pool_id, rc.req_runtime_pool_id AS runtime_pool_id, rc.req_type_header AS request_type_header,
       COALESCE(mc.traffic_type, 'production_inference') AS finops_traffic_type,
-      mc.traffic_type_attested,
-      mc.thought_signature_present,
-      mc.caller_retry_count,
+      mc.traffic_type_attested, mc.thought_signature_present, mc.caller_retry_count,
       COALESCE(rc.gateway_failover_attempts, 0) AS gateway_failover_attempts,
-      mc.tool_definitions_sha256,
-      COALESCE(mc.http_status_code, rc.req_http_status_code) AS http_status_code,
-      mc.error_type,
-      mc.content_missing,
-      mc.model_confidence,
-      mc.cascade_tier,
-      mc.escalation_reason,
-      mc.labels,
+      mc.tool_definitions_sha256, COALESCE(mc.http_status_code, rc.req_http_status_code) AS http_status_code,
+      mc.error_type, mc.content_missing, mc.model_confidence, mc.cascade_tier, mc.escalation_reason, mc.labels,
       COALESCE(rc.req_uncached_tokens, mc.input_tokens, 0) AS uncached_input_tokens,
       COALESCE(rc.req_cache_read_tokens, mc.cache_read_tokens, 0) AS cached_input_tokens,
       COALESCE(rc.req_cw5m_tokens, mc.cache_write_tokens, 0) AS cache_write_5m_tokens,
@@ -122,9 +68,7 @@ CREATE OR REPLACE TABLE FUNCTION `agent_eval.gold_call_costs`(
       COALESCE(rc.req_thinking_tokens, mc.reasoning_tokens, 0) AS thinking_tokens
     FROM mc
     LEFT JOIN req_collapsed AS rc
-      ON mc.client_request_id IS NOT NULL
-      AND mc.client_request_id = rc.client_request_id
-      AND mc.span_id = rc.span_id
+      ON mc.client_request_id IS NOT NULL AND mc.client_request_id = rc.client_request_id AND mc.span_id = rc.span_id
   ),
   catalog_matched AS (
     SELECT
@@ -179,72 +123,55 @@ CREATE OR REPLACE TABLE FUNCTION `agent_eval.gold_call_costs`(
         WHEN c.m_model_name IS NOT NULL THEN c.m_long_context_threshold_tokens
         ELSE d.long_context_threshold_tokens
       END AS eff_cliff_threshold,
-      (c.m_model_name IS NOT NULL OR d.model_name IS NOT NULL) AS has_sku_match
+      (c.m_model_name IS NOT NULL OR d.model_name IS NOT NULL) AS has_sku_match,
+      d.input_usd_per_1m AS d_input_usd_per_1m,
+      d.cached_input_usd_per_1m AS d_cached_input_usd_per_1m,
+      d.cache_write_5m_usd_per_1m AS d_cache_write_5m_usd_per_1m,
+      d.cache_write_1h_usd_per_1m AS d_cache_write_1h_usd_per_1m,
+      d.output_usd_per_1m AS d_output_usd_per_1m,
+      d.long_context_input_usd_per_1m AS d_long_context_input_usd_per_1m,
+      d.long_context_cached_usd_per_1m AS d_long_context_cached_usd_per_1m,
+      d.long_context_output_usd_per_1m AS d_long_context_output_usd_per_1m,
+      d.burndown_uncached_weight AS d_burndown_uncached_weight,
+      d.burndown_cached_weight AS d_burndown_cached_weight,
+      d.burndown_cache_write_5m_weight AS d_burndown_cache_write_5m_weight,
+      d.burndown_cache_write_1h_weight AS d_burndown_cache_write_1h_weight,
+      d.burndown_output_weight AS d_burndown_output_weight,
+      d.burndown_long_uncached_weight AS d_burndown_long_uncached_weight,
+      d.burndown_long_cached_weight AS d_burndown_long_cached_weight,
+      d.burndown_long_output_weight AS d_burndown_long_output_weight,
+      d.priority_paygo_multiplier AS d_priority_paygo_multiplier,
+      d.flex_paygo_multiplier AS d_flex_paygo_multiplier
     FROM catalog_matched AS c
     LEFT JOIN `agent_eval.v_default_model_pricing` AS d
       ON c.norm_model_name = d.model_name
     WHERE c.cat_rn = 1
   )
   SELECT
-    r.trace_id,
-    r.span_id,
-    r.parent_span_id,
-    r.outcome_id,
-    r.trace_owner_app_id,
-    r.operation_name,
-    r.start_time,
-    r.end_time,
-    r.latency_ms,
-    r.agent_id,
-    r.agent_name,
-    r.skill_name,
-    r.skill_version,
-    r.skill_sha256,
-    r.model_name,
-    r.provider,
-    r.lifecycle_track,
-    r.runtime_lane,
-    r.state_mode,
-    r.serving_traffic_type,
-    r.tier_source,
-    r.pool_id,
-    r.runtime_pool_id,
-    r.request_type_header,
-    r.finops_traffic_type,
-    r.traffic_type_attested,
-    r.thought_signature_present,
-    r.caller_retry_count,
-    r.gateway_failover_attempts,
-    r.tool_definitions_sha256,
-    r.http_status_code,
-    r.error_type,
-    r.content_missing,
-    r.model_confidence,
-    r.cascade_tier,
-    r.escalation_reason,
-    r.prompt_context_tokens AS input_tokens,
-    r.cached_input_tokens,
-    r.cache_write_5m_tokens,
-    r.cache_write_1h_tokens,
-    r.uncached_input_tokens,
-    r.output_tokens,
-    r.thinking_tokens,
-    r.min_cache_tokens,
+    r.trace_id, r.span_id, r.parent_span_id, r.outcome_id, r.trace_owner_app_id, r.operation_name,
+    r.start_time, r.end_time, r.latency_ms, r.agent_id, r.agent_name, r.skill_name, r.skill_version, r.skill_sha256,
+    r.model_name, r.provider, r.lifecycle_track, r.runtime_lane, r.state_mode, r.serving_traffic_type,
+    r.tier_source, r.pool_id, r.runtime_pool_id, r.request_type_header, r.finops_traffic_type,
+    r.traffic_type_attested, r.thought_signature_present, r.caller_retry_count, r.gateway_failover_attempts,
+    r.tool_definitions_sha256, r.http_status_code, r.error_type, r.content_missing, r.model_confidence,
+    r.cascade_tier, r.escalation_reason, r.prompt_context_tokens AS input_tokens,
+    r.cached_input_tokens, r.cache_write_5m_tokens, r.cache_write_1h_tokens, r.uncached_input_tokens,
+    r.output_tokens, r.thinking_tokens, r.min_cache_tokens,
     (r.min_cache_tokens <= 0 OR r.prompt_context_tokens >= r.min_cache_tokens) AS meets_min_cache_floor,
     (r.eff_cliff_threshold IS NOT NULL AND r.prompt_context_tokens > r.eff_cliff_threshold) AS is_long_context_cliff,
     CASE
       WHEN r.eff_cliff_threshold IS NOT NULL AND r.prompt_context_tokens > r.eff_cliff_threshold THEN
-        (COALESCE(r.m_burndown_long_uncached_weight, d2.burndown_long_uncached_weight, 2.0) * r.uncached_input_tokens)
-        + (COALESCE(r.m_burndown_long_cached_weight, d2.burndown_long_cached_weight, 0.2) * r.cached_input_tokens)
-        + ((COALESCE(r.m_burndown_long_uncached_weight, d2.burndown_long_uncached_weight, 2.0) / COALESCE(NULLIF(COALESCE(r.m_burndown_uncached_weight, d2.burndown_uncached_weight, 1.0), 0.0), 1.0)) * COALESCE(r.m_burndown_cache_write_5m_weight, d2.burndown_cache_write_5m_weight, 1.0) * r.cache_write_5m_tokens)
-        + ((COALESCE(r.m_burndown_long_uncached_weight, d2.burndown_long_uncached_weight, 2.0) / COALESCE(NULLIF(COALESCE(r.m_burndown_uncached_weight, d2.burndown_uncached_weight, 1.0), 0.0), 1.0)) * COALESCE(r.m_burndown_cache_write_1h_weight, d2.burndown_cache_write_1h_weight, 1.0) * r.cache_write_1h_tokens)
-        + (COALESCE(r.m_burndown_long_output_weight, d2.burndown_long_output_weight, 7.5) * (r.output_tokens + r.thinking_tokens))
+        (COALESCE(r.m_burndown_long_uncached_weight, r.d_burndown_long_uncached_weight, 2.0) * r.uncached_input_tokens)
+        + (COALESCE(r.m_burndown_long_cached_weight, r.d_burndown_long_cached_weight, 0.2) * r.cached_input_tokens)
+        + ((COALESCE(r.m_burndown_long_uncached_weight, r.d_burndown_long_uncached_weight, 2.0) / COALESCE(NULLIF(COALESCE(r.m_burndown_uncached_weight, r.d_burndown_uncached_weight, 1.0), 0.0), 1.0)) * COALESCE(r.m_burndown_cache_write_5m_weight, r.d_burndown_cache_write_5m_weight, 1.0) * r.cache_write_5m_tokens)
+        + ((COALESCE(r.m_burndown_long_uncached_weight, r.d_burndown_long_uncached_weight, 2.0) / COALESCE(NULLIF(COALESCE(r.m_burndown_uncached_weight, r.d_burndown_uncached_weight, 1.0), 0.0), 1.0)) * COALESCE(r.m_burndown_cache_write_1h_weight, r.d_burndown_cache_write_1h_weight, 1.0) * r.cache_write_1h_tokens)
+        + (COALESCE(r.m_burndown_long_output_weight, r.d_burndown_long_output_weight, 7.5) * (r.output_tokens + r.thinking_tokens))
       ELSE
-        (COALESCE(r.m_burndown_uncached_weight, d2.burndown_uncached_weight, 1.0) * r.uncached_input_tokens)
-        + (COALESCE(r.m_burndown_cached_weight, d2.burndown_cached_weight, 0.1) * r.cached_input_tokens)
-        + (COALESCE(r.m_burndown_cache_write_5m_weight, d2.burndown_cache_write_5m_weight, 1.0) * r.cache_write_5m_tokens)
-        + (COALESCE(r.m_burndown_cache_write_1h_weight, d2.burndown_cache_write_1h_weight, 1.0) * r.cache_write_1h_tokens)
-        + (COALESCE(r.m_burndown_output_weight, d2.burndown_output_weight, 4.0) * (r.output_tokens + r.thinking_tokens))
+        (COALESCE(r.m_burndown_uncached_weight, r.d_burndown_uncached_weight, 1.0) * r.uncached_input_tokens)
+        + (COALESCE(r.m_burndown_cached_weight, r.d_burndown_cached_weight, 0.1) * r.cached_input_tokens)
+        + (COALESCE(r.m_burndown_cache_write_5m_weight, r.d_burndown_cache_write_5m_weight, 1.0) * r.cache_write_5m_tokens)
+        + (COALESCE(r.m_burndown_cache_write_1h_weight, r.d_burndown_cache_write_1h_weight, 1.0) * r.cache_write_1h_tokens)
+        + (COALESCE(r.m_burndown_output_weight, r.d_burndown_output_weight, 4.0) * (r.output_tokens + r.thinking_tokens))
     END AS weighted_burndown_tokens,
     CASE
       WHEN r.prompt_context_tokens = 0 AND r.output_tokens = 0 AND r.thinking_tokens = 0 THEN 0.0
@@ -252,40 +179,38 @@ CREATE OR REPLACE TABLE FUNCTION `agent_eval.gold_call_costs`(
       ELSE
         (
           CASE UPPER(COALESCE(r.serving_traffic_type, 'STANDARD'))
-            WHEN 'PRIORITY' THEN COALESCE(r.m_priority_paygo_multiplier, d2.priority_paygo_multiplier, 1.8)
-            WHEN 'FLEX' THEN COALESCE(r.m_flex_paygo_multiplier, d2.flex_paygo_multiplier, 0.5)
+            WHEN 'PRIORITY' THEN COALESCE(r.m_priority_paygo_multiplier, r.d_priority_paygo_multiplier, 1.8)
+            WHEN 'FLEX' THEN COALESCE(r.m_flex_paygo_multiplier, r.d_flex_paygo_multiplier, 0.5)
             ELSE 1.0
           END
         ) * (
           CASE
             WHEN r.eff_cliff_threshold IS NOT NULL AND r.prompt_context_tokens > r.eff_cliff_threshold THEN
-              (r.uncached_input_tokens / 1e6) * COALESCE(r.m_long_context_input_usd_per_1m, d2.long_context_input_usd_per_1m)
-              + (r.cached_input_tokens / 1e6) * COALESCE(r.m_long_context_cached_usd_per_1m, d2.long_context_cached_usd_per_1m)
-              + (r.cache_write_5m_tokens / 1e6) * (COALESCE(r.m_long_context_input_usd_per_1m, d2.long_context_input_usd_per_1m) * COALESCE(r.m_burndown_cache_write_5m_weight, d2.burndown_cache_write_5m_weight, 1.0))
-              + (r.cache_write_1h_tokens / 1e6) * (COALESCE(r.m_long_context_input_usd_per_1m, d2.long_context_input_usd_per_1m) * COALESCE(r.m_burndown_cache_write_1h_weight, d2.burndown_cache_write_1h_weight, 1.0))
-              + ((r.output_tokens + r.thinking_tokens) / 1e6) * COALESCE(r.m_long_context_output_usd_per_1m, d2.long_context_output_usd_per_1m)
+              (r.uncached_input_tokens / 1e6) * COALESCE(r.m_long_context_input_usd_per_1m, r.d_long_context_input_usd_per_1m)
+              + (r.cached_input_tokens / 1e6) * COALESCE(r.m_long_context_cached_usd_per_1m, r.d_long_context_cached_usd_per_1m)
+              + (r.cache_write_5m_tokens / 1e6) * (COALESCE(r.m_long_context_input_usd_per_1m, r.d_long_context_input_usd_per_1m) * COALESCE(r.m_burndown_cache_write_5m_weight, r.d_burndown_cache_write_5m_weight, 1.0))
+              + (r.cache_write_1h_tokens / 1e6) * (COALESCE(r.m_long_context_input_usd_per_1m, r.d_long_context_input_usd_per_1m) * COALESCE(r.m_burndown_cache_write_1h_weight, r.d_burndown_cache_write_1h_weight, 1.0))
+              + ((r.output_tokens + r.thinking_tokens) / 1e6) * COALESCE(r.m_long_context_output_usd_per_1m, r.d_long_context_output_usd_per_1m)
             ELSE
-              (r.uncached_input_tokens / 1e6) * COALESCE(r.m_input_usd_per_1m, d2.input_usd_per_1m)
-              + (r.cached_input_tokens / 1e6) * COALESCE(r.m_cached_input_usd_per_1m, d2.cached_input_usd_per_1m)
-              + (r.cache_write_5m_tokens / 1e6) * COALESCE(r.m_cache_write_5m_usd_per_1m, d2.cache_write_5m_usd_per_1m, r.m_input_usd_per_1m, d2.input_usd_per_1m)
-              + (r.cache_write_1h_tokens / 1e6) * COALESCE(r.m_cache_write_1h_usd_per_1m, d2.cache_write_1h_usd_per_1m, r.m_input_usd_per_1m, d2.input_usd_per_1m)
-              + ((r.output_tokens + r.thinking_tokens) / 1e6) * COALESCE(r.m_output_usd_per_1m, d2.output_usd_per_1m)
+              (r.uncached_input_tokens / 1e6) * COALESCE(r.m_input_usd_per_1m, r.d_input_usd_per_1m)
+              + (r.cached_input_tokens / 1e6) * COALESCE(r.m_cached_input_usd_per_1m, r.d_cached_input_usd_per_1m)
+              + (r.cache_write_5m_tokens / 1e6) * COALESCE(r.m_cache_write_5m_usd_per_1m, r.d_cache_write_5m_usd_per_1m, r.m_input_usd_per_1m, r.d_input_usd_per_1m)
+              + (r.cache_write_1h_tokens / 1e6) * COALESCE(r.m_cache_write_1h_usd_per_1m, r.d_cache_write_1h_usd_per_1m, r.m_input_usd_per_1m, r.d_input_usd_per_1m)
+              + ((r.output_tokens + r.thinking_tokens) / 1e6) * COALESCE(r.m_output_usd_per_1m, r.d_output_usd_per_1m)
           END
         )
     END AS span_cost_usd,
     r.labels
   FROM resolved AS r
-  LEFT JOIN `agent_eval.v_default_model_pricing` AS d2
-    ON r.norm_model_name = d2.model_name
 );
 
-CREATE OR REPLACE VIEW `agent_eval.v_trace_waterfall` AS
+CREATE OR REPLACE TABLE FUNCTION `agent_eval.gold_trace_waterfall`(
+  from_time TIMESTAMP,
+  to_time TIMESTAMP
+) AS (
 WITH outs AS (
   SELECT outcome_id, outcome_owner
-  FROM `${PROJECT_ID}.${SILVER_OPEN_DATASET}.outcomes_open`(
-    TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL ${GOLD_LOOKBACK_HOURS} HOUR),
-    CURRENT_TIMESTAMP()
-  )
+  FROM `${PROJECT_ID}.${SILVER_OPEN_DATASET}.outcomes_open`(from_time, to_time)
   QUALIFY ROW_NUMBER() OVER (PARTITION BY outcome_id ORDER BY close_time DESC) = 1
 ),
 raw_spans AS (
@@ -313,7 +238,7 @@ raw_spans AS (
     CAST(NULL AS STRING) AS t_bu, CAST(NULL AS INT64) AS t_app_failed, CAST(NULL AS STRING) AS t_traffic_type,
     CAST(NULL AS STRING) AS t_outcome_id, CAST(NULL AS STRING) AS t_service_name, CAST(NULL AS STRING) AS t_workflow_name,
     CAST(NULL AS STRING) AS t_skill_name, CAST(NULL AS STRING) AS t_session_id, CAST(NULL AS TIMESTAMP) AS t_receive_time
-  FROM `agent_eval.gold_call_costs`(TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL ${GOLD_LOOKBACK_HOURS} HOUR), CURRENT_TIMESTAMP()) AS c
+  FROM `agent_eval.gold_call_costs`(from_time, to_time) AS c
   UNION ALL
   SELECT
     2 AS prio, tc.trace_id, tc.span_id, tc.parent_span_id,
@@ -341,7 +266,7 @@ raw_spans AS (
     CAST(NULL AS STRING) AS t_bu, CAST(NULL AS INT64) AS t_app_failed, CAST(NULL AS STRING) AS t_traffic_type,
     CAST(NULL AS STRING) AS t_outcome_id, CAST(NULL AS STRING) AS t_service_name, CAST(NULL AS STRING) AS t_workflow_name,
     CAST(NULL AS STRING) AS t_skill_name, CAST(NULL AS STRING) AS t_session_id, CAST(NULL AS TIMESTAMP) AS t_receive_time
-  FROM `${PROJECT_ID}.${SILVER_OPEN_DATASET}.tool_calls_open`(TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL ${GOLD_LOOKBACK_HOURS} HOUR), CURRENT_TIMESTAMP()) AS tc
+  FROM `${PROJECT_ID}.${SILVER_OPEN_DATASET}.tool_calls_open`(from_time, to_time) AS tc
   UNION ALL
   SELECT
     3 AS prio, t.trace_id, COALESCE(t.root_span_id, CONCAT('root:', t.trace_id)) AS span_id, CAST(NULL AS STRING) AS parent_span_id,
@@ -365,7 +290,7 @@ raw_spans AS (
     t.outcome_id AS t_outcome_id, JSON_VALUE(t.labels, '$.service_name') AS t_service_name,
     JSON_VALUE(t.labels, '$.workflow_name') AS t_workflow_name, t.skill_name AS t_skill_name,
     t.conversation_id AS t_session_id, t.last_span_arrival_time AS t_receive_time
-  FROM `${PROJECT_ID}.${SILVER_OPEN_DATASET}.traces_open`(TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL ${GOLD_LOOKBACK_HOURS} HOUR), CURRENT_TIMESTAMP()) AS t
+  FROM `${PROJECT_ID}.${SILVER_OPEN_DATASET}.traces_open`(from_time, to_time) AS t
 ),
 deduped_spans AS (
   SELECT
@@ -424,7 +349,29 @@ FROM deduped_spans AS u
 LEFT JOIN outs ON COALESCE(u.raw_outcome_id, u.tr_outcome_id) = outs.outcome_id
 LEFT JOIN `agent_eval.workload_thresholds` AS wt ON u.apphub_application_id = wt.apphub_application_id
 LEFT JOIN active_alloc_cc AS ca ON u.apphub_application_id = ca.app_id
-WHERE u.span_rn = 1;
+WHERE u.span_rn = 1
+);
+
+CREATE OR REPLACE VIEW `agent_eval.v_trace_waterfall` AS
+SELECT
+  trace_id, span_id, parent_span_id, span_name, apphub_application_id,
+  business_unit, cost_center, service_name, agent_name, otel_span_kind,
+  span_kind, model_name, provider, lifecycle_track, tool_name,
+  tool_call_status, status_code, rule0_pass, finops_traffic_type,
+  serving_traffic_type, request_type_header, http_status_code,
+  outcome_id, outcome_owner, source_mode, skill_id, skill_version,
+  session_id, turn_index, start_time, end_time, receive_time,
+  latency_ms, ingestion_lag_ms, input_tokens, cached_input_tokens,
+  cache_write_5m_tokens, cache_write_1h_tokens, uncached_input_tokens,
+  output_tokens, thinking_tokens, min_cache_tokens, meets_min_cache_floor,
+  is_long_context_cliff, weighted_burndown_tokens, span_cost_usd,
+  sandbox_cpu_sec, sandbox_mem_gb_sec, caller_retry_count,
+  gateway_failover_attempts, pool_id, runtime_pool_id, tier_source,
+  thought_signature_present, tool_definitions_sha256
+FROM `agent_eval.gold_trace_waterfall`(
+  TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL ${GOLD_LOOKBACK_HOURS} HOUR),
+  CURRENT_TIMESTAMP()
+);
 
 CREATE OR REPLACE VIEW `agent_eval.v_bq_query_cost_attribution` AS
 WITH reconciled_jobs AS (

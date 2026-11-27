@@ -120,9 +120,26 @@ def register_bootstrap_subparser(sub: argparse._SubParsersAction[argparse.Argume
     )
     boot_p.add_argument(
         "--shape3-format",
-        choices=("JSON", "PARQUET"),
+        choices=("JSON", "PARQUET", "ICEBERG"),
         default="JSON",
         help="BigLake format for Shape-3 payloads (default: JSON).",
+    )
+    boot_p.add_argument(
+        "--shape3-metadata-cache-mode",
+        choices=("", "MANUAL", "AUTOMATIC"),
+        default="",
+        help="BigLake metadata cache mode for Shape-3 (defaults to MANUAL when format is PARQUET).",
+    )
+    boot_p.add_argument(
+        "--shape3-max-staleness-minutes",
+        type=int,
+        default=30,
+        help="BigLake max_staleness interval in minutes when metadata_cache_mode is enabled (default: 30).",
+    )
+    boot_p.add_argument(
+        "--gold-internal-dataset",
+        default="agent_eval_internal",
+        help="Hidden Gold staging dataset ID read only via Authorized Views (default: agent_eval_internal).",
     )
     boot_p.add_argument(
         "--project-id",
@@ -272,12 +289,15 @@ def run_bootstrap_command(args: argparse.Namespace) -> int:
         silver_ref_dataset=args.silver_ref_dataset,
         silver_open_dataset=args.silver_open_dataset,
         silver_restricted_dataset=args.silver_restricted_dataset,
+        gold_internal_dataset=getattr(args, "gold_internal_dataset", "agent_eval_internal"),
         read_margin_minutes=args.read_margin_minutes,
         settle_minutes=args.settle_minutes,
         outcome_lookback_days=args.outcome_lookback_days,
         gold_lookback_hours=args.gold_lookback_hours,
         shape3_prefix=args.shape3_prefix,
         shape3_format=args.shape3_format,
+        shape3_metadata_cache_mode=getattr(args, "shape3_metadata_cache_mode", ""),
+        shape3_max_staleness_minutes=getattr(args, "shape3_max_staleness_minutes", 30),
         flash_judge_endpoint=getattr(args, "flash_judge_endpoint", "gemini-3.8-flash"),
         argon_judge_endpoint=getattr(args, "argon_judge_endpoint", "gemini-4-argon"),
     )
@@ -302,6 +322,7 @@ def run_bootstrap_command(args: argparse.Namespace) -> int:
                 silver_ref_dataset=args.silver_ref_dataset,
                 silver_open_dataset=args.silver_open_dataset,
                 silver_restricted_dataset=args.silver_restricted_dataset,
+                gold_internal_dataset=getattr(args, "gold_internal_dataset", "agent_eval_internal"),
                 traces_dataset_id=args.traces_dataset_id,
                 platform_traces_dataset_id=args.platform_traces_dataset_id,
                 logs_dataset_id=args.logs_dataset_id,

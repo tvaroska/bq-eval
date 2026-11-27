@@ -508,13 +508,25 @@ def _rewrite_select_struct_paths(
                     )
                     rebuilt_exprs.append(exp.alias_(rewritten_col, orig_name))
                 else:
-                    rebuilt_exprs.append(
-                        _rewrite_struct_child(
-                            item,
-                            scope=next_scope,
-                            flat_to_original=flat_to_original,
-                        )
+                    dotted_parts = (
+                        _extract_dotted_parts(item)
+                        if isinstance(item, (exp.Column, exp.Dot))
+                        else None
                     )
+                    rewritten_item = _rewrite_struct_child(
+                        item,
+                        scope=next_scope,
+                        flat_to_original=flat_to_original,
+                    )
+                    if (
+                        dotted_parts is not None
+                        and len(dotted_parts) >= 2
+                        and isinstance(rewritten_item, exp.Anonymous)
+                        and rewritten_item.name == "BQ_STRUCT_FIELD"
+                    ):
+                        rebuilt_exprs.append(exp.alias_(rewritten_item, dotted_parts[-1]))
+                    else:
+                        rebuilt_exprs.append(rewritten_item)
             node.set(key, rebuilt_exprs)
         else:
             node.set(

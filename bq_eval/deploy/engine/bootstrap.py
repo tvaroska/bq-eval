@@ -26,11 +26,13 @@ GOLD_SQL_ORDER: tuple[str, ...] = (
     "core/step3_saved_results.sql",
     "core/step3_daily_quota_guard.sql",
     "core/summary_views.sql",
+    "core/gold_staging_open.sql",
+    "core/gold_staging_restricted.sql",
     "finops/capacity_views.sql",
 )
 
 _OPEN_ONLY_GOLD_FILES: frozenset[str] = frozenset(
-    {"core/gold_cost_views.sql", "finops/capacity_views.sql"}
+    {"core/gold_cost_views.sql", "core/gold_staging_open.sql", "finops/capacity_views.sql"}
 )
 
 _PROJECT_RE = re.compile(r"^[a-zA-Z0-9_-]{2,64}$")
@@ -248,12 +250,15 @@ def substitute_sql_parameters(  # noqa: PLR0913
     silver_ref_dataset: str = "silver_ref",
     silver_open_dataset: str = "silver_open",
     silver_restricted_dataset: str = "silver_restricted",
+    gold_internal_dataset: str = "agent_eval_internal",
     read_margin_minutes: int = 60,
     settle_minutes: int = 5,
     outcome_lookback_days: int = 30,
     gold_lookback_hours: int = 720,
     shape3_prefix: str = "bq-eval/shape3/",
     shape3_format: str = "JSON",
+    shape3_metadata_cache_mode: str = "",
+    shape3_max_staleness_minutes: int = 30,
     flash_judge_endpoint: str = "gemini-3.8-flash",
     argon_judge_endpoint: str = "gemini-4-argon",
 ) -> str:
@@ -278,6 +283,7 @@ def substitute_sql_parameters(  # noqa: PLR0913
         silver_ref_dataset=silver_ref_dataset,
         silver_open_dataset=silver_open_dataset,
         silver_restricted_dataset=silver_restricted_dataset,
+        gold_internal_dataset=gold_internal_dataset,
         traces_dataset_id=valid_traces,
         platform_traces_dataset_id=platform_traces_dataset_id,
         platform_traces_table_id=platform_traces_table_id,
@@ -286,6 +292,8 @@ def substitute_sql_parameters(  # noqa: PLR0913
         payload_bucket=valid_bucket,
         shape3_prefix=shape3_prefix,
         shape3_format=shape3_format,
+        shape3_metadata_cache_mode=shape3_metadata_cache_mode,
+        shape3_max_staleness_minutes=shape3_max_staleness_minutes,
         read_margin_minutes=read_margin_minutes,
         settle_minutes=settle_minutes,
         outcome_lookback_days=outcome_lookback_days,
@@ -315,7 +323,19 @@ def _render_silver_sql_files(
 ) -> list[tuple[str, str]]:
     ordered: list[tuple[str, str]] = []
     for rel_name in SILVER_SQL_ORDER:
-        rendered = (resolved_sql_dir / rel_name).read_text(encoding="utf-8")
+        if rel_name == "silver/shape3.sql" and silver_params.get("SHAPE3_FORMAT") == "ICEBERG":
+            rendered = (
+                "CREATE EXTERNAL TABLE IF NOT EXISTS "
+                "`${PROJECT_ID}.${SILVER_RESTRICTED_DATASET}.shape3_payloads`\n"
+                "WITH CONNECTION `${PROJECT_ID}.${CONNECTION_ID}`\n"
+                "OPTIONS (\n"
+                "  format = 'ICEBERG',\n"
+                "  uris = ['gs://${PAYLOAD_BUCKET}/${SHAPE3_PREFIX}metadata/v1.metadata.json']"
+                "${SHAPE3_CACHE_OPTIONS}\n"
+                ");\n"
+            )
+        else:
+            rendered = (resolved_sql_dir / rel_name).read_text(encoding="utf-8")
         for key, val in silver_params.items():
             rendered = rendered.replace(f"${{{key}}}", val)
         for idx, stmt in enumerate(split_sql_statements_stdlib(rendered), start=1):
@@ -340,12 +360,15 @@ def render_bootstrap_statements(  # noqa: PLR0913
     silver_ref_dataset: str = "silver_ref",
     silver_open_dataset: str = "silver_open",
     silver_restricted_dataset: str = "silver_restricted",
+    gold_internal_dataset: str = "agent_eval_internal",
     read_margin_minutes: int = 60,
     settle_minutes: int = 5,
     outcome_lookback_days: int = 30,
     gold_lookback_hours: int = 720,
     shape3_prefix: str = "bq-eval/shape3/",
     shape3_format: str = "JSON",
+    shape3_metadata_cache_mode: str = "",
+    shape3_max_staleness_minutes: int = 30,
     flash_judge_endpoint: str = "gemini-3.8-flash",
     argon_judge_endpoint: str = "gemini-4-argon",
     sql_dir: Path | None = None,
@@ -365,6 +388,7 @@ def render_bootstrap_statements(  # noqa: PLR0913
         silver_ref_dataset=silver_ref_dataset,
         silver_open_dataset=silver_open_dataset,
         silver_restricted_dataset=silver_restricted_dataset,
+        gold_internal_dataset=gold_internal_dataset,
         traces_dataset_id=traces_dataset_id,
         platform_traces_dataset_id=platform_traces_dataset_id,
         platform_traces_table_id=platform_traces_table_id,
@@ -373,6 +397,8 @@ def render_bootstrap_statements(  # noqa: PLR0913
         payload_bucket=valid_bucket,
         shape3_prefix=shape3_prefix,
         shape3_format=shape3_format,
+        shape3_metadata_cache_mode=shape3_metadata_cache_mode,
+        shape3_max_staleness_minutes=shape3_max_staleness_minutes,
         read_margin_minutes=read_margin_minutes,
         settle_minutes=settle_minutes,
         outcome_lookback_days=outcome_lookback_days,
@@ -400,12 +426,15 @@ def render_bootstrap_statements(  # noqa: PLR0913
             silver_ref_dataset=silver_ref_dataset,
             silver_open_dataset=silver_open_dataset,
             silver_restricted_dataset=silver_restricted_dataset,
+            gold_internal_dataset=gold_internal_dataset,
             read_margin_minutes=read_margin_minutes,
             settle_minutes=settle_minutes,
             outcome_lookback_days=outcome_lookback_days,
             gold_lookback_hours=gold_lookback_hours,
             shape3_prefix=shape3_prefix,
             shape3_format=shape3_format,
+            shape3_metadata_cache_mode=shape3_metadata_cache_mode,
+            shape3_max_staleness_minutes=shape3_max_staleness_minutes,
             flash_judge_endpoint=flash_judge_endpoint,
             argon_judge_endpoint=argon_judge_endpoint,
         )
@@ -465,6 +494,7 @@ def _validate_gold_statements_offline(  # noqa: PLR0913
     project_id: str,
     silver_internal_dataset: str,
     silver_restricted_dataset: str,
+    gold_internal_dataset: str = "agent_eval_internal",
     traces_dataset_id: str,
     logs_dataset_id: str,
     views: dict[str, str],
@@ -473,6 +503,7 @@ def _validate_gold_statements_offline(  # noqa: PLR0913
     forbidden_open_refs = (
         f"{project_id}.{silver_restricted_dataset}.",
         f"{project_id}.{silver_internal_dataset}.",
+        f"{project_id}.{gold_internal_dataset}.",
         f"{project_id}.{traces_dataset_id}.",
         f"{project_id}.{logs_dataset_id}.",
         "shape3_payloads",
@@ -515,12 +546,15 @@ def validate_bootstrap_offline(  # noqa: PLR0913
     silver_ref_dataset: str = "silver_ref",
     silver_open_dataset: str = "silver_open",
     silver_restricted_dataset: str = "silver_restricted",
+    gold_internal_dataset: str = "agent_eval_internal",
     read_margin_minutes: int = 60,
     settle_minutes: int = 5,
     outcome_lookback_days: int = 30,
     gold_lookback_hours: int = 720,
     shape3_prefix: str = "bq-eval/shape3/",
     shape3_format: str = "JSON",
+    shape3_metadata_cache_mode: str = "",
+    shape3_max_staleness_minutes: int = 30,
     flash_judge_endpoint: str = "gemini-3.8-flash",
     argon_judge_endpoint: str = "gemini-4-argon",
     sql_dir: Path | None = None,
@@ -543,12 +577,15 @@ def validate_bootstrap_offline(  # noqa: PLR0913
         silver_ref_dataset=silver_ref_dataset,
         silver_open_dataset=silver_open_dataset,
         silver_restricted_dataset=silver_restricted_dataset,
+        gold_internal_dataset=gold_internal_dataset,
         read_margin_minutes=read_margin_minutes,
         settle_minutes=settle_minutes,
         outcome_lookback_days=outcome_lookback_days,
         gold_lookback_hours=gold_lookback_hours,
         shape3_prefix=shape3_prefix,
         shape3_format=shape3_format,
+        shape3_metadata_cache_mode=shape3_metadata_cache_mode,
+        shape3_max_staleness_minutes=shape3_max_staleness_minutes,
         flash_judge_endpoint=flash_judge_endpoint,
         argon_judge_endpoint=argon_judge_endpoint,
         sql_dir=resolved_sql_dir,
@@ -602,6 +639,7 @@ def validate_bootstrap_offline(  # noqa: PLR0913
             project_id=project_id,
             silver_internal_dataset=silver_internal_dataset,
             silver_restricted_dataset=silver_restricted_dataset,
+            gold_internal_dataset=gold_internal_dataset,
             traces_dataset_id=traces_dataset_id,
             logs_dataset_id=logs_dataset_id,
             views=views,

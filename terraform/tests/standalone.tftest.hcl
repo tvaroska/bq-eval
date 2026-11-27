@@ -189,3 +189,22 @@ run "reject_invalid_iam_propagation_wait_duration" {
 
   expect_failures = [var.iam_propagation_wait_duration]
 }
+
+run "standalone_parquet_shape3_manual_cache_and_gold_internal" {
+  command = plan
+
+  variables {
+    project_id           = "demo-bq-eval-parq"
+    silver_shape3_format = "PARQUET"
+  }
+
+  assert {
+    condition = (
+      google_bigquery_table.shape3_payloads[0].external_data_configuration[0].metadata_cache_mode == "MANUAL"
+      && google_bigquery_table.shape3_payloads[0].max_staleness == "0-0 0 0:30:0"
+      && length(google_bigquery_dataset.agent_eval_internal) == 1
+      && output.eval_internal_dataset_id == "agent_eval_internal"
+    )
+    error_message = "Parquet Shape-3 must default to MANUAL metadata cache (30m staleness) and provision agent_eval_internal."
+  }
+}

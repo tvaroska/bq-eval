@@ -153,6 +153,7 @@ def test_outcomes_rows() -> None:
             "spans.sql",
             "tool_calls.sql",
             "events.sql",
+            "trace_aux.sql",
             "traces.sql",
             "outcomes.sql",
         ):

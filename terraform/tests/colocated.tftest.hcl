@@ -28,8 +28,8 @@ run "colocated_showcase_adopts_existing_resources" {
   }
 
   assert {
-    condition     = length(google_bigquery_dataset.agent_eval) == 0 && length(data.google_bigquery_dataset.agent_eval) == 1
-    error_message = "Co-located mode must adopt existing agent_eval dataset via data lookup."
+    condition     = length(google_bigquery_dataset.agent_eval) == 0 && length(data.google_bigquery_dataset.agent_eval) == 1 && length(google_bigquery_dataset.agent_eval_internal) == 0 && length(data.google_bigquery_dataset.agent_eval_internal) == 1
+    error_message = "Co-located mode must adopt existing agent_eval and agent_eval_internal datasets via data lookups."
   }
 
   assert {

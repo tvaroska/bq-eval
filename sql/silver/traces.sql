@@ -1,13 +1,11 @@
 -- Silver Traces (`traces_base`, `silver_restricted.traces`, `silver_open.traces_open`; `ADR-034`..`ADR-048`).
+-- Single-pass `span_rollup` + inline `used_skills` check + `tool_calls_base` + `trace_aux_agg` (4 base scans total).
 
 CREATE OR REPLACE TABLE FUNCTION `${PROJECT_ID}.${SILVER_INTERNAL_DATASET}.traces_base`(
   from_time TIMESTAMP,
   to_time TIMESTAMP
 ) AS (
-WITH base_spans AS (
-  SELECT * FROM `${PROJECT_ID}.${SILVER_INTERNAL_DATASET}.spans`(from_time, to_time)
-),
-span_rollup AS (
+WITH span_rollup AS (
   SELECT
     trace_id, MIN(st) AS trace_start_time, MAX(end_time) AS trace_end_time, MAX(receive_time) AS last_span_arrival_time,
     COUNT(*) AS span_count, COUNT(DISTINCT app_id) AS span_app_count,
@@ -102,7 +100,8 @@ span_rollup AS (
     ARRAY_AGG(IF(is_p, caller_app_id, NULL) IGNORE NULLS ORDER BY st, sid LIMIT 1)[SAFE_OFFSET(0)] AS g_capp,
     ARRAY_AGG(IF(is_p AND caller_app_id IS NOT NULL, st, NULL) IGNORE NULLS ORDER BY st, sid LIMIT 1)[SAFE_OFFSET(0)] AS g_cst,
     COUNTIF(parent_span_id IS NOT NULL AND STRPOS(CONCAT('|', COALESCE(all_sids, ''), '|'), CONCAT('|', parent_span_id, '|')) = 0 AND COALESCE(otel_kind, '') NOT IN ('SERVER', 'CONSUMER')) AS mp_c,
-    MAX(IF(is_r AND parent_span_id IS NOT NULL AND STRPOS(CONCAT('|', COALESCE(all_sids, ''), '|'), CONCAT('|', parent_span_id, '|')) = 0, 1, 0)) = 1 AS rpm
+    MAX(IF(is_r AND parent_span_id IS NOT NULL AND STRPOS(CONCAT('|', COALESCE(all_sids, ''), '|'), CONCAT('|', parent_span_id, '|')) = 0, 1, 0)) = 1 AS rpm,
+    ARRAY_AGG(IF(skill_name IS NOT NULL, STRUCT(skill_name, skill_version, st), NULL) IGNORE NULLS) AS used_skills
   FROM (
     SELECT sp.*, sp.start_time AS st, sp.span_id AS sid, (sp.is_model_call IS TRUE) AS is_m, (sp.source_class = 'platform') AS is_p,
       (sp.source_class IS NOT NULL AND ROW_NUMBER() OVER (PARTITION BY sp.trace_id ORDER BY IF(sp.source_class IS NOT NULL, 0, 1), sp.start_time ASC, sp.span_id ASC) = 1) AS is_r,
@@ -110,7 +109,7 @@ span_rollup AS (
       ROW_NUMBER() OVER (PARTITION BY sp.trace_id ORDER BY sp.start_time ASC, sp.span_id ASC) AS e_rn,
       FIRST_VALUE(IF(sp.source_class IS NOT NULL, sp.user_id, NULL)) OVER (PARTITION BY sp.trace_id ORDER BY IF(sp.source_class IS NOT NULL, 0, 1), sp.start_time ASC, sp.span_id ASC) AS tr_uid,
       STRING_AGG(sp.span_id, '|') OVER (PARTITION BY sp.trace_id) AS all_sids
-    FROM base_spans AS sp
+    FROM `${PROJECT_ID}.${SILVER_INTERNAL_DATASET}.spans`(from_time, to_time) AS sp
   ) GROUP BY trace_id
 ),
 tool_agg AS (
@@ -123,112 +122,6 @@ tool_agg AS (
       IF(args_sha256 IS NOT NULL, ROW_NUMBER() OVER (PARTITION BY trace_id, COALESCE(tool_name, ''), args_sha256 ORDER BY start_time ASC, span_id ASC), 0) AS pair_occ
     FROM `${PROJECT_ID}.${SILVER_INTERNAL_DATASET}.tool_calls_base`(from_time, to_time)
   ) GROUP BY trace_id
-),
-event_agg AS (
-  SELECT trace_id, COUNTIF(event_type = 'guardrail.intervention') AS gi_c,
-    MAX(IF(event_type = 'outcome.escalated', 1, 0)) = 1 AS ev_esc
-  FROM (
-    SELECT trace_id, event_type, ROW_NUMBER() OVER (PARTITION BY sc, event_id ORDER BY et ASC) AS rn FROM (
-      SELECT sc, event_id, event_time AS et, event_type, trace_id FROM (
-        SELECT 'system_of_record' AS sc, event_id, event_time, event_type, trace_id FROM `${PROJECT_ID}.${SILVER_INTERNAL_DATASET}.workflow_events_sor`
-        UNION ALL
-        SELECT 'platform' AS sc, event_id, event_time, event_type, trace_id FROM `${PROJECT_ID}.${SILVER_INTERNAL_DATASET}.workflow_events_platform`
-        UNION ALL
-        SELECT 'application' AS sc, event_id, event_time, event_type, trace_id FROM `${PROJECT_ID}.${SILVER_INTERNAL_DATASET}.workflow_events_app`
-      ) WHERE event_time >= from_time AND event_time < TIMESTAMP_ADD(to_time, INTERVAL ${READ_MARGIN_MINUTES} MINUTE) AND event_type IN ('guardrail.intervention', 'outcome.escalated') AND trace_id IS NOT NULL
-      UNION ALL
-      SELECT sc, CONCAT('span:', trace_id, ':', span_id, ':', CAST(ev_idx AS STRING)) AS event_id, SAFE_CAST(ev_time AS TIMESTAMP) AS et, 'guardrail.intervention' AS event_type, trace_id
-      FROM (
-        SELECT 'application' AS sc, s.trace_id, s.span_id, ev.time AS ev_time, ev_idx
-        FROM (
-          SELECT trace_id, span_id, events, ROW_NUMBER() OVER (PARTITION BY trace_id, span_id ORDER BY receive_time DESC, end_time DESC) AS srn
-          FROM `${PROJECT_ID}.${TRACES_DATASET_ID}._AllSpans`
-          WHERE start_time >= TIMESTAMP_SUB(from_time, INTERVAL ${READ_MARGIN_MINUTES} MINUTE) AND start_time < TIMESTAMP_ADD(to_time, INTERVAL ${READ_MARGIN_MINUTES} MINUTE)
-        ) AS s CROSS JOIN UNNEST(s.events) AS ev WITH OFFSET AS ev_idx
-        WHERE s.srn = 1 AND ev.name = 'guardrail.intervention'
-        UNION ALL
-        SELECT 'platform' AS sc, s.trace_id, s.span_id, ev.time AS ev_time, ev_idx
-        FROM (
-          SELECT trace_id, span_id, events, ROW_NUMBER() OVER (PARTITION BY trace_id, span_id ORDER BY receive_time DESC, end_time DESC) AS srn
-          FROM `${PROJECT_ID}.${PLATFORM_TRACES_DATASET_ID}.${PLATFORM_TRACES_TABLE_ID}`
-          WHERE start_time >= TIMESTAMP_SUB(from_time, INTERVAL ${READ_MARGIN_MINUTES} MINUTE) AND start_time < TIMESTAMP_ADD(to_time, INTERVAL ${READ_MARGIN_MINUTES} MINUTE)
-        ) AS s CROSS JOIN UNNEST(s.events) AS ev WITH OFFSET AS ev_idx
-        WHERE s.srn = 1 AND ev.name = 'guardrail.intervention'
-      ) WHERE SAFE_CAST(ev_time AS TIMESTAMP) >= from_time AND SAFE_CAST(ev_time AS TIMESTAMP) < TIMESTAMP_ADD(to_time, INTERVAL ${READ_MARGIN_MINUTES} MINUTE)
-    )
-  ) WHERE rn = 1 GROUP BY trace_id
-),
-raw_inline_inputs AS (
-  SELECT trace_id, span_id,
-    COALESCE(
-      SAFE.PARSE_JSON(JSON_VALUE(attributes, '$."gen_ai.input.messages"')),
-      SAFE.PARSE_JSON(NULLIF(TO_JSON_STRING(JSON_QUERY(attributes, '$."gen_ai.input.messages"')), 'null')),
-      SAFE.PARSE_JSON(NULLIF(TO_JSON_STRING(JSON_QUERY(COALESCE(SAFE.PARSE_JSON(NULLIF(JSON_VALUE(attributes, '$."gcp.vertex.agent.llm_request"'), '{}')), SAFE.PARSE_JSON(NULLIF(TO_JSON_STRING(JSON_QUERY(attributes, '$."gcp.vertex.agent.llm_request"')), 'null'))), '$.contents')), 'null'))
-    ) AS input_msgs,
-    ROW_NUMBER() OVER (PARTITION BY trace_id, span_id ORDER BY src_prio ASC, receive_time DESC, end_time DESC) AS rn
-  FROM (
-    SELECT 1 AS src_prio, trace_id, span_id, receive_time, end_time, attributes FROM `${PROJECT_ID}.${TRACES_DATASET_ID}._AllSpans`
-    WHERE start_time >= TIMESTAMP_SUB(from_time, INTERVAL ${READ_MARGIN_MINUTES} MINUTE) AND start_time < TIMESTAMP_ADD(to_time, INTERVAL ${READ_MARGIN_MINUTES} MINUTE)
-    UNION ALL
-    SELECT 0 AS src_prio, trace_id, span_id, receive_time, end_time, attributes FROM `${PROJECT_ID}.${PLATFORM_TRACES_DATASET_ID}.${PLATFORM_TRACES_TABLE_ID}`
-    WHERE start_time >= TIMESTAMP_SUB(from_time, INTERVAL ${READ_MARGIN_MINUTES} MINUTE) AND start_time < TIMESTAMP_ADD(to_time, INTERVAL ${READ_MARGIN_MINUTES} MINUTE)
-  )
-),
-user_turn_extra AS (
-  SELECT trace_id, MAX(agent_extra) AS extra_user_turns FROM (
-    SELECT trace_id, ag_key,
-      GREATEST(0, COALESCE(ARRAY_AGG(upc ORDER BY start_time DESC, span_id DESC LIMIT 1)[SAFE_OFFSET(0)] - ARRAY_AGG(upc ORDER BY start_time ASC, span_id ASC LIMIT 1)[SAFE_OFFSET(0)], 0)) AS agent_extra
-    FROM (
-      SELECT trace_id, ag_key, span_id, start_time, COUNTIF(is_real_user_msg) AS upc FROM (
-        SELECT s.trace_id, COALESCE(s.agent_name, p.agent_name, s.root_agent_name, '') AS ag_key, s.span_id, s.start_time, msg_idx,
-          (MAX(CASE WHEN JSON_VALUE(msg, '$.role') = 'user' THEN 1 ELSE 0 END) = 1 AND COUNTIF(
-            JSON_VALUE(part, '$.type') = 'tool_call_response'
-            OR NULLIF(TO_JSON_STRING(JSON_QUERY(part, '$.function_response')), 'null') IS NOT NULL
-            OR NULLIF(TO_JSON_STRING(JSON_QUERY(part, '$.functionResponse')), 'null') IS NOT NULL
-          ) = 0) AS is_real_user_msg
-        FROM (
-          SELECT sp.*,
-            FIRST_VALUE(CASE WHEN sp.span_kind = 'agent' THEN sp.agent_name END) OVER (
-              PARTITION BY sp.trace_id
-              ORDER BY CASE WHEN sp.span_kind = 'agent' AND sp.agent_name IS NOT NULL THEN 0 ELSE 1 END, sp.start_time ASC, sp.span_id ASC
-            ) AS root_agent_name
-          FROM base_spans AS sp
-        ) AS s
-        LEFT JOIN base_spans AS p ON p.trace_id = s.trace_id AND p.span_id = s.parent_span_id
-        LEFT JOIN raw_inline_inputs AS ri ON ri.trace_id = s.trace_id AND ri.span_id = s.span_id AND ri.rn = 1
-        LEFT JOIN raw_inline_inputs AS pi ON pi.trace_id = s.trace_id AND pi.span_id = p.span_id AND pi.rn = 1
-        CROSS JOIN UNNEST(JSON_QUERY_ARRAY(COALESCE(ri.input_msgs, CASE WHEN s.operation_name = 'generate_content' AND p.span_name = 'call_llm' THEN pi.input_msgs END))) AS msg WITH OFFSET AS msg_idx
-        CROSS JOIN UNNEST(JSON_QUERY_ARRAY(msg, '$.parts')) AS part
-        WHERE s.is_model_call IS TRUE
-        GROUP BY s.trace_id, ag_key, s.span_id, s.start_time, msg_idx
-      ) GROUP BY trace_id, ag_key, span_id, start_time
-    ) GROUP BY trace_id, ag_key
-  ) GROUP BY trace_id
-),
-skill_checks AS (
-  SELECT s.trace_id, MAX(CASE WHEN sr.skill_name IS NULL THEN 1 ELSE 0 END) = 1 AS unregistered_skill
-  FROM (
-    SELECT sp.trace_id, sp.skill_name, sp.skill_version, sp.start_time,
-      MAX(CASE WHEN sp.source_class = 'platform' AND sp.caller_app_id IS NOT NULL THEN 1 ELSE 0 END) OVER (PARTITION BY sp.trace_id) = 1 AS has_gw_caller,
-      FIRST_VALUE(CASE WHEN sp.source_class = 'platform' AND sp.caller_app_id IS NOT NULL THEN sp.caller_app_id END) OVER (
-        PARTITION BY sp.trace_id
-        ORDER BY CASE WHEN sp.source_class = 'platform' AND sp.caller_app_id IS NOT NULL THEN 0 ELSE 1 END, sp.start_time ASC, sp.span_id ASC
-      ) AS g_capp,
-      FIRST_VALUE(CASE WHEN sp.source_class = 'platform' AND sp.caller_app_id IS NOT NULL THEN sp.start_time END) OVER (
-        PARTITION BY sp.trace_id
-        ORDER BY CASE WHEN sp.source_class = 'platform' AND sp.caller_app_id IS NOT NULL THEN 0 ELSE 1 END, sp.start_time ASC, sp.span_id ASC
-      ) AS g_cst,
-      FIRST_VALUE(CASE WHEN sp.source_class IS NOT NULL THEN sp.app_id END) OVER (PARTITION BY sp.trace_id ORDER BY CASE WHEN sp.source_class IS NOT NULL THEN 0 ELSE 1 END, sp.start_time ASC, sp.span_id ASC) AS r_app
-    FROM base_spans AS sp
-  ) AS s
-  LEFT JOIN `${PROJECT_ID}.${SILVER_REF_DATASET}.app_registry` AS gc_r
-    ON s.has_gw_caller AND s.g_capp IS NOT NULL AND gc_r.app_id = s.g_capp
-    AND gc_r.effective_from <= s.g_cst AND (gc_r.effective_to IS NULL OR s.g_cst < gc_r.effective_to)
-  LEFT JOIN `${PROJECT_ID}.${SILVER_REF_DATASET}.skill_registry` AS sr
-    ON sr.app_id = CASE WHEN s.has_gw_caller THEN gc_r.app_id ELSE s.r_app END
-    AND sr.skill_name = s.skill_name AND (s.skill_version IS NULL OR sr.skill_version = s.skill_version)
-    AND sr.effective_from <= s.start_time AND (sr.effective_to IS NULL OR s.start_time < sr.effective_to)
-  WHERE s.skill_name IS NOT NULL GROUP BY s.trace_id
 ),
 core AS (
   SELECT sa.*,
@@ -275,6 +168,21 @@ core AS (
   LEFT JOIN `${PROJECT_ID}.${SILVER_REF_DATASET}.app_registry` AS r
     ON r.app_id = CASE WHEN sa.has_gw_caller THEN gc_r.app_id ELSE sa.r_app END
     AND r.effective_from <= sa.trace_start_time AND (r.effective_to IS NULL OR sa.trace_start_time < r.effective_to)
+),
+core_sk AS (
+  SELECT
+    c.*,
+    MAX(CASE WHEN sk.skill_name IS NOT NULL AND sr.skill_name IS NULL THEN 1 ELSE 0 END) OVER (PARTITION BY c.trace_id) = 1 AS unregistered_skill,
+    ROW_NUMBER() OVER (PARTITION BY c.trace_id ORDER BY sk.st ASC, sk.skill_name ASC) AS sk_rn
+  FROM core AS c
+  LEFT JOIN UNNEST(c.used_skills) AS sk
+  LEFT JOIN `${PROJECT_ID}.${SILVER_REF_DATASET}.skill_registry` AS sr
+    ON sr.app_id = c.trace_owner_app_id
+    AND sr.skill_name = sk.skill_name
+    AND (sk.skill_version IS NULL OR sr.skill_version = sk.skill_version)
+    AND sr.effective_from <= sk.st
+    AND (sr.effective_to IS NULL OR sk.st < sr.effective_to)
+  WHERE c.oreg_rn = 1
 )
 SELECT
   c.trace_id, c.trace_owner_app_id, c.app_identity_bound, (c.trace_owner_app_id IS NULL) AS unregistered_app,
@@ -299,16 +207,16 @@ SELECT
   c.r_sh AS shadow_of_trace_id, c.r_exp AS experiment_id, c.r_var AS variant_id, c.r_case AS case_id, c.r_erid AS eval_run_id, c.r_espl AS eval_split,
   COALESCE(c.g_skn, c.r_skn, c.e_skn) AS skill_name, COALESCE(c.g_sks, c.r_sks, c.e_sks) AS skill_sha256,
   COALESCE(c.g_pbs, c.r_pbs, c.e_pbs) AS protected_block_sha256, COALESCE(c.g_msk, c.r_msk, c.e_msk) AS mounted_skills,
-  COALESCE(sc.unregistered_skill, FALSE) AS unregistered_skill, COALESCE(c.g_tds, c.r_tds, c.e_ctds, c.e_tds) AS tool_definitions_sha256,
+  COALESCE(c.unregistered_skill, FALSE) AS unregistered_skill, COALESCE(c.g_tds, c.r_tds, c.e_ctds, c.e_tds) AS tool_definitions_sha256,
   COALESCE(c.g_pg, c.r_pg, c.max_pages) AS page_count, COALESCE(c.g_db, c.r_db, c.max_doc_b) AS document_bytes, COALESCE(c.g_as, c.r_as, c.e_as) AS attachment_sha256,
   c.fin_mc AS final_model_confidence, c.min_mc AS min_model_confidence, c.fin_mc_et AS final_confidence_end_time, c.fin_mc_sid AS final_confidence_span_id,
-  (c.m_esc OR COALESCE(ea.ev_esc, FALSE)) AS escalated, c.app_failed, c.e_fr AS app_failure_reason,
+  (c.m_esc OR COALESCE(aux.ev_esc, FALSE)) AS escalated, c.app_failed, c.e_fr AS app_failure_reason,
   COALESCE(c.g_tt, c.r_tt, c.e_tt) AS traffic_type, c.span_count, c.model_call_count,
   COALESCE(ta.tc_c, 0) AS tool_call_count, COALESCE(ta.mt_c, 0) AS mutating_tool_call_count,
   COALESCE(ta.we_c, 0) AS workspace_edit_count, COALESCE(ta.ut_c, 0) AS unregistered_tool_count,
-  COALESCE(ea.gi_c, 0) AS guardrail_intervention_count,
+  COALESCE(aux.gi_c, 0) AS guardrail_intervention_count,
   c.m_cm + COALESCE(ta.t_cm, 0) AS content_missing_call_count,
-  IF(c.is_turn IS FALSE, 0, 1 + COALESCE(ute.extra_user_turns, 0)) AS user_turn_count,
+  IF(c.is_turn IS FALSE, 0, 1 + COALESCE(aux.extra_user_turns, 0)) AS user_turn_count,
   c.dup_c AS duplicate_span_count, COALESCE(ta.rt_c, 0) AS repeated_tool_call_count,
   c.error_count, c.throttle_count, c.m_uid AS missing_user_id_span_count, c.m_oid AS missing_outcome_id_span_count, c.m_cid AS missing_conversation_id_span_count,
   IF(c.model_call_count = 0, CAST(NULL AS INT64), c.sum_in_tok) AS input_tokens,
@@ -318,12 +226,10 @@ SELECT
   IF(c.model_call_count = 0, CAST(NULL AS INT64), c.sum_rs_tok) AS reasoning_output_tokens,
   IF(TO_JSON_STRING(c.rl) = '{}', CAST(NULL AS JSON), c.rl) AS restricted_labels,
   IF(TO_JSON_STRING(c.ol) = '{}', CAST(NULL AS JSON), c.ol) AS open_labels
-FROM core AS c
+FROM core_sk AS c
 LEFT JOIN tool_agg AS ta ON ta.trace_id = c.trace_id
-LEFT JOIN event_agg AS ea ON ea.trace_id = c.trace_id
-LEFT JOIN skill_checks AS sc ON sc.trace_id = c.trace_id
-LEFT JOIN user_turn_extra AS ute ON ute.trace_id = c.trace_id
-WHERE c.oreg_rn = 1
+LEFT JOIN `${PROJECT_ID}.${SILVER_INTERNAL_DATASET}.trace_aux_agg`(from_time, to_time) AS aux ON aux.trace_id = c.trace_id
+WHERE c.sk_rn = 1
 );
 
 CREATE OR REPLACE TABLE FUNCTION `${PROJECT_ID}.${SILVER_RESTRICTED_DATASET}.traces`(

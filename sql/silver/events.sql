@@ -435,11 +435,56 @@ CREATE OR REPLACE TABLE FUNCTION `${PROJECT_ID}.${SILVER_OPEN_DATASET}.outcome_l
   from_time TIMESTAMP,
   to_time TIMESTAMP
 ) AS (
+  -- Direct read of the three `workflow_events_*` copies (zero `_AllSpans` or `_AllLogs` scans).
+  WITH raw_wf AS (
+    SELECT 'system_of_record' AS source_class, event_id, event_time, event_type, source_system,
+      trace_id, span_id, response_id, outcome_id, conversation_id, action_id, nudge_id,
+      control_id, control_layer, control_action, action_args, approved_expires_at,
+      user_id, tenant_id, actor_id, payload_json
+    FROM `${PROJECT_ID}.${SILVER_INTERNAL_DATASET}.workflow_events_sor`
+    WHERE event_time >= from_time AND event_time < to_time
+    UNION ALL
+    SELECT 'platform' AS source_class, event_id, event_time, event_type, source_system,
+      trace_id, span_id, response_id, outcome_id, conversation_id, action_id, nudge_id,
+      control_id, control_layer, control_action, action_args, approved_expires_at,
+      user_id, tenant_id, actor_id, payload_json
+    FROM `${PROJECT_ID}.${SILVER_INTERNAL_DATASET}.workflow_events_platform`
+    WHERE event_time >= from_time AND event_time < to_time
+    UNION ALL
+    SELECT 'application' AS source_class, event_id, event_time, event_type, source_system,
+      trace_id, span_id, response_id, outcome_id, conversation_id, action_id, nudge_id,
+      control_id, control_layer, control_action, action_args, approved_expires_at,
+      user_id, tenant_id, actor_id, payload_json
+    FROM `${PROJECT_ID}.${SILVER_INTERNAL_DATASET}.workflow_events_app`
+    WHERE event_time >= from_time AND event_time < to_time
+  ),
+  ranked AS (
+    SELECT
+      r.event_type,
+      r.outcome_id,
+      JSON_VALUE(r.payload_json, '$.linked_outcome_id') AS linked_outcome_id,
+      ROW_NUMBER() OVER (
+        PARTITION BY r.source_class, r.event_id
+        ORDER BY r.event_time ASC,
+          TO_JSON_STRING(JSON_OBJECT(
+            'action_args', r.action_args, 'action_id', r.action_id, 'actor_id', r.actor_id,
+            'approved_expires_at', FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6S', r.approved_expires_at),
+            'control_action', r.control_action, 'control_id', r.control_id, 'control_layer', r.control_layer,
+            'conversation_id', r.conversation_id, 'event_type', r.event_type, 'nudge_id', r.nudge_id,
+            'outcome_id', r.outcome_id,
+            'payload_json', CASE WHEN r.payload_json IS NOT NULL THEN TO_JSON_STRING(r.payload_json) END,
+            'response_id', r.response_id, 'source_system', r.source_system, 'span_id', r.span_id,
+            'tenant_id', r.tenant_id, 'trace_id', r.trace_id, 'user_id', r.user_id
+          )) ASC
+      ) AS ev_rn
+    FROM raw_wf AS r
+  )
   SELECT DISTINCT
     outcome_id AS primary_outcome_id,
     linked_outcome_id
-  FROM `${PROJECT_ID}.${SILVER_INTERNAL_DATASET}.events_base`(from_time, to_time)
-  WHERE event_type = 'outcome.linked'
+  FROM ranked
+  WHERE ev_rn = 1
+    AND event_type = 'outcome.linked'
     AND outcome_id IS NOT NULL
     AND linked_outcome_id IS NOT NULL
 );

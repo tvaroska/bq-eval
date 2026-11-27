@@ -45,6 +45,7 @@ def _setup_runner(session_user: str = ALL_ADMIN_USER) -> OfflineSqlRunner:
         "model_calls.sql",
         "tool_calls.sql",
         "events.sql",
+        "trace_aux.sql",
         "traces.sql",
         "trace_payloads.sql",
     ):

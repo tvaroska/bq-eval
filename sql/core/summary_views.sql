@@ -144,11 +144,17 @@ ler AS (
 ert AS (SELECT app_id, rubric_id, COUNT(*) AS rc, MAX(judge_model_snapshot_id) AS jsn, MAX(judge_prompt_sha256) AS jps, MAX(rubric_version) AS jrv FROM ler GROUP BY 1, 2),
 jo AS (SELECT outcome_id, LOGICAL_AND(IF(s2, binary_pass, NULL)) AS s2_ok, SUM(jc) AS ej_u FROM dp WHERE outcome_id IS NOT NULL GROUP BY 1),
 jt AS (SELECT trace_id, LOGICAL_AND(IF(s2, binary_pass, NULL)) AS s2_ok, SUM(jc) AS ej_u FROM dp WHERE outcome_id IS NULL GROUP BY 1),
+tpw AS (
+  SELECT trace_id, previous_interaction_id AS tpp,
+    COALESCE(TO_JSON_STRING(prior_history), '') IN ('', 'null') AS eh,
+    NOT (COALESCE(turn_prompt_read_whole, TRUE) AND COALESCE(turn_context_read_whole, TRUE) AND COALESCE(turn_output_read_whole, TRUE) AND COALESCE(step_outputs_read_whole, TRUE) AND (previous_interaction_id IS NOT NULL OR COALESCE(prior_history_read_whole, TRUE))) AS badp
+  FROM `${PROJECT_ID}.${SILVER_RESTRICTED_DATASET}.trace_payloads`(TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL ${GOLD_LOOKBACK_HOURS} HOUR), CURRENT_TIMESTAMP())
+),
 tm AS (
   SELECT
     t.apphub_application_id AS app_id, js.rubric_id AS jmr_id, COALESCE(js.rubric_id, 'groundedness_4pt_v1') AS rubric_id, MIN(t.effective_risk_tier) AS eff_rt,
     COUNT(*) AS tot_t, COUNTIF(t.isp) AS prod_t, COUNTIF(t.pr0) AS pr0_t,
-    COUNTIF(t.pr0 AND t.htp AND (t.badp OR (t.tpp IS NOT NULL AND t.eh AND NOT (t.conversation_id IS NOT NULL AND t.cmts < t.trace_start_time) AND NOT (t.tpp != t.trace_id AND STRPOS(CONCAT('|', COALESCE(t.atp, ''), '|'), CONCAT('|', t.tpp, '|')) > 0)))) AS msess,
+    COUNTIF(t.pr0 AND t.htp AND (t.badp OR (t.tpp IS NOT NULL AND t.eh AND NOT (t.conversation_id IS NOT NULL AND t.cmts < t.trace_start_time) AND NOT t.ptm))) AS msess,
     COUNTIF(t.pr0 AND t.ist) AS tp_c, COUNTIF(t.pr0 AND NOT t.ist) AS hp_c,
     COUNTIF(t.pr0 AND ea.trace_id IS NOT NULL AND t.ist) AS tj_c, AVG(CASE WHEN t.pr0 AND ea.trace_id IS NOT NULL AND t.ist THEN IF(ea.binary_pass, 1.0, 0.0) END) AS t_pr,
     COUNTIF(t.pr0 AND ea.trace_id IS NOT NULL AND NOT t.ist) AS hj_c, AVG(CASE WHEN t.pr0 AND ea.trace_id IS NOT NULL AND NOT t.ist THEN IF(ea.binary_pass, 1.0, 0.0) END) AS h_pr,
@@ -162,16 +168,16 @@ tm AS (
     IF(COUNTIF(t.optimize_usd IS NULL) > 0, CAST(NULL AS FLOAT64), SUM(t.optimize_usd)) AS op_u,
     IF(COUNTIF(t.unclassified_usd IS NULL) > 0, CAST(NULL AS FLOAT64), SUM(t.unclassified_usd)) AS un_u
   FROM (
-    SELECT b.*, MIN(IF(b.htp, b.trace_start_time, NULL)) OVER (PARTITION BY b.conversation_id) AS cmts, STRING_AGG(IF(b.htp, b.trace_id, NULL), '|') OVER () AS atp
+    SELECT b.*, MIN(IF(b.htp, b.trace_start_time, NULL)) OVER (PARTITION BY b.conversation_id) AS cmts
     FROM (
       SELECT te.*,
         te.primary_traffic_type IN ('production_inference', 'conflict_escalation') AS isp,
         (te.primary_traffic_type IN ('production_inference', 'conflict_escalation') AND te.rule0_pass) AS pr0,
-        (te.is_loop_or_error_tail OR te.is_healthy_slow_tail) AS ist, tp.trace_id IS NOT NULL AS htp, tp.previous_interaction_id AS tpp,
-        COALESCE(TO_JSON_STRING(tp.prior_history), '') IN ('', 'null') AS eh,
-        NOT (COALESCE(tp.turn_prompt_read_whole, TRUE) AND COALESCE(tp.turn_context_read_whole, TRUE) AND COALESCE(tp.turn_output_read_whole, TRUE) AND COALESCE(tp.step_outputs_read_whole, TRUE) AND (tp.previous_interaction_id IS NOT NULL OR COALESCE(tp.prior_history_read_whole, TRUE))) AS badp
+        (te.is_loop_or_error_tail OR te.is_healthy_slow_tail) AS ist, tp.trace_id IS NOT NULL AS htp, tp.tpp,
+        (ptp.trace_id IS NOT NULL) AS ptm, tp.eh, tp.badp
       FROM `agent_eval.v_trace_sql_evaluation` AS te
-      LEFT JOIN `${PROJECT_ID}.${SILVER_RESTRICTED_DATASET}.trace_payloads`(TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL ${GOLD_LOOKBACK_HOURS} HOUR), CURRENT_TIMESTAMP()) AS tp ON te.trace_id = tp.trace_id
+      LEFT JOIN tpw AS tp ON te.trace_id = tp.trace_id
+      LEFT JOIN (SELECT DISTINCT trace_id FROM tpw) AS ptp ON tp.tpp IS NOT NULL AND tp.tpp != te.trace_id AND ptp.trace_id = tp.tpp
     ) AS b
   ) AS t
   LEFT JOIN js ON t.apphub_application_id = js.app_id

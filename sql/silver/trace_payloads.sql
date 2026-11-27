@@ -1,21 +1,19 @@
 -- Silver Restricted `trace_payloads` Table Function (`ADR-020`, `ADR-036`, `ADR-044`, `ADR-045`, `ADR-048`).
--- One row per content-bearing turn across ADK Format 1 inline, OTel GenAI inline, and Shape-3 BigLake
+-- Single-pass trace-grouped span & payload rollups across ADK Format 1 inline, OTel GenAI inline, and Shape-3 BigLake
 -- with static Hive `dt`/`hr` pruning, split single-pass input/output BigLake joins, and structured part checks.
 
 CREATE OR REPLACE TABLE FUNCTION `${PROJECT_ID}.${SILVER_RESTRICTED_DATASET}.trace_payloads`(
   from_time TIMESTAMP,
   to_time TIMESTAMP
 ) AS (
-  WITH base_spans AS (
-    SELECT *
-    FROM `${PROJECT_ID}.${SILVER_INTERNAL_DATASET}.spans`(from_time, to_time)
-  ),
-  trace_rollup AS (
+  WITH trace_rollup AS (
     SELECT
       s.trace_id,
       MIN(s.start_time) AS trace_start_time,
       MAX(CASE WHEN s.span_kind IN ('agent', 'model_call', 'embedding', 'tool_call', 'retrieval', 'memory') OR s.is_model_call IS TRUE THEN 1 ELSE 0 END) = 1 AS is_turn,
       MAX(CASE WHEN s.source_class = 'platform' AND s.caller_app_id IS NOT NULL THEN 1 ELSE 0 END) = 1 AS has_gw_caller,
+      ARRAY_AGG(CASE WHEN s.source_class = 'platform' THEN s.caller_app_id END IGNORE NULLS ORDER BY s.start_time, s.span_id LIMIT 1)[SAFE_OFFSET(0)] AS g_capp,
+      ARRAY_AGG(CASE WHEN s.source_class = 'platform' AND s.caller_app_id IS NOT NULL THEN s.start_time END IGNORE NULLS ORDER BY s.start_time, s.span_id LIMIT 1)[SAFE_OFFSET(0)] AS g_cst,
       MAX(CASE WHEN s.root_rn = 1 AND s.source_class IS NOT NULL THEN s.app_id END) AS root_app_id,
       MAX(CASE WHEN s.root_rn = 1 AND s.source_class IS NOT NULL THEN s.tenant_id END) AS root_tenant_id,
       MAX(CASE WHEN s.root_rn = 1 AND s.source_class IS NOT NULL THEN s.previous_interaction_id END) AS root_prev,
@@ -42,35 +40,30 @@ CREATE OR REPLACE TABLE FUNCTION `${PROJECT_ID}.${SILVER_RESTRICTED_DATASET}.tra
       ARRAY_AGG(JSON_VALUE(s.labels, '$.mcp_method_name') IGNORE NULLS ORDER BY s.start_time, s.span_id LIMIT 1)[SAFE_OFFSET(0)] AS e_mcp,
       ARRAY_AGG(JSON_VALUE(s.labels, '$.a2a_task_id') IGNORE NULLS ORDER BY s.start_time, s.span_id LIMIT 1)[SAFE_OFFSET(0)] AS e_a2a_id,
       ARRAY_AGG(JSON_VALUE(s.labels, '$.a2a_task_state') IGNORE NULLS ORDER BY s.start_time, s.span_id LIMIT 1)[SAFE_OFFSET(0)] AS e_a2a_st,
-      ARRAY_AGG(JSON_VALUE(s.labels, '$.adk_invocation_id') IGNORE NULLS ORDER BY s.start_time, s.span_id LIMIT 1)[SAFE_OFFSET(0)] AS e_adk_id
+      ARRAY_AGG(JSON_VALUE(s.labels, '$.adk_invocation_id') IGNORE NULLS ORDER BY s.start_time, s.span_id LIMIT 1)[SAFE_OFFSET(0)] AS e_adk_id,
+      ARRAY_AGG(STRUCT(s.span_id, s.parent_span_id, s.span_name, s.span_kind, s.agent_name)) AS anc_spans,
+      ARRAY_AGG(
+        IF(
+          s.is_model_call IS TRUE AND s.span_kind != 'embedding',
+          STRUCT(s.span_id, s.parent_span_id, s.start_time, s.end_time, s.nudge_id, s.operation_name, s.agent_name),
+          NULL
+        ) IGNORE NULLS
+      ) AS model_spans
     FROM (
       SELECT sp.*, ROW_NUMBER() OVER (PARTITION BY sp.trace_id ORDER BY CASE WHEN sp.source_class IS NOT NULL THEN 0 ELSE 1 END, sp.start_time ASC, sp.span_id ASC) AS root_rn
-      FROM base_spans AS sp
+      FROM `${PROJECT_ID}.${SILVER_INTERNAL_DATASET}.spans`(from_time, to_time) AS sp
     ) AS s
     GROUP BY s.trace_id
-  ),
-  gateway_caller AS (
-    SELECT trace_id, resolved_caller_app_id
-    FROM (
-      SELECT
-        s.trace_id, r.app_id AS resolved_caller_app_id,
-        ROW_NUMBER() OVER (PARTITION BY s.trace_id ORDER BY s.start_time ASC, s.span_id ASC, r.effective_from DESC) AS rn
-      FROM base_spans AS s
-      JOIN `${PROJECT_ID}.${SILVER_REF_DATASET}.app_registry` AS r
-        ON r.app_id = s.caller_app_id AND r.effective_from <= s.start_time AND (r.effective_to IS NULL OR s.start_time < r.effective_to)
-      WHERE s.source_class = 'platform' AND s.caller_app_id IS NOT NULL
-    )
-    WHERE rn = 1
   ),
   allowed_traces AS (
     SELECT
       t.trace_id, t.trace_owner_app_id, t.business_unit, t.tenant_id, t.previous_interaction_id, t.is_turn,
-      t.page_count, t.document_bytes, t.attachment_sha256, t.root_agent_name,
+      t.page_count, t.document_bytes, t.attachment_sha256, t.root_agent_name, t.anc_spans, t.model_spans,
       CASE WHEN TO_JSON_STRING(t.rl) = '{}' THEN CAST(NULL AS JSON) ELSE t.rl END AS restricted_labels
     FROM (
       SELECT
         tr.trace_id,
-        CASE WHEN tr.has_gw_caller THEN gc.resolved_caller_app_id ELSE tr.root_app_id END AS trace_owner_app_id,
+        CASE WHEN tr.has_gw_caller THEN gc_r.app_id ELSE tr.root_app_id END AS trace_owner_app_id,
         r.business_unit,
         COALESCE(tr.g_tenant_id, tr.root_tenant_id, tr.e_tenant_id) AS tenant_id,
         COALESCE(tr.root_prev, tr.e_call_prev, tr.e_prev) AS previous_interaction_id,
@@ -78,7 +71,7 @@ CREATE OR REPLACE TABLE FUNCTION `${PROJECT_ID}.${SILVER_RESTRICTED_DATASET}.tra
         COALESCE(tr.g_pages, tr.root_pages, tr.max_pages) AS page_count,
         COALESCE(tr.g_doc_b, tr.root_doc_b, tr.max_doc_b) AS document_bytes,
         COALESCE(tr.g_att_sha, tr.root_att_sha, tr.e_att_sha) AS attachment_sha256,
-        tr.root_agent_name,
+        tr.root_agent_name, tr.anc_spans, tr.model_spans,
         JSON_STRIP_NULLS(JSON_OBJECT(
           'apphub_service_id', JSON_VALUE(tr.root_labels, '$.apphub_service_id'),
           'apphub_workload_id', JSON_VALUE(tr.root_labels, '$.apphub_workload_id'),
@@ -99,11 +92,13 @@ CREATE OR REPLACE TABLE FUNCTION `${PROJECT_ID}.${SILVER_RESTRICTED_DATASET}.tra
           'telemetry_sdk_name', JSON_VALUE(tr.root_labels, '$.telemetry_sdk_name'),
           'telemetry_sdk_version', JSON_VALUE(tr.root_labels, '$.telemetry_sdk_version')
         )) AS rl,
-        ROW_NUMBER() OVER (PARTITION BY tr.trace_id ORDER BY r.effective_from DESC) AS rn
+        ROW_NUMBER() OVER (PARTITION BY tr.trace_id ORDER BY gc_r.effective_from DESC, r.effective_from DESC) AS rn
       FROM trace_rollup AS tr
-      LEFT JOIN gateway_caller AS gc ON gc.trace_id = tr.trace_id
+      LEFT JOIN `${PROJECT_ID}.${SILVER_REF_DATASET}.app_registry` AS gc_r
+        ON tr.has_gw_caller AND tr.g_capp IS NOT NULL AND gc_r.app_id = tr.g_capp
+        AND gc_r.effective_from <= tr.g_cst AND (gc_r.effective_to IS NULL OR tr.g_cst < gc_r.effective_to)
       LEFT JOIN `${PROJECT_ID}.${SILVER_REF_DATASET}.app_registry` AS r
-        ON r.app_id = CASE WHEN tr.has_gw_caller THEN gc.resolved_caller_app_id ELSE tr.root_app_id END
+        ON r.app_id = CASE WHEN tr.has_gw_caller THEN gc_r.app_id ELSE tr.root_app_id END
         AND r.effective_from <= tr.trace_start_time AND (r.effective_to IS NULL OR tr.trace_start_time < r.effective_to)
     ) AS t
     WHERE t.rn = 1 AND t.is_turn IS TRUE
@@ -115,16 +110,50 @@ CREATE OR REPLACE TABLE FUNCTION `${PROJECT_ID}.${SILVER_RESTRICTED_DATASET}.tra
           AND (ue.tenant_id = '*' OR ue.tenant_id = t.tenant_id)
       )
   ),
-  raw_spans AS (
-    SELECT trace_id, span_id, attributes,
-      ROW_NUMBER() OVER (PARTITION BY trace_id, span_id ORDER BY src_prio ASC, receive_time DESC, end_time DESC) AS rn
+  raw_by_trace AS (
+    SELECT
+      trace_id,
+      ARRAY_AGG(
+        STRUCT(
+          span_id, input_ref, output_ref, sys_ref, tools_ref,
+          otel_in, otel_out, otel_sys, otel_tools, adk_in, adk_out, adk_sys, adk_tools
+        )
+      ) AS raw_arr
     FROM (
-      SELECT 1 AS src_prio, trace_id, span_id, receive_time, end_time, attributes FROM `${PROJECT_ID}.${TRACES_DATASET_ID}._AllSpans`
-      WHERE start_time >= TIMESTAMP_SUB(from_time, INTERVAL ${READ_MARGIN_MINUTES} MINUTE) AND start_time < TIMESTAMP_ADD(to_time, INTERVAL ${READ_MARGIN_MINUTES} MINUTE)
-      UNION ALL
-      SELECT 0 AS src_prio, trace_id, span_id, receive_time, end_time, attributes FROM `${PROJECT_ID}.${PLATFORM_TRACES_DATASET_ID}.${PLATFORM_TRACES_TABLE_ID}`
-      WHERE start_time >= TIMESTAMP_SUB(from_time, INTERVAL ${READ_MARGIN_MINUTES} MINUTE) AND start_time < TIMESTAMP_ADD(to_time, INTERVAL ${READ_MARGIN_MINUTES} MINUTE)
+      SELECT
+        trace_id, span_id,
+        JSON_VALUE(attributes, '$."gen_ai.input.messages_ref"') AS input_ref,
+        JSON_VALUE(attributes, '$."gen_ai.output.messages_ref"') AS output_ref,
+        JSON_VALUE(attributes, '$."gen_ai.system_instructions_ref"') AS sys_ref,
+        JSON_VALUE(attributes, '$."gen_ai.tool.definitions_ref"') AS tools_ref,
+        COALESCE(SAFE.PARSE_JSON(JSON_VALUE(attributes, '$."gen_ai.input.messages"')), SAFE.PARSE_JSON(NULLIF(TO_JSON_STRING(JSON_QUERY(attributes, '$."gen_ai.input.messages"')), 'null'))) AS otel_in,
+        COALESCE(SAFE.PARSE_JSON(JSON_VALUE(attributes, '$."gen_ai.output.messages"')), SAFE.PARSE_JSON(NULLIF(TO_JSON_STRING(JSON_QUERY(attributes, '$."gen_ai.output.messages"')), 'null'))) AS otel_out,
+        COALESCE(SAFE.PARSE_JSON(JSON_VALUE(attributes, '$."gen_ai.system_instructions"')), SAFE.PARSE_JSON(NULLIF(TO_JSON_STRING(JSON_QUERY(attributes, '$."gen_ai.system_instructions"')), 'null'))) AS otel_sys,
+        COALESCE(SAFE.PARSE_JSON(JSON_VALUE(attributes, '$."gen_ai.tool.definitions"')), SAFE.PARSE_JSON(NULLIF(TO_JSON_STRING(JSON_QUERY(attributes, '$."gen_ai.tool.definitions"')), 'null'))) AS otel_tools,
+        SAFE.PARSE_JSON(NULLIF(TO_JSON_STRING(JSON_QUERY(COALESCE(SAFE.PARSE_JSON(NULLIF(JSON_VALUE(attributes, '$."gcp.vertex.agent.llm_request"'), '{}')), SAFE.PARSE_JSON(NULLIF(TO_JSON_STRING(JSON_QUERY(attributes, '$."gcp.vertex.agent.llm_request"')), 'null'))), '$.contents')), 'null')) AS adk_in,
+        CASE
+          WHEN NULLIF(TO_JSON_STRING(JSON_QUERY(COALESCE(SAFE.PARSE_JSON(NULLIF(JSON_VALUE(attributes, '$."gcp.vertex.agent.llm_response"'), '{}')), SAFE.PARSE_JSON(NULLIF(TO_JSON_STRING(JSON_QUERY(attributes, '$."gcp.vertex.agent.llm_response"')), 'null'))), '$.content')), 'null') IS NOT NULL
+          THEN SAFE.PARSE_JSON(CONCAT('[', TO_JSON_STRING(JSON_QUERY(COALESCE(SAFE.PARSE_JSON(NULLIF(JSON_VALUE(attributes, '$."gcp.vertex.agent.llm_response"'), '{}')), SAFE.PARSE_JSON(NULLIF(TO_JSON_STRING(JSON_QUERY(attributes, '$."gcp.vertex.agent.llm_response"')), 'null'))), '$.content')), ']'))
+        END AS adk_out,
+        SAFE.PARSE_JSON(NULLIF(TO_JSON_STRING(JSON_QUERY(COALESCE(SAFE.PARSE_JSON(NULLIF(JSON_VALUE(attributes, '$."gcp.vertex.agent.llm_request"'), '{}')), SAFE.PARSE_JSON(NULLIF(TO_JSON_STRING(JSON_QUERY(attributes, '$."gcp.vertex.agent.llm_request"')), 'null'))), '$.config.system_instruction')), 'null')) AS adk_sys,
+        SAFE.PARSE_JSON(NULLIF(TO_JSON_STRING(JSON_QUERY(COALESCE(SAFE.PARSE_JSON(NULLIF(JSON_VALUE(attributes, '$."gcp.vertex.agent.llm_request"'), '{}')), SAFE.PARSE_JSON(NULLIF(TO_JSON_STRING(JSON_QUERY(attributes, '$."gcp.vertex.agent.llm_request"')), 'null'))), '$.config.tools')), 'null')) AS adk_tools
+      FROM (
+        SELECT trace_id, span_id, attributes,
+          ROW_NUMBER() OVER (PARTITION BY trace_id, span_id ORDER BY src_prio ASC, receive_time DESC, end_time DESC) AS rn
+        FROM (
+          SELECT 1 AS src_prio, trace_id, span_id, receive_time, end_time, attributes FROM `${PROJECT_ID}.${TRACES_DATASET_ID}._AllSpans`
+          WHERE start_time >= TIMESTAMP_SUB(from_time, INTERVAL ${READ_MARGIN_MINUTES} MINUTE) AND start_time < TIMESTAMP_ADD(to_time, INTERVAL ${READ_MARGIN_MINUTES} MINUTE)
+          UNION ALL
+          SELECT 0 AS src_prio, trace_id, span_id, receive_time, end_time, attributes FROM `${PROJECT_ID}.${PLATFORM_TRACES_DATASET_ID}.${PLATFORM_TRACES_TABLE_ID}`
+          WHERE start_time >= TIMESTAMP_SUB(from_time, INTERVAL ${READ_MARGIN_MINUTES} MINUTE) AND start_time < TIMESTAMP_ADD(to_time, INTERVAL ${READ_MARGIN_MINUTES} MINUTE)
+        )
+      )
+      WHERE rn = 1
     )
+    WHERE input_ref IS NOT NULL OR output_ref IS NOT NULL OR sys_ref IS NOT NULL OR tools_ref IS NOT NULL
+      OR otel_in IS NOT NULL OR otel_out IS NOT NULL OR otel_sys IS NOT NULL OR otel_tools IS NOT NULL
+      OR adk_in IS NOT NULL OR adk_out IS NOT NULL OR adk_sys IS NOT NULL OR adk_tools IS NOT NULL
+    GROUP BY trace_id
   ),
   shape3_window AS (
     SELECT ref_uri, payload
@@ -144,7 +173,7 @@ CREATE OR REPLACE TABLE FUNCTION `${PROJECT_ID}.${SILVER_RESTRICTED_DATASET}.tra
       ) AS call_rn
     FROM (
       SELECT
-        s.trace_id, s.span_id, s.start_time, s.end_time, s.nudge_id,
+        alt.trace_id, s.span_id, s.start_time, s.end_time, s.nudge_id,
         alt.root_agent_name, alt.document_bytes, alt.page_count, alt.attachment_sha256,
         COALESCE(
           s.agent_name,
@@ -152,75 +181,21 @@ CREATE OR REPLACE TABLE FUNCTION `${PROJECT_ID}.${SILVER_RESTRICTED_DATASET}.tra
           CASE WHEN p2.span_kind = 'agent' THEN p2.agent_name END,
           p1.agent_name, p2.agent_name
         ) AS agent_name,
-        COALESCE(JSON_VALUE(rs.attributes, '$."gen_ai.input.messages_ref"'), CASE WHEN s.operation_name = 'generate_content' AND p1.span_name = 'call_llm' THEN JSON_VALUE(prs.attributes, '$."gen_ai.input.messages_ref"') END) AS input_ref,
-        COALESCE(JSON_VALUE(rs.attributes, '$."gen_ai.output.messages_ref"'), CASE WHEN s.operation_name = 'generate_content' AND p1.span_name = 'call_llm' THEN JSON_VALUE(prs.attributes, '$."gen_ai.output.messages_ref"') END) AS output_ref,
-        COALESCE(JSON_VALUE(rs.attributes, '$."gen_ai.system_instructions_ref"'), CASE WHEN s.operation_name = 'generate_content' AND p1.span_name = 'call_llm' THEN JSON_VALUE(prs.attributes, '$."gen_ai.system_instructions_ref"') END) AS system_instructions_ref,
-        COALESCE(JSON_VALUE(rs.attributes, '$."gen_ai.tool.definitions_ref"'), CASE WHEN s.operation_name = 'generate_content' AND p1.span_name = 'call_llm' THEN JSON_VALUE(prs.attributes, '$."gen_ai.tool.definitions_ref"') END) AS tool_definitions_ref,
-        COALESCE(
-          SAFE.PARSE_JSON(JSON_VALUE(rs.attributes, '$."gen_ai.input.messages"')),
-          SAFE.PARSE_JSON(NULLIF(TO_JSON_STRING(JSON_QUERY(rs.attributes, '$."gen_ai.input.messages"')), 'null')),
-          SAFE.PARSE_JSON(NULLIF(TO_JSON_STRING(JSON_QUERY(
-            COALESCE(
-              SAFE.PARSE_JSON(NULLIF(JSON_VALUE(rs.attributes, '$."gcp.vertex.agent.llm_request"'), '{}')),
-              SAFE.PARSE_JSON(NULLIF(TO_JSON_STRING(JSON_QUERY(rs.attributes, '$."gcp.vertex.agent.llm_request"')), 'null')),
-              CASE WHEN s.operation_name = 'generate_content' AND p1.span_name = 'call_llm' THEN
-                COALESCE(SAFE.PARSE_JSON(NULLIF(JSON_VALUE(prs.attributes, '$."gcp.vertex.agent.llm_request"'), '{}')), SAFE.PARSE_JSON(NULLIF(TO_JSON_STRING(JSON_QUERY(prs.attributes, '$."gcp.vertex.agent.llm_request"')), 'null')))
-              END
-            ), '$.contents')), 'null'))
-        ) AS inline_input_messages,
-        COALESCE(
-          SAFE.PARSE_JSON(JSON_VALUE(rs.attributes, '$."gen_ai.output.messages"')),
-          SAFE.PARSE_JSON(NULLIF(TO_JSON_STRING(JSON_QUERY(rs.attributes, '$."gen_ai.output.messages"')), 'null')),
-          CASE
-            WHEN NULLIF(TO_JSON_STRING(JSON_QUERY(
-              COALESCE(
-                SAFE.PARSE_JSON(NULLIF(JSON_VALUE(rs.attributes, '$."gcp.vertex.agent.llm_response"'), '{}')),
-                SAFE.PARSE_JSON(NULLIF(TO_JSON_STRING(JSON_QUERY(rs.attributes, '$."gcp.vertex.agent.llm_response"')), 'null')),
-                CASE WHEN s.operation_name = 'generate_content' AND p1.span_name = 'call_llm' THEN
-                  COALESCE(SAFE.PARSE_JSON(NULLIF(JSON_VALUE(prs.attributes, '$."gcp.vertex.agent.llm_response"'), '{}')), SAFE.PARSE_JSON(NULLIF(TO_JSON_STRING(JSON_QUERY(prs.attributes, '$."gcp.vertex.agent.llm_response"')), 'null')))
-                END
-              ), '$.content')), 'null') IS NOT NULL
-            THEN SAFE.PARSE_JSON(CONCAT('[', TO_JSON_STRING(JSON_QUERY(
-              COALESCE(
-                SAFE.PARSE_JSON(NULLIF(JSON_VALUE(rs.attributes, '$."gcp.vertex.agent.llm_response"'), '{}')),
-                SAFE.PARSE_JSON(NULLIF(TO_JSON_STRING(JSON_QUERY(rs.attributes, '$."gcp.vertex.agent.llm_response"')), 'null')),
-                CASE WHEN s.operation_name = 'generate_content' AND p1.span_name = 'call_llm' THEN
-                  COALESCE(SAFE.PARSE_JSON(NULLIF(JSON_VALUE(prs.attributes, '$."gcp.vertex.agent.llm_response"'), '{}')), SAFE.PARSE_JSON(NULLIF(TO_JSON_STRING(JSON_QUERY(prs.attributes, '$."gcp.vertex.agent.llm_response"')), 'null')))
-                END
-              ), '$.content')), ']'))
-          END
-        ) AS inline_output_messages,
-        COALESCE(
-          SAFE.PARSE_JSON(JSON_VALUE(rs.attributes, '$."gen_ai.system_instructions"')),
-          SAFE.PARSE_JSON(NULLIF(TO_JSON_STRING(JSON_QUERY(rs.attributes, '$."gen_ai.system_instructions"')), 'null')),
-          SAFE.PARSE_JSON(NULLIF(TO_JSON_STRING(JSON_QUERY(
-            COALESCE(
-              SAFE.PARSE_JSON(NULLIF(JSON_VALUE(rs.attributes, '$."gcp.vertex.agent.llm_request"'), '{}')),
-              SAFE.PARSE_JSON(NULLIF(TO_JSON_STRING(JSON_QUERY(rs.attributes, '$."gcp.vertex.agent.llm_request"')), 'null')),
-              CASE WHEN s.operation_name = 'generate_content' AND p1.span_name = 'call_llm' THEN
-                COALESCE(SAFE.PARSE_JSON(NULLIF(JSON_VALUE(prs.attributes, '$."gcp.vertex.agent.llm_request"'), '{}')), SAFE.PARSE_JSON(NULLIF(TO_JSON_STRING(JSON_QUERY(prs.attributes, '$."gcp.vertex.agent.llm_request"')), 'null')))
-              END
-            ), '$.config.system_instruction')), 'null'))
-        ) AS inline_system_instructions,
-        COALESCE(
-          SAFE.PARSE_JSON(JSON_VALUE(rs.attributes, '$."gen_ai.tool.definitions"')),
-          SAFE.PARSE_JSON(NULLIF(TO_JSON_STRING(JSON_QUERY(rs.attributes, '$."gen_ai.tool.definitions"')), 'null')),
-          SAFE.PARSE_JSON(NULLIF(TO_JSON_STRING(JSON_QUERY(
-            COALESCE(
-              SAFE.PARSE_JSON(NULLIF(JSON_VALUE(rs.attributes, '$."gcp.vertex.agent.llm_request"'), '{}')),
-              SAFE.PARSE_JSON(NULLIF(TO_JSON_STRING(JSON_QUERY(rs.attributes, '$."gcp.vertex.agent.llm_request"')), 'null')),
-              CASE WHEN s.operation_name = 'generate_content' AND p1.span_name = 'call_llm' THEN
-                COALESCE(SAFE.PARSE_JSON(NULLIF(JSON_VALUE(prs.attributes, '$."gcp.vertex.agent.llm_request"'), '{}')), SAFE.PARSE_JSON(NULLIF(TO_JSON_STRING(JSON_QUERY(prs.attributes, '$."gcp.vertex.agent.llm_request"')), 'null')))
-              END
-            ), '$.config.tools')), 'null'))
-        ) AS inline_tool_definitions
-      FROM base_spans AS s
-      JOIN allowed_traces AS alt ON alt.trace_id = s.trace_id
-      LEFT JOIN base_spans AS p1 ON p1.trace_id = s.trace_id AND p1.span_id = s.parent_span_id
-      LEFT JOIN base_spans AS p2 ON p2.trace_id = s.trace_id AND p2.span_id = p1.parent_span_id
-      LEFT JOIN raw_spans AS rs ON rs.trace_id = s.trace_id AND rs.span_id = s.span_id AND rs.rn = 1
-      LEFT JOIN raw_spans AS prs ON prs.trace_id = s.trace_id AND prs.span_id = p1.span_id AND prs.rn = 1
-      WHERE s.is_model_call IS TRUE AND s.span_kind != 'embedding'
+        COALESCE(rs.input_ref, CASE WHEN s.operation_name = 'generate_content' AND p1.span_name = 'call_llm' THEN prs.input_ref END) AS input_ref,
+        COALESCE(rs.output_ref, CASE WHEN s.operation_name = 'generate_content' AND p1.span_name = 'call_llm' THEN prs.output_ref END) AS output_ref,
+        COALESCE(rs.sys_ref, CASE WHEN s.operation_name = 'generate_content' AND p1.span_name = 'call_llm' THEN prs.sys_ref END) AS system_instructions_ref,
+        COALESCE(rs.tools_ref, CASE WHEN s.operation_name = 'generate_content' AND p1.span_name = 'call_llm' THEN prs.tools_ref END) AS tool_definitions_ref,
+        COALESCE(rs.otel_in, rs.adk_in, CASE WHEN s.operation_name = 'generate_content' AND p1.span_name = 'call_llm' THEN prs.adk_in END) AS inline_input_messages,
+        COALESCE(rs.otel_out, rs.adk_out, CASE WHEN s.operation_name = 'generate_content' AND p1.span_name = 'call_llm' THEN prs.adk_out END) AS inline_output_messages,
+        COALESCE(rs.otel_sys, rs.adk_sys, CASE WHEN s.operation_name = 'generate_content' AND p1.span_name = 'call_llm' THEN prs.adk_sys END) AS inline_system_instructions,
+        COALESCE(rs.otel_tools, rs.adk_tools, CASE WHEN s.operation_name = 'generate_content' AND p1.span_name = 'call_llm' THEN prs.adk_tools END) AS inline_tool_definitions
+      FROM allowed_traces AS alt
+      CROSS JOIN UNNEST(alt.model_spans) AS s
+      LEFT JOIN UNNEST(alt.anc_spans) AS p1 ON p1.span_id = s.parent_span_id
+      LEFT JOIN UNNEST(alt.anc_spans) AS p2 ON p2.span_id = p1.parent_span_id
+      LEFT JOIN raw_by_trace AS rbt ON rbt.trace_id = alt.trace_id
+      LEFT JOIN UNNEST(rbt.raw_arr) AS rs ON rs.span_id = s.span_id
+      LEFT JOIN UNNEST(rbt.raw_arr) AS prs ON prs.span_id = p1.span_id
     ) AS mc
   ),
   -- Single Shape-3 BigLake pass for inputs (first-call metadata, prior_history, turn_prompt, media_uris).

@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS `${PROJECT_ID}.${SILVER_INTERNAL_DATASET}.workflow_ev
   payload_json JSON
 )
 PARTITION BY DATE(event_time)
-CLUSTER BY outcome_id, action_id;
+CLUSTER BY event_type, outcome_id, trace_id, action_id;
 
 CREATE TABLE IF NOT EXISTS `${PROJECT_ID}.${SILVER_INTERNAL_DATASET}.workflow_events_platform` (
   event_id STRING NOT NULL,
@@ -49,7 +49,7 @@ CREATE TABLE IF NOT EXISTS `${PROJECT_ID}.${SILVER_INTERNAL_DATASET}.workflow_ev
   payload_json JSON
 )
 PARTITION BY DATE(event_time)
-CLUSTER BY outcome_id, action_id;
+CLUSTER BY event_type, outcome_id, trace_id, action_id;
 
 CREATE TABLE IF NOT EXISTS `${PROJECT_ID}.${SILVER_INTERNAL_DATASET}.workflow_events_app` (
   event_id STRING NOT NULL,
@@ -74,4 +74,4 @@ CREATE TABLE IF NOT EXISTS `${PROJECT_ID}.${SILVER_INTERNAL_DATASET}.workflow_ev
   payload_json JSON
 )
 PARTITION BY DATE(event_time)
-CLUSTER BY outcome_id, action_id;
+CLUSTER BY event_type, outcome_id, trace_id, action_id;

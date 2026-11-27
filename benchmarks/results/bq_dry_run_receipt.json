@@ -1,5 +1,5 @@
 {
-  "checked": 104,
+  "checked": 114,
   "generated_statements": [
     "build_ai_generate_table_judge_sql",
     "build_ai_evaluate_agent_sql"
@@ -13,14 +13,24 @@
       "total": 14
     },
     "core/gold_cost_views.sql": {
-      "checked": 6,
+      "checked": 7,
       "skipped": 0,
-      "total": 6
+      "total": 7
     },
     "core/gold_eval_gates.sql": {
-      "checked": 9,
+      "checked": 10,
       "skipped": 0,
-      "total": 9
+      "total": 10
+    },
+    "core/gold_staging_open.sql": {
+      "checked": 3,
+      "skipped": 1,
+      "total": 4
+    },
+    "core/gold_staging_restricted.sql": {
+      "checked": 4,
+      "skipped": 2,
+      "total": 6
     },
     "core/pricing_seed.sql": {
       "checked": 2,
@@ -74,8 +84,8 @@
     },
     "silver/jcs.sql": {
       "checked": 0,
-      "skipped": 3,
-      "total": 3
+      "skipped": 4,
+      "total": 4
     },
     "silver/model_calls.sql": {
       "checked": 1,
@@ -106,6 +116,11 @@
       "checked": 3,
       "skipped": 0,
       "total": 3
+    },
+    "silver/trace_aux.sql": {
+      "checked": 1,
+      "skipped": 0,
+      "total": 1
     },
     "silver/trace_payloads.sql": {
       "checked": 1,
@@ -140,5 +155,5 @@
     "CREATE PROCEDURE",
     "ALTER TABLE"
   ],
-  "skipped": 19
+  "skipped": 23
 }

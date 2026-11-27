@@ -24,6 +24,7 @@ ALL_SILVER_SQL_FILES: tuple[str, ...] = (
     "model_calls.sql",
     "tool_calls.sql",
     "events.sql",
+    "trace_aux.sql",
     "traces.sql",
     "trace_payloads.sql",
     "outcomes.sql",
@@ -211,7 +212,14 @@ def test_open_sql_reads_no_restricted_source() -> None:
             )
 
     # Also verify `silver_internal` base TVFs called by `silver_open` never touch `silver_restricted` or `shape3_payloads`.
-    internal_bases = ("spans", "tool_calls_base", "events_base", "traces_base", "outcomes_base")
+    internal_bases = (
+        "spans",
+        "tool_calls_base",
+        "events_base",
+        "trace_aux_agg",
+        "traces_base",
+        "outcomes_base",
+    )
     checked_bases: set[str] = set()
     for sql_file in sorted(SILVER_SQL_DIR.rglob("*.sql")):
         rendered = render_silver_sql(sql_file.read_text(encoding="utf-8"))
