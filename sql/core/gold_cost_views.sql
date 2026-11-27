@@ -85,10 +85,10 @@ CREATE OR REPLACE TABLE FUNCTION `agent_eval.gold_call_costs`(
       mc.skill_sha256,
       COALESCE(mc.response_model, mc.request_model, 'none') AS model_name,
       IF(
-        STARTS_WITH(REGEXP_REPLACE(COALESCE(mc.response_model, mc.request_model, 'none'), r'^.*/', ''), 'text-embedding-'),
-        REGEXP_REPLACE(COALESCE(mc.response_model, mc.request_model, 'none'), r'^.*/', ''),
+        STARTS_WITH(REGEXP_REPLACE(REGEXP_REPLACE(TRIM(COALESCE(mc.response_model, mc.request_model, 'none')), r'@.*$', ''), r'^.*/', ''), 'text-embedding-'),
+        REGEXP_REPLACE(REGEXP_REPLACE(REGEXP_REPLACE(TRIM(COALESCE(mc.response_model, mc.request_model, 'none')), r'@.*$', ''), r'^.*/', ''), r'-(?:ga|rc|qcd|preview)$', ''),
         REGEXP_REPLACE(
-          REGEXP_REPLACE(COALESCE(mc.response_model, mc.request_model, 'none'), r'^.*/', ''),
+          REGEXP_REPLACE(REGEXP_REPLACE(TRIM(COALESCE(mc.response_model, mc.request_model, 'none')), r'@.*$', ''), r'^.*/', ''),
           r'-(?:\d{3}|ga|rc|qcd|preview)$',
           ''
         )

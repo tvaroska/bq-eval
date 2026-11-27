@@ -188,9 +188,12 @@ def test_terraform_dockerfile_and_cloudbuild_security_contracts() -> None:
 
     tf_main = (tf_dir / "main.tf").read_text(encoding="utf-8")
     tf_vars = (tf_dir / "variables.tf").read_text(encoding="utf-8")
+    tf_vers = (tf_dir / "versions.tf").read_text(encoding="utf-8")
     assert 'resource "google_storage_bucket" "gold_worm_archive"' in tf_main
     assert "retention_policy" in tf_main
     assert 'resource "google_kms_key_ring" "rtbf_subject_keys"' in tf_main
+    assert 'resource "time_sleep" "biglake_iam_propagation"' in tf_main
+    assert "hashicorp/time" in tf_vers
     assert "google_bigquery_table" not in tf_main or "completions" not in tf_main
     assert "google_bigquery_connection" in tf_main
     assert "google_bigquery_data_transfer_config" in tf_main
@@ -202,6 +205,7 @@ def test_terraform_dockerfile_and_cloudbuild_security_contracts() -> None:
         "create_worm_archive_bucket",
         "lock_worm_retention",
         "create_rtbf_kms_keyring",
+        "iam_propagation_wait_duration",
     ):
         assert f'variable "{flag}"' in tf_vars
 

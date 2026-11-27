@@ -7,7 +7,12 @@ from datetime import UTC, datetime
 import pytest
 from sqlglot import exp
 
-from bq_eval.core.contract.otel import FinOpsTrafficType, ServingTrafficType
+from bq_eval.core.contract.otel import FinOpsTrafficType, GenAISpanKind, ServingTrafficType
+from bq_eval.core.contract.results import ConfusionMatrix
+from bq_eval.core.engine.sql_eval import (
+    build_ai_evaluate_agent_sql,
+    build_ai_generate_table_judge_sql,
+)
 from bq_eval.runner.engine.bronze_bridge import BRONZE_LOG_EXTRA_COLS
 from tests.conftest import (
     SQL_DIR,
@@ -15,6 +20,7 @@ from tests.conftest import (
     make_span,
     open_runner_for_spans,
     parse_bigquery_sql,
+    seed_sme_confusion,
 )
 
 FORBIDDEN_RAW_PAYLOAD_COLUMNS: frozenset[str] = frozenset(
@@ -470,3 +476,321 @@ def test_clause_scoped_nfr_gate_sql_view() -> None:
     assert int(str(nfr_sql_row["amended_clause_flips"])) == 1
     assert int(str(nfr_sql_row["unamended_negative_flips"])) == 0
     assert bool(nfr_sql_row["passes_nfr_gate"]) is True
+
+
+def test_breaches_exclude_tool_spans_and_reconciliation_normalizes_model_suffixes() -> None:
+    """`v_live_slo_and_429_breaches` excludes tool/root spans; reconciliation & LOB strip version/`@region` suffixes."""
+    base = datetime(2026, 11, 22, 17, 5, 0, tzinfo=UTC)
+    spans = [
+        make_span(
+            "tr-norm-1",
+            "sp-norm-root",
+            app_id="norm-app",
+            span_kind=GenAISpanKind.INVOKE_AGENT,
+            model_name="none",
+            input_tokens=0,
+            cached_input_tokens=0,
+            output_tokens=0,
+            thinking_tokens=0,
+            latency_ms=8000.0,
+            http_status_code=200,
+            base_time=base,
+        ),
+        make_span(
+            "tr-norm-1",
+            "sp-norm-llm",
+            parent_span_id="sp-norm-root",
+            span_name="chat",
+            app_id="norm-app",
+            span_kind=GenAISpanKind.CHAT,
+            model_name="publishers/google/models/gemini-3.8-flash-001@us-central1",
+            input_tokens=10_000,
+            cached_input_tokens=0,
+            output_tokens=1_000,
+            thinking_tokens=0,
+            latency_ms=420.0,
+            http_status_code=429,
+            offset_ms=50,
+            base_time=base,
+        ),
+        *[
+            make_span(
+                "tr-norm-1",
+                f"sp-norm-tool-{i}",
+                parent_span_id="sp-norm-root",
+                span_name="execute_tool",
+                app_id="norm-app",
+                span_kind=GenAISpanKind.EXECUTE_TOOL,
+                model_name="none",
+                tool_name="lookup",
+                tool_call_status="SUCCESS",
+                input_tokens=0,
+                cached_input_tokens=0,
+                output_tokens=0,
+                thinking_tokens=0,
+                latency_ms=15.0,
+                http_status_code=200,
+                offset_ms=100 + i,
+                base_time=base,
+            )
+            for i in range(10)
+        ],
+        make_span(
+            "tr-norm-tooltok",
+            "sp-norm-tooltok-chat",
+            app_id="norm-tool-app",
+            span_kind=GenAISpanKind.CHAT,
+            model_name="gemini-3.8-flash",
+            input_tokens=2_000,
+            cached_input_tokens=0,
+            output_tokens=200,
+            thinking_tokens=0,
+            latency_ms=300.0,
+            http_status_code=429,
+            base_time=base,
+        ),
+        make_span(
+            "tr-norm-tooltok",
+            "sp-norm-tooltok-exec",
+            parent_span_id="sp-norm-tooltok-chat",
+            span_name="execute_tool",
+            app_id="norm-tool-app",
+            span_kind=GenAISpanKind.EXECUTE_TOOL,
+            model_name="gemini-3.8-flash",
+            tool_name="nested_llm_tool",
+            tool_call_status="SUCCESS",
+            input_tokens=1_000,
+            cached_input_tokens=0,
+            output_tokens=100,
+            thinking_tokens=0,
+            latency_ms=9000.0,
+            http_status_code=200,
+            offset_ms=10,
+            base_time=base,
+        ),
+    ]
+
+    with open_runner_for_spans(spans) as runner:
+        runner.load_rows(
+            "obs_logs._AllLogs",
+            [
+                {
+                    "insert_id": "gw-norm-1",
+                    "timestamp": base.isoformat(),
+                    "receive_timestamp": base.isoformat(),
+                    "log_id": "inference_request",
+                    "log_name": "projects/test-proj/logs/inference_request",
+                    "trace": "tr-norm-1",
+                    "span_id": "sp-norm-llm",
+                    "labels": {},
+                    "json_payload": {
+                        "client_request_id": "req-norm-1",
+                        "trace_id": "tr-norm-1",
+                        "span_id": "sp-norm-llm",
+                        "attempt_index": 1,
+                        "caller_app_id": "norm-app",
+                        "request_model": "gemini-3.8-flash@us-central1",
+                        "response_model": "gemini-3.8-flash",
+                        "serving_tier": "STANDARD",
+                        "server_traffic_type_present": True,
+                        "http_status_code": 429,
+                        "input_tokens": 10_000,
+                        "output_tokens": 1_000,
+                        "traffic_type": "production_inference",
+                    },
+                    "otel": {"resource": {"attributes": {"service.name": "agent-service"}}},
+                }
+            ],
+            extra_columns=BRONZE_LOG_EXTRA_COLS,
+            append=True,
+        )
+        runner.load_rows(
+            "silver_ref.allowed_models",
+            [
+                {
+                    "app_id": "*",
+                    "model": "gemini-3.8-flash",
+                    "is_allowed": True,
+                    "invokable_status": "active",
+                    "lifecycle_tier": "long_term_ga",
+                    "eol_date": "2028-01-01",
+                    "migration_target_model": "gemini-4-hydrogen",
+                    "zdr_allowed": True,
+                    "effective_from": "2025-01-01T00:00:00+00:00",
+                    "effective_to": None,
+                }
+            ],
+            append=True,
+        )
+        breach_rows = runner.query(
+            "SELECT span_count, http_429_count, http_429_rate_pct, p95_latency_ms, breach_reason "
+            "FROM `agent_eval.v_live_slo_and_429_breaches` "
+            "WHERE apphub_application_id = 'norm-app'"
+        ).rows
+        tooltok_breach = runner.query(
+            "SELECT span_count, http_429_rate_pct, p95_latency_ms "
+            "FROM `agent_eval.v_live_slo_and_429_breaches` "
+            "WHERE apphub_application_id = 'norm-tool-app'"
+        ).rows[0]
+        rec_rows = runner.query(
+            "SELECT model_name, otel_span_count, server_request_count, reconciliation_status "
+            "FROM `agent_eval.v_inference_request_reconciliation` "
+            "WHERE apphub_application_id = 'norm-app'"
+        ).rows
+        lob_row = runner.query(
+            "SELECT migration_target_model, total_cost_usd "
+            "FROM `agent_eval.v_lob_model_lifecycle_export` "
+            "WHERE apphub_application_id = 'norm-app'"
+        ).rows[0]
+
+    assert len(breach_rows) == 1
+    assert int(str(breach_rows[0]["span_count"])) == 1
+    assert int(str(breach_rows[0]["http_429_count"])) == 1
+    assert float(str(breach_rows[0]["http_429_rate_pct"])) == pytest.approx(100.0)
+    assert float(str(breach_rows[0]["p95_latency_ms"])) == pytest.approx(420.0)
+    assert breach_rows[0]["breach_reason"] == "HTTP_429_STORM"
+    assert int(str(tooltok_breach["span_count"])) == 1
+    assert float(str(tooltok_breach["http_429_rate_pct"])) == pytest.approx(100.0)
+    assert float(str(tooltok_breach["p95_latency_ms"])) == pytest.approx(300.0)
+
+    assert len(rec_rows) == 1
+    assert rec_rows[0]["model_name"] == "gemini-3.8-flash"
+    assert int(str(rec_rows[0]["otel_span_count"])) == 1
+    assert int(str(rec_rows[0]["server_request_count"])) == 1
+    assert rec_rows[0]["reconciliation_status"] == "RECONCILED"
+    assert lob_row["migration_target_model"] == "gemini-4-hydrogen"
+    assert float(str(lob_row["total_cost_usd"])) > 0.0
+
+
+def test_eval_results_is_synthetic_excluded_from_calibration_and_surfaced_in_runs() -> None:
+    """`eval_results.is_synthetic = TRUE` is audited in `v_step3_eval_runs` and excluded from calibration."""
+    base = datetime(2026, 11, 22, 18, 0, 0, tzinfo=UTC)
+    spans = [
+        make_span(
+            f"tr-syn-{i:02d}",
+            f"sp-syn-{i:02d}",
+            app_id="syn-app",
+            outcome_id=f"out-syn-{i:02d}",
+            outcome_owner="syn-app",
+            offset_s=i,
+            base_time=base,
+        )
+        for i in range(12)
+    ]
+
+    with open_runner_for_spans(
+        spans,
+        current_date_utc="2026-11-22",
+        current_timestamp_utc="2026-11-22T18:30:00+00:00",
+    ) as runner:
+        syn_rows: list[dict[str, object]] = [
+            {
+                "eval_id": f"ev-syn-{i:02d}",
+                "eval_run_id": "run-syn-1",
+                "trace_id": f"tr-syn-{i:02d}",
+                "outcome_id": f"out-syn-{i:02d}",
+                "apphub_application_id": "syn-app",
+                "rubric_id": "groundedness_4pt_v1",
+                "judge_model": "gemini-3.8-flash",
+                "sampling_stratum": "CANARY_5PCT",
+                "rule0_pass": True,
+                "ordinal_score": 4,
+                "binary_pass": True,
+                "judge_status": "SCORED",
+                "judge_input_tokens": 500,
+                "judge_output_tokens": 50,
+                "judge_thinking_tokens": 0,
+                "is_synthetic": True,
+                "evaluated_at": "2026-11-22T18:10:00+00:00",
+            }
+            for i in range(12)
+        ]
+        syn_rows.append(
+            {
+                "eval_id": "ev-syn-flip",
+                "eval_run_id": "run-syn-2",
+                "trace_id": "tr-syn-00",
+                "outcome_id": "out-syn-00",
+                "apphub_application_id": "syn-app",
+                "rubric_id": "groundedness_4pt_v1",
+                "judge_model": "gemini-3.8-flash",
+                "sampling_stratum": "CANARY_5PCT",
+                "rule0_pass": True,
+                "ordinal_score": 1,
+                "binary_pass": False,
+                "judge_status": "SCORED",
+                "judge_input_tokens": 500,
+                "judge_output_tokens": 50,
+                "judge_thinking_tokens": 0,
+                "is_synthetic": True,
+                "evaluated_at": "2026-11-22T18:20:00+00:00",
+            }
+        )
+        runner.load_rows("agent_eval.eval_results", syn_rows, append=False)
+        seed_sme_confusion(runner, "syn-app", ConfusionMatrix(tp=10, fn=0, tn=10, fp=0))
+        run_row = runner.query(
+            "SELECT evaluated_traces, synthetic_traces FROM `agent_eval.v_step3_eval_runs` "
+            "WHERE eval_run_id = 'run-syn-1'"
+        ).rows[0]
+        sum_row = runner.query(
+            "SELECT judged_samples, calibration_status, calibrated_pass_rate "
+            "FROM `agent_eval.v_agent_eval_and_finops_summary` "
+            "WHERE apphub_application_id = 'syn-app'"
+        ).rows[0]
+        cpvo_row = runner.query(
+            "SELECT measured_judge_cost_usd "
+            "FROM `agent_eval.v_enterprise_cost_per_verified_outcome` "
+            "WHERE apphub_application_id = 'syn-app'"
+        ).rows[0]
+        nfr_rows = runner.query(
+            "SELECT * FROM `agent_eval.v_step3_policy_nfr_gate` "
+            "WHERE apphub_application_id = 'syn-app'"
+        ).rows
+        quota_row = runner.query(
+            "SELECT tokens_used_today FROM `agent_eval.v_step2_daily_quota_status`"
+        ).rows[0]
+        app_quota_rows = runner.query(
+            "SELECT * FROM `agent_eval.v_step2_app_daily_quota_status` "
+            "WHERE apphub_application_id = 'syn-app'"
+        ).rows
+        gov_row = runner.query(
+            "SELECT gwet_ac2, passes_ac2_gate FROM `agent_eval.v_app_risk_governance` "
+            "WHERE apphub_application_id = 'syn-app'"
+        ).rows[0]
+
+    assert int(str(run_row["evaluated_traces"])) == 12
+    assert int(str(run_row["synthetic_traces"])) == 12
+    assert int(str(sum_row["judged_samples"])) == 0
+    assert sum_row["calibration_status"] == "UNJUDGED"
+    assert sum_row["calibrated_pass_rate"] is None
+    assert float(str(cpvo_row["measured_judge_cost_usd"])) == pytest.approx(0.0, abs=1e-12)
+    assert nfr_rows == ()
+    assert int(str(quota_row["tokens_used_today"])) == 0
+    assert app_quota_rows == ()
+    assert gov_row["gwet_ac2"] is None
+    assert gov_row["passes_ac2_gate"] is None
+
+    gen_sql = build_ai_generate_table_judge_sql(
+        project_id="demo-proj", canary_sample_pct=5, canary_salt="salt-a"
+    )
+    eval_agent_persist_sql = build_ai_evaluate_agent_sql(
+        project_id="demo-proj",
+        canary_sample_pct=10,
+        run_id="run-filter-1",
+        persist_run_id="run-ea-1",
+        canary_salt="salt-b",
+    )
+    eval_agent_read_sql = build_ai_evaluate_agent_sql(
+        project_id="demo-proj",
+        canary_sample_pct=10,
+        canary_salt="salt-c",
+    )
+    parse_bigquery_sql(gen_sql, "gen_sql_salted")
+    parse_bigquery_sql(eval_agent_persist_sql, "eval_agent_persist_sql_salted")
+    parse_bigquery_sql(eval_agent_read_sql, "eval_agent_read_sql_salted")
+    assert "FALSE AS is_synthetic" in gen_sql
+    assert "FARM_FINGERPRINT(CONCAT('salt-a:', t.trace_id))" in gen_sql
+    assert "FALSE AS is_synthetic" in eval_agent_persist_sql
+    assert "FARM_FINGERPRINT(CONCAT('salt-b:', cand.trace_id))" in eval_agent_persist_sql
+    assert "cand.trace_id IN (" in eval_agent_persist_sql
+    assert "FARM_FINGERPRINT(CONCAT('salt-c:', trace_id))" in eval_agent_read_sql

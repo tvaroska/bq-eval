@@ -117,10 +117,21 @@ def paygo_multiplier_for_span(
 def compute_span_cost_usd(
     span: OTelGenAISpanRecord,
     sku: ModelPricingSKU | None = None,
+    *,
+    include_committed_list_equivalent: bool = True,
 ) -> float:
-    """Single canonical 1P/3P span USD cost formula keyed on `prompt_context_tokens`."""
+    """Single canonical 1P/3P span USD cost formula keyed on `prompt_context_tokens`.
+
+    Set `include_committed_list_equivalent=False` to price `PROVISIONED_THROUGHPUT` spans at
+    `0.0` incremental PayGo USD and prevent double-counting against committed PT fixed costs.
+    """
     resolved = resolve_span_sku(span, sku)
     if resolved is None:
+        return 0.0
+    if (
+        not include_committed_list_equivalent
+        and span.serving_traffic_type == ServingTrafficType.PROVISIONED_THROUGHPUT
+    ):
         return 0.0
 
     uncached_input = span.uncached_input_tokens

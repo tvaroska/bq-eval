@@ -17,6 +17,19 @@ from bq_eval.deploy.engine.silver_deploy import build_silver_routine_authorizati
 
 _BQ_LABEL_KEY_RE = re.compile(r"^[a-z][a-z0-9_-]{0,62}$")
 _BQ_LABEL_VAL_RE = re.compile(r"^[a-z0-9_-]{0,63}$")
+_MAX_BATCH_SCRIPT_BYTES: int = 512_000
+_SILVER_BASE_FILES: frozenset[str] = frozenset(
+    {"silver/reference.sql", "silver/workflow_events.sql"}
+)
+_GOLD_CORE_FILES: frozenset[str] = frozenset(
+    {
+        "core/ddl.sql",
+        "core/pricing_seed.sql",
+        "core/gold_cost_views.sql",
+        "core/gold_eval_gates.sql",
+        "core/step2_stateless_eval.sql",
+    }
+)
 _BENIGN_NON_JSON_PREFIXES: tuple[str, ...] = (
     "number of affected rows",
     "waiting on bqjob",
@@ -25,6 +38,75 @@ _BENIGN_NON_JSON_PREFIXES: tuple[str, ...] = (
 
 SubprocessRunner = Callable[..., subprocess.CompletedProcess[str]]
 WhichFn = Callable[[str], str | None]
+
+
+def _bootstrap_stage_for_label(label: str) -> str:
+    rel_file = label.split("#", 1)[0]
+    if rel_file in _SILVER_BASE_FILES:
+        return "silver_base"
+    if rel_file == "silver/shape3.sql":
+        return "silver_shape3"
+    if rel_file.startswith("silver/"):
+        return "silver_routines"
+    if rel_file in _GOLD_CORE_FILES:
+        return "gold_core"
+    if rel_file.startswith(("core/", "finops/")):
+        return "gold_summary_and_finops"
+    return "custom"
+
+
+def format_batch_error_label(batch_name: str, labels: Sequence[str]) -> str:
+    """Return single statement label for 1-stmt batches or `<stage> [<first>..<last>]` for multi-stmt batches."""
+    if len(labels) == 1:
+        return labels[0]
+    return f"{batch_name} [{labels[0]}..{labels[-1]}]"
+
+
+def batch_bootstrap_statements(
+    stmts: Sequence[tuple[str, str]],
+    *,
+    max_script_bytes: int = _MAX_BATCH_SCRIPT_BYTES,
+) -> list[tuple[str, tuple[str, ...], str]]:
+    """Group ordered statements into `3-5` topological multi-statement BigQuery scripts.
+
+    Preserves exact statement order, isolates `silver/shape3.sql` for Day-0 stand-in fallback,
+    and enforces a per-script byte ceiling below BigQuery's 1 MB script query limit.
+    """
+    if max_script_bytes < 1:
+        raise ValueError(f"max_script_bytes must be positive, got {max_script_bytes}")
+    batches: list[tuple[str, tuple[str, ...], str]] = []
+    cur_stage: str | None = None
+    cur_labels: list[str] = []
+    cur_chunks: list[str] = []
+    cur_bytes = 0
+
+    def _flush() -> None:
+        nonlocal cur_stage, cur_labels, cur_chunks, cur_bytes
+        if cur_stage is not None and cur_chunks:
+            script = "\n;\n\n".join(cur_chunks) + "\n;\n"
+            batches.append((cur_stage, tuple(cur_labels), script))
+        cur_stage = None
+        cur_labels = []
+        cur_chunks = []
+        cur_bytes = 0
+
+    for label, raw_stmt in stmts:
+        cleaned = raw_stmt.strip().rstrip(";").strip()
+        if not cleaned:
+            continue
+        stage = _bootstrap_stage_for_label(label)
+        chunk_bytes = len(cleaned.encode("utf-8")) + 4
+        if cur_stage is not None and (
+            stage != cur_stage or (cur_chunks and cur_bytes + chunk_bytes > max_script_bytes)
+        ):
+            _flush()
+        cur_stage = stage
+        cur_labels.append(label)
+        cur_chunks.append(cleaned)
+        cur_bytes += chunk_bytes
+
+    _flush()
+    return batches
 
 
 def format_bq_job_labels(extra_labels: Mapping[str, str] | None = None) -> tuple[str, ...]:
@@ -314,10 +396,10 @@ def apply_bootstrap_statements(  # noqa: PLR0913
         "--format=none",
         *format_bq_job_labels(labels),
     ]
-    for label, stmt in stmts:
+    for batch_name, batch_labels, script_sql in batch_bootstrap_statements(stmts):
         proc = run_cmd(
             bq_cmd_base,
-            input=stmt,
+            input=script_sql,
             text=True,
             capture_output=True,
             check=False,
@@ -325,7 +407,7 @@ def apply_bootstrap_statements(  # noqa: PLR0913
         if proc.returncode != 0:
             detail = (proc.stdout + "\n" + proc.stderr).strip()
             lower_detail = detail.lower()
-            if label.startswith("silver/shape3.sql#") and (
+            if batch_name == "silver_shape3" and (
                 "without any associated files" in lower_detail
                 or "not an external table" in lower_detail
             ):
@@ -335,7 +417,8 @@ def apply_bootstrap_statements(  # noqa: PLR0913
                 if standin_errs:
                     return standin_errs
                 continue
-            return [f"{label}: bq apply failed: {detail[:240]}"]
+            err_label = format_batch_error_label(batch_name, batch_labels)
+            return [f"{err_label}: bq apply failed: {detail[:240]}"]
 
     if mode in ("silver", "gold") and apply_silver_routine_auth:
         auth_map = build_silver_routine_authorizations(

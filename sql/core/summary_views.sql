@@ -15,10 +15,11 @@ GROUP BY apphub_application_id, business_unit, cost_center;
 
 CREATE OR REPLACE VIEW `agent_eval.v_enterprise_cost_per_verified_outcome` AS
 WITH da AS (
-  SELECT e.*, REGEXP_REPLACE(REGEXP_REPLACE(e.judge_model, r'^.*/', ''), r'-(?:\d{3}|ga|rc|qcd|preview)$', '') AS jmn,
+  SELECT e.*, REGEXP_REPLACE(REGEXP_REPLACE(REGEXP_REPLACE(TRIM(e.judge_model), r'@.*$', ''), r'^.*/', ''), r'-(?:\d{3}|ga|rc|qcd|preview)$', '') AS jmn,
     ROW_NUMBER() OVER (PARTITION BY e.trace_id, e.rubric_id, IF(COALESCE(e.judge_status, 'SCORED') = 'SCORED' AND e.binary_pass IS NOT NULL AND (e.ordinal_score IS NULL OR e.ordinal_score BETWEEN 1 AND 4), 0, 1) ORDER BY e.evaluated_at DESC) AS lrn
   FROM (
     SELECT * FROM `agent_eval.eval_results`
+    WHERE NOT COALESCE(is_synthetic, FALSE)
     QUALIFY ROW_NUMBER() OVER (PARTITION BY COALESCE(eval_run_id, FORMAT_TIMESTAMP('%Y-%m-%d', evaluated_at)), trace_id, rubric_id ORDER BY IF(COALESCE(judge_status, 'SCORED') = 'SCORED', 0, 1) ASC, evaluated_at DESC) = 1
   ) AS e
 ),
@@ -115,11 +116,12 @@ FROM aos AS os GROUP BY os.apphub_application_id, os.source_mode, os.agent_name;
 
 CREATE OR REPLACE VIEW `agent_eval.v_agent_eval_and_finops_summary` AS
 WITH da AS (
-  SELECT e.*, REGEXP_REPLACE(REGEXP_REPLACE(e.judge_model, r'^.*/', ''), r'-(?:\d{3}|ga|rc|qcd|preview)$', '') AS jmn,
+  SELECT e.*, REGEXP_REPLACE(REGEXP_REPLACE(REGEXP_REPLACE(TRIM(e.judge_model), r'@.*$', ''), r'^.*/', ''), r'-(?:\d{3}|ga|rc|qcd|preview)$', '') AS jmn,
     (COALESCE(e.judge_status, 'SCORED') = 'SCORED' AND e.binary_pass IS NOT NULL) AS sc_ok,
     ROW_NUMBER() OVER (PARTITION BY e.trace_id, e.rubric_id, IF(COALESCE(e.judge_status, 'SCORED') = 'SCORED' AND e.binary_pass IS NOT NULL AND (e.ordinal_score IS NULL OR e.ordinal_score BETWEEN 1 AND 4), 0, 1) ORDER BY e.evaluated_at DESC) AS lrn
   FROM (
     SELECT * FROM `agent_eval.eval_results`
+    WHERE NOT COALESCE(is_synthetic, FALSE)
     QUALIFY ROW_NUMBER() OVER (PARTITION BY COALESCE(eval_run_id, FORMAT_TIMESTAMP('%Y-%m-%d', evaluated_at)), trace_id, rubric_id ORDER BY IF(COALESCE(judge_status, 'SCORED') = 'SCORED' AND binary_pass IS NOT NULL, 0, 1) ASC, evaluated_at DESC) = 1
   ) AS e
 ),

@@ -293,6 +293,16 @@ variable "deletion_protection" {
   default     = true
 }
 
+variable "iam_propagation_wait_duration" {
+  description = "Wait duration after granting BigLake storage IAM to the connection SA before creating shape3_payloads (prevents first-run IAM propagation races)."
+  type        = string
+  default     = "30s"
+  validation {
+    condition     = can(regex("^[0-9]+(s|m)$", var.iam_propagation_wait_duration))
+    error_message = "iam_propagation_wait_duration must be a non-negative seconds/minutes duration (e.g. '30s' or '0s')."
+  }
+}
+
 variable "labels" {
   description = "Labels applied to provisioned GCP resources."
   type        = map(string)

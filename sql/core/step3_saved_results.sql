@@ -29,12 +29,13 @@ CREATE TABLE IF NOT EXISTS `agent_eval.eval_results` (
   policy_sha256 STRING OPTIONS (description = 'SHA-256 hash of active policy text for zero-day amendment drift tracking.'),
   amended_clause_ids STRING OPTIONS (description = 'Comma-separated clause IDs modified under the active policy revision.'),
   target_clause_id STRING OPTIONS (description = 'Optional clause identifier evaluated by this trace/rubric pair for clause-scoped NFR gating.'),
+  is_synthetic BOOL OPTIONS (description = 'TRUE for synthetic/simulated judge rows excluded from production calibration and verified-outcome gates.'),
   evaluated_at TIMESTAMP NOT NULL OPTIONS (description = 'UTC judge execution timestamp.')
 )
 PARTITION BY DATE(evaluated_at)
 CLUSTER BY apphub_application_id, rubric_id, trace_id
 OPTIONS (
-  description = 'Gold evaluation results with snapshot/prompt/seed provenance, REJECTED retry retention (S-19), and paired A/B keys.'
+  description = 'Gold evaluation results with snapshot/prompt/seed provenance, REJECTED retry retention (S-19), synthetic flag, and paired A/B keys.'
 );
 
 ALTER TABLE `agent_eval.eval_results`
@@ -51,7 +52,8 @@ ALTER TABLE `agent_eval.eval_results`
   ADD COLUMN IF NOT EXISTS eval_split STRING,
   ADD COLUMN IF NOT EXISTS policy_sha256 STRING,
   ADD COLUMN IF NOT EXISTS amended_clause_ids STRING,
-  ADD COLUMN IF NOT EXISTS target_clause_id STRING;
+  ADD COLUMN IF NOT EXISTS target_clause_id STRING,
+  ADD COLUMN IF NOT EXISTS is_synthetic BOOL;
 
 CREATE OR REPLACE VIEW `agent_eval.v_step3_eval_runs` AS
 WITH normalized_results AS (
@@ -65,6 +67,7 @@ WITH normalized_results AS (
     e.rule0_pass,
     e.binary_pass,
     COALESCE(e.judge_status, IF(e.binary_pass IS NULL, 'REJECTED', 'SCORED')) AS judge_status,
+    COALESCE(e.is_synthetic, FALSE) AS is_synthetic,
     e.evaluated_at
   FROM `agent_eval.eval_results` AS e
 ),
@@ -84,6 +87,7 @@ SELECT
   e.sampling_stratum,
   COUNTIF(e.judge_status = 'SCORED' AND e.binary_pass IS NOT NULL) AS evaluated_traces,
   COUNTIF(e.judge_status != 'SCORED' OR e.binary_pass IS NULL) AS rejected_traces,
+  COUNTIF(e.is_synthetic) AS synthetic_traces,
   AVG(CASE WHEN e.judge_status = 'SCORED' AND e.binary_pass IS NOT NULL THEN IF(e.rule0_pass, 1.0, 0.0) END) AS step1_pass_rate,
   AVG(CASE WHEN e.judge_status = 'SCORED' AND e.binary_pass IS NOT NULL THEN IF(e.binary_pass, 1.0, 0.0) END) AS rubric_pass_rate,
   AVG(CASE WHEN e.judge_status = 'SCORED' AND e.binary_pass IS NOT NULL THEN IF(e.rule0_pass AND e.binary_pass, 1.0, 0.0) END) AS verified_outcome_rate,
@@ -118,6 +122,7 @@ WITH normalized_results AS (
   FROM `agent_eval.eval_results` AS e
   WHERE COALESCE(e.judge_status, 'SCORED') = 'SCORED'
     AND e.binary_pass IS NOT NULL
+    AND NOT COALESCE(e.is_synthetic, FALSE)
 ),
 deduped_results AS (
   SELECT *

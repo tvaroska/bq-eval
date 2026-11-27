@@ -297,6 +297,24 @@ resource "google_bigquery_dataset" "silver" {
   depends_on = [google_project_service.apis]
 }
 
+resource "time_sleep" "biglake_iam_propagation" {
+  count = var.create_silver_datasets && (var.create_vertex_connection || var.vertex_connection_service_account_email != "") ? 1 : 0
+
+  create_duration = var.iam_propagation_wait_duration
+
+  triggers = {
+    bucket_name   = local.effective_bucket_name
+    connection_sa = local.effective_connection_sa
+    viewer_expr   = local.biglake_viewer_expr
+  }
+
+  depends_on = [
+    google_project_iam_member.vertex_ai_user,
+    google_storage_bucket_iam_member.biglake_viewer,
+    google_storage_bucket_iam_member.biglake_lister,
+  ]
+}
+
 resource "google_bigquery_table" "shape3_payloads" {
   count = var.create_silver_datasets ? 1 : 0
 
@@ -329,6 +347,7 @@ resource "google_bigquery_table" "shape3_payloads" {
   depends_on = [
     google_storage_bucket_iam_member.biglake_viewer,
     google_storage_bucket_iam_member.biglake_lister,
+    time_sleep.biglake_iam_propagation,
   ]
 }
 

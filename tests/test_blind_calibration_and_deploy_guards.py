@@ -19,10 +19,14 @@ from bq_eval.core.engine.calibration import (
     rogan_gladen_calibrate,
 )
 from bq_eval.core.engine.cost import compute_span_burndown_tokens, compute_span_cost_usd
-from bq_eval.deploy.engine.bootstrap import validate_bootstrap_offline
+from bq_eval.deploy.engine.bootstrap import (
+    split_sql_statements_stdlib,
+    validate_bootstrap_offline,
+)
 from bq_eval.deploy.engine.bq_client import (
     apply_bootstrap_statements,
     apply_dataset_routine_authorizations,
+    batch_bootstrap_statements,
     bq_cli_query_runner,
     ensure_observability_traces_link,
     format_bq_job_labels,
@@ -613,3 +617,116 @@ def test_blind_kit_and_apply_failure_branches() -> None:
             ConfusionMatrix(tp=10, fn=0, tn=10, fp=0),
             risk_tier="RL-1",
         )
+
+
+def test_bootstrap_batching_reduces_spawns_and_pt_committed_cost_guard() -> None:
+    """Topological bootstrap batching compacts `silver`/`gold` into 3-5 scripts and `cost.py` guards PT double-counts."""
+    _, silver_stmts = validate_bootstrap_offline(mode="silver", project_id="demo-proj")
+    _, gold_stmts = validate_bootstrap_offline(mode="gold", project_id="demo-proj")
+
+    silver_batches = batch_bootstrap_statements(silver_stmts)
+    gold_batches = batch_bootstrap_statements(gold_stmts)
+    assert [name for name, _, _ in silver_batches] == [
+        "silver_base",
+        "silver_shape3",
+        "silver_routines",
+    ]
+    assert [name for name, _, _ in gold_batches] == [
+        "silver_base",
+        "silver_shape3",
+        "silver_routines",
+        "gold_core",
+        "gold_summary_and_finops",
+    ]
+    assert sum(len(lbls) for _, lbls, _ in gold_batches) == len(gold_stmts)
+    assert all(len(sql.encode("utf-8")) <= 512_000 for _, _, sql in gold_batches)
+    comment_batches = batch_bootstrap_statements(
+        [("c#1", "SELECT 1 -- trailing comment"), ("c#2", "SELECT 2")]
+    )
+    assert len(split_sql_statements_stdlib(comment_batches[0][2])) == 2
+
+    apply_calls: list[str] = []
+
+    def _run_with_empty_shape3(
+        cmd: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        sql_in = str(kwargs.get("input", ""))
+        apply_calls.append(sql_in)
+        if sql_in.startswith("CREATE EXTERNAL TABLE"):
+            return subprocess.CompletedProcess(
+                args=cmd,
+                returncode=1,
+                stdout="",
+                stderr="Cannot query hive partitioned data without any associated files.",
+            )
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+    assert (
+        apply_bootstrap_statements(
+            "demo-proj",
+            gold_stmts,
+            mode="gold",
+            apply_silver_routine_auth=False,
+            which_fn=lambda _: "/usr/bin/bq",
+            run_cmd=_run_with_empty_shape3,
+        )
+        == []
+    )
+    assert len(apply_calls) == 6
+    assert (
+        "CREATE TABLE IF NOT EXISTS `demo-proj.silver_restricted.shape3_payloads`" in apply_calls[2]
+    )
+
+    fail_fast_calls: list[str] = []
+
+    def _fail_first_batch(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        fail_fast_calls.append(str(kwargs.get("input", "")))
+        return subprocess.CompletedProcess(args=cmd, returncode=1, stdout="", stderr="boom")
+
+    errs = apply_bootstrap_statements(
+        "demo-proj",
+        gold_stmts,
+        mode="gold",
+        apply_silver_routine_auth=False,
+        which_fn=lambda _: "/usr/bin/bq",
+        run_cmd=_fail_first_batch,
+    )
+    assert len(fail_fast_calls) == 1
+    assert len(errs) == 1 and "silver_base" in errs[0]
+
+    dry_calls: list[str] = []
+
+    def _record_dry_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        dry_calls.append(str(kwargs.get("input", "")))
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+    dry_errs = _run_gcp_dry_run(
+        "demo-proj",
+        gold_stmts,
+        which_fn=lambda _: "/usr/bin/bq",
+        run_cmd=_record_dry_run,
+    )
+    assert dry_errs == []
+    assert 3 <= len(dry_calls) <= 5
+
+    t0 = datetime(2026, 11, 22, 12, 0, 0, tzinfo=UTC)
+    pt_span = OTelGenAISpanRecord(
+        trace_id="tr-pt-guard",
+        span_id="sp-pt-guard",
+        start_time=t0,
+        end_time=t0 + timedelta(seconds=1),
+        latency_ms=1000.0,
+        model_name="gemini-3.8-flash",
+        input_tokens=100_000,
+        output_tokens=5_000,
+        serving_traffic_type=ServingTrafficType.PROVISIONED_THROUGHPUT,
+    )
+    paygo_span = pt_span.model_copy(update={"serving_traffic_type": ServingTrafficType.STANDARD})
+    assert compute_span_cost_usd(pt_span) > 0.0
+    assert compute_span_cost_usd(pt_span, include_committed_list_equivalent=False) == 0.0
+    assert compute_span_cost_usd(
+        paygo_span, include_committed_list_equivalent=False
+    ) == pytest.approx(compute_span_cost_usd(paygo_span), abs=1e-12)
+    bad_pt_span = pt_span.model_copy(update={"model_name": "unknown-model-sku"})
+    with pytest.raises(ValueError, match="Unknown model_name"):
+        compute_span_cost_usd(bad_pt_span, include_committed_list_equivalent=False)

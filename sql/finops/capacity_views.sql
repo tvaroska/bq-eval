@@ -46,7 +46,15 @@ WITH otel_hourly AS (
   SELECT
     TIMESTAMP_TRUNC(start_time, HOUR) AS usage_hour,
     apphub_application_id,
-    model_name,
+    IF(
+      STARTS_WITH(REGEXP_REPLACE(REGEXP_REPLACE(TRIM(model_name), r'@.*$', ''), r'^.*/', ''), 'text-embedding-'),
+      REGEXP_REPLACE(REGEXP_REPLACE(REGEXP_REPLACE(TRIM(model_name), r'@.*$', ''), r'^.*/', ''), r'-(?:ga|rc|qcd|preview)$', ''),
+      REGEXP_REPLACE(
+        REGEXP_REPLACE(REGEXP_REPLACE(TRIM(model_name), r'@.*$', ''), r'^.*/', ''),
+        r'-(?:\d{3}|ga|rc|qcd|preview)$',
+        ''
+      )
+    ) AS model_name,
     COUNT(*) AS otel_span_count,
     COUNTIF(http_status_code = 429) AS otel_429_count,
     SUM(caller_retry_count) AS caller_retry_count,
@@ -59,13 +67,21 @@ WITH otel_hourly AS (
     COUNTIF(LOWER(COALESCE(request_type_header, '')) = 'shared') AS otel_shared_bypass_count
   FROM `agent_eval.v_trace_waterfall`
   WHERE model_name IS NOT NULL AND model_name != 'none'
-  GROUP BY usage_hour, apphub_application_id, model_name
+  GROUP BY 1, 2, 3
 ),
 server_hourly AS (
   SELECT
     TIMESTAMP_TRUNC(request_time, HOUR) AS usage_hour,
     COALESCE(trace_owner_app_id, 'unregistered_app') AS apphub_application_id,
-    COALESCE(response_model, request_model, 'none') AS model_name,
+    IF(
+      STARTS_WITH(REGEXP_REPLACE(REGEXP_REPLACE(TRIM(COALESCE(response_model, request_model, 'none')), r'@.*$', ''), r'^.*/', ''), 'text-embedding-'),
+      REGEXP_REPLACE(REGEXP_REPLACE(REGEXP_REPLACE(TRIM(COALESCE(response_model, request_model, 'none')), r'@.*$', ''), r'^.*/', ''), r'-(?:ga|rc|qcd|preview)$', ''),
+      REGEXP_REPLACE(
+        REGEXP_REPLACE(REGEXP_REPLACE(TRIM(COALESCE(response_model, request_model, 'none')), r'@.*$', ''), r'^.*/', ''),
+        r'-(?:\d{3}|ga|rc|qcd|preview)$',
+        ''
+      )
+    ) AS model_name,
     COUNT(*) AS server_request_count,
     COUNTIF(attempt_index > 1) AS server_failover_attempts,
     COUNTIF(http_status_code = 429) AS server_429_count,
@@ -80,7 +96,7 @@ server_hourly AS (
     TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL ${GOLD_LOOKBACK_HOURS} HOUR),
     CURRENT_TIMESTAMP()
   )
-  GROUP BY usage_hour, apphub_application_id, model_name
+  GROUP BY 1, 2, 3
 )
 SELECT
   COALESCE(o.usage_hour, s.usage_hour) AS usage_hour,
@@ -164,7 +180,9 @@ trace_eff_tier AS (
 judged_rubrics AS (
   SELECT DISTINCT apphub_application_id, rubric_id
   FROM `agent_eval.eval_results`
-  WHERE COALESCE(judge_status, 'SCORED') = 'SCORED' AND binary_pass IS NOT NULL
+  WHERE COALESCE(judge_status, 'SCORED') = 'SCORED'
+    AND binary_pass IS NOT NULL
+    AND NOT COALESCE(is_synthetic, FALSE)
 ),
 sme_ord_gov AS (
   SELECT
@@ -507,6 +525,9 @@ WITH bucketed AS (
     COUNTIF(NOT w.rule0_pass OR w.status_code = 'ERROR') AS rule0_fail_count,
     APPROX_QUANTILES(w.latency_ms, 100)[OFFSET(95)] AS p95_latency_ms
   FROM `agent_eval.v_trace_waterfall` AS w
+  WHERE w.model_name IS NOT NULL
+    AND w.model_name != 'none'
+    AND COALESCE(w.span_kind, 'chat') NOT IN ('execute_tool', 'retrieval')
   GROUP BY window_5m_start, w.apphub_application_id
 ),
 burst_5m AS (
@@ -585,9 +606,13 @@ LEFT JOIN active_apps AS ar
   ON w.apphub_application_id = ar.app_id
 LEFT JOIN active_allowed AS am
   ON IF(
-    STARTS_WITH(REGEXP_REPLACE(w.model_name, r'^.*/', ''), 'text-embedding-'),
-    REGEXP_REPLACE(w.model_name, r'^.*/', ''),
-    REGEXP_REPLACE(REGEXP_REPLACE(w.model_name, r'^.*/', ''), r'-(?:\d{3}|ga|rc|qcd|preview)$', '')
+    STARTS_WITH(REGEXP_REPLACE(REGEXP_REPLACE(TRIM(w.model_name), r'@.*$', ''), r'^.*/', ''), 'text-embedding-'),
+    REGEXP_REPLACE(REGEXP_REPLACE(REGEXP_REPLACE(TRIM(w.model_name), r'@.*$', ''), r'^.*/', ''), r'-(?:ga|rc|qcd|preview)$', ''),
+    REGEXP_REPLACE(
+      REGEXP_REPLACE(REGEXP_REPLACE(TRIM(w.model_name), r'@.*$', ''), r'^.*/', ''),
+      r'-(?:\d{3}|ga|rc|qcd|preview)$',
+      ''
+    )
   ) = am.model
 WHERE w.model_name IS NOT NULL AND w.model_name != 'none'
 GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9;

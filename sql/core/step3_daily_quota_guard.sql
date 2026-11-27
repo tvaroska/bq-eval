@@ -105,6 +105,7 @@ today_billed_usage AS (
     ) AS tokens_used_today
   FROM `agent_eval.eval_results`
   WHERE DATE(evaluated_at) = CURRENT_DATE('UTC')
+    AND NOT COALESCE(is_synthetic, FALSE)
 ),
 today_reservations AS (
   SELECT
@@ -155,6 +156,7 @@ app_billed_usage AS (
     ) AS app_tokens_used_today
   FROM `agent_eval.eval_results`
   WHERE DATE(evaluated_at) = CURRENT_DATE('UTC')
+    AND NOT COALESCE(is_synthetic, FALSE)
   GROUP BY apphub_application_id
 ),
 app_reservations AS (
@@ -272,6 +274,7 @@ BEGIN
       FROM `agent_eval.eval_results`
       WHERE DATE(evaluated_at) >= DATE_SUB(v_quota_date_utc, INTERVAL 7 DAY)
         AND rubric_id = p_rubric_id
+        AND NOT COALESCE(is_synthetic, FALSE)
     ),
     raw_candidates AS (
       SELECT
@@ -288,7 +291,7 @@ BEGIN
         AND cand.rubric_id = existing.rubric_id
       WHERE cand.rubric_id = p_rubric_id
         AND cand.trace_start_time >= TIMESTAMP_SUB(v_now_utc, INTERVAL v_lookback_hours HOUR)
-        AND MOD(ABS(FARM_FINGERPRINT(cand.trace_id)), 100) < LEAST(100, GREATEST(0, COALESCE(p_canary_sample_pct, 10)))
+        AND MOD(ABS(FARM_FINGERPRINT(CONCAT(v_eval_run_id, ':', cand.trace_id))), 100) < LEAST(100, GREATEST(0, COALESCE(p_canary_sample_pct, 10)))
         AND existing.trace_id IS NULL
     ),
     app_budgeted AS (
@@ -367,6 +370,7 @@ BEGIN
               COALESCE(SUM(judge_input_tokens + judge_output_tokens + judge_thinking_tokens), 0) AS used_tokens
             FROM `agent_eval.eval_results`
             WHERE DATE(evaluated_at) = v_quota_date_utc
+              AND NOT COALESCE(is_synthetic, FALSE)
             GROUP BY apphub_application_id
           ),
           reserved AS (
@@ -485,6 +489,7 @@ BEGIN
         judge_input_tokens,
         judge_output_tokens,
         judge_thinking_tokens,
+        is_synthetic,
         evaluated_at
       )
       SELECT
@@ -518,6 +523,7 @@ BEGIN
           SAFE_CAST(JSON_VALUE(full_response, '$.usageMetadata.thoughtsTokenCount') AS INT64),
           @thinking_headroom
         ) AS judge_thinking_tokens,
+        FALSE AS is_synthetic,
         CURRENT_TIMESTAMP() AS evaluated_at
       FROM AI.GENERATE_TABLE(
         MODEL """,

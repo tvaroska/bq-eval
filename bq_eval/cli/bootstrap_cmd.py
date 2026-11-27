@@ -16,7 +16,12 @@ from bq_eval.deploy.engine.bootstrap import (
     should_skip_dry_run_statement,
     validate_bootstrap_offline,
 )
-from bq_eval.deploy.engine.bq_client import apply_bootstrap_statements, format_bq_job_labels
+from bq_eval.deploy.engine.bq_client import (
+    apply_bootstrap_statements,
+    batch_bootstrap_statements,
+    format_batch_error_label,
+    format_bq_job_labels,
+)
 
 SubprocessRunner = Callable[..., subprocess.CompletedProcess[str]]
 WhichFn = Callable[[str], str | None]
@@ -194,10 +199,9 @@ def _run_gcp_dry_run(
             "`bq` CLI not found on PATH; omit --dry-run for credential-free offline validation."
         )
     label_flags = format_bq_job_labels()
+    checkable = [(label, stmt) for label, stmt in stmts if not should_skip_dry_run_statement(stmt)]
     errors: list[str] = []
-    for label, stmt in stmts:
-        if should_skip_dry_run_statement(stmt):
-            continue
+    for batch_name, batch_labels, script_sql in batch_bootstrap_statements(checkable):
         proc = run_cmd(
             [
                 bq_bin,
@@ -208,14 +212,15 @@ def _run_gcp_dry_run(
                 "--dry_run",
                 *label_flags,
             ],
-            input=stmt,
+            input=script_sql,
             text=True,
             capture_output=True,
             check=False,
         )
         if proc.returncode != 0:
             detail = (proc.stdout + "\n" + proc.stderr).strip()
-            errors.append(f"{label}: bq --dry_run failed: {detail[:240]}")
+            err_label = format_batch_error_label(batch_name, batch_labels)
+            errors.append(f"{err_label}: bq --dry_run failed: {detail[:240]}")
     return errors
 
 

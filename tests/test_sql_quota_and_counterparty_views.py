@@ -62,6 +62,7 @@ def _extract_selected_candidates_query(  # noqa: PLR0913
         .replace("v_now_utc", f"TIMESTAMP '{now_utc}'")
         .replace("v_lookback_hours", str(lookback_hours))
         .replace("v_call_headroom_tokens", str(headroom_tokens))
+        .replace("v_eval_run_id", "'sched_test_run'")
         .replace("COALESCE(p_canary_sample_pct, 10)", str(canary_pct))
         .replace(
             "SELECT * EXCEPT (app_cumulative_tokens, global_cumulative_tokens, "

@@ -199,7 +199,8 @@ def test_xml_prompt_injection_escaping_in_sql() -> None:
     )
     for col in ("p.user_prompt", "p.retrieved_context", "p.final_response"):
         assert escape_sql_xml_expr(col) in sql
-    assert "FARM_FINGERPRINT(t.trace_id)" in sql
+    assert "FARM_FINGERPRINT(CONCAT('seed-42:', t.trace_id))" in sql
+    assert "FALSE AS is_synthetic" in sql
     assert "MODEL `demo-proj.agent_eval.gemini_3_8_flash_judge`" in sql
     argon_sql = build_ai_generate_table_judge_sql(
         project_id="demo-proj",
@@ -207,7 +208,9 @@ def test_xml_prompt_injection_escaping_in_sql() -> None:
         rubric_id="groundedness_4pt_v1",
         canary_sample_pct=5,
         judge_model="gemini-4-argon",
+        canary_salt="run-2026-11-27",
     )
+    assert "FARM_FINGERPRINT(CONCAT('run-2026-11-27:', t.trace_id))" in argon_sql
     assert "MODEL `demo-proj.agent_eval.gemini_4_argon_judge`" in argon_sql
 
 

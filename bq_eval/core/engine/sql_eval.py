@@ -110,6 +110,7 @@ def build_ai_generate_table_judge_sql(  # noqa: PLR0913
     silver_restricted_dataset: str = "silver_restricted",
     silver_ref_dataset: str = "silver_ref",
     seed: int = 42,
+    canary_salt: str | None = None,
     judge_model_snapshot_id: str | None = None,
     rubric_version: str = "1.0",
     include_healthy_slow_in_tail: bool = True,
@@ -134,6 +135,7 @@ def build_ai_generate_table_judge_sql(  # noqa: PLR0913
     if isinstance(seed, bool) or not isinstance(seed, int) or seed < 0:
         raise ValueError("seed must be a non-negative integer (not bool).")
     valid_run_id = _validate_run_id(run_id)
+    valid_canary_salt = _validate_run_id(canary_salt) or valid_run_id or f"seed-{seed}"
     valid_rubric_ver = _validate_run_id(rubric_version) or "1.0"
 
     rubric = CANONICAL_RUBRICS[rubric_id]
@@ -180,6 +182,10 @@ def build_ai_generate_table_judge_sql(  # noqa: PLR0913
         if include_healthy_slow_in_tail
         else loop_or_error_tail_expr
     )
+    canary_expr = (
+        f"MOD(ABS(FARM_FINGERPRINT(CONCAT('{valid_canary_salt}:', t.trace_id))), 100) < "
+        f"{canary_sample_pct}"
+    )
     if include_rule0_failures:
         stratum_condition = f"NOT t.rule0_pass OR {tail_expr}"
         where_clause = (
@@ -188,7 +194,7 @@ def build_ai_generate_table_judge_sql(  # noqa: PLR0913
             "    AND zdr.zdr_permitted\n"
             "    AND (\n"
             f"      NOT t.rule0_pass\n      OR {tail_expr}\n"
-            f"      OR MOD(ABS(FARM_FINGERPRINT(t.trace_id)), 100) < {canary_sample_pct}\n"
+            f"      OR {canary_expr}\n"
             f"    ){run_filter}"
         )
     else:
@@ -200,7 +206,7 @@ def build_ai_generate_table_judge_sql(  # noqa: PLR0913
             "    AND zdr.zdr_permitted\n"
             "    AND (\n"
             f"      {tail_expr}\n"
-            f"      OR MOD(ABS(FARM_FINGERPRINT(t.trace_id)), 100) < {canary_sample_pct}\n"
+            f"      OR {canary_expr}\n"
             f"    ){run_filter}"
         )
 
@@ -317,6 +323,7 @@ SELECT
   ) AS judge_thinking_tokens,
   {policy_sha_expr} AS policy_sha256,
   {amended_expr} AS amended_clause_ids,
+  FALSE AS is_synthetic,
   CURRENT_TIMESTAMP() AS evaluated_at
 FROM AI.GENERATE_TABLE(
   MODEL `{valid_project}.{valid_dataset}.{remote_model}`,
@@ -344,6 +351,7 @@ def build_ai_evaluate_agent_sql(  # noqa: PLR0913
     canary_sample_pct: int = 10,
     run_id: str | None = None,
     persist_run_id: str | None = None,
+    canary_salt: str | None = None,
 ) -> str:
     """Build Preview `AI.EVALUATE_AGENT` SQL query over Silver-backed `v_eval_agent_turns`."""
     valid_project = _validate_sql_identifier(project_id, "project_id", allow_hyphen=True)
@@ -357,26 +365,38 @@ def build_ai_evaluate_agent_sql(  # noqa: PLR0913
     _validate_canary_pct(canary_sample_pct)
     valid_run_id = _validate_run_id(run_id)
     valid_persist_run_id = _validate_run_id(persist_run_id)
+    valid_canary_salt = (
+        _validate_run_id(canary_salt) or valid_persist_run_id or valid_run_id or "default"
+    )
 
     metrics_sql = ",\n      ".join(f"'{m}'" for m in managed_metrics)
-    predicates: list[str] = []
-    if canary_sample_pct < 100:
-        predicates.append(f"MOD(ABS(FARM_FINGERPRINT(trace_id)), 100) < {canary_sample_pct}")
-    if valid_run_id:
-        predicates.append(
-            f"trace_id IN ("  # noqa: S608
-            f"SELECT trace_id FROM `{valid_project}.{valid_dataset}.fleet_case_outcomes` "
-            f"WHERE run_id = '{valid_run_id}' AND trace_id IS NOT NULL)"
-        )
+
+    def _build_predicates(trace_col: str) -> list[str]:
+        preds: list[str] = []
+        if canary_sample_pct < 100:
+            preds.append(
+                f"MOD(ABS(FARM_FINGERPRINT(CONCAT('{valid_canary_salt}:', {trace_col}))), 100) < "
+                f"{canary_sample_pct}"
+            )
+        if valid_run_id:
+            preds.append(
+                f"{trace_col} IN ("  # noqa: S608
+                f"SELECT trace_id FROM `{valid_project}.{valid_dataset}.fleet_case_outcomes` "
+                f"WHERE run_id = '{valid_run_id}' AND trace_id IS NOT NULL)"
+            )
+        return preds
+
+    predicates = _build_predicates("trace_id")
     sample_clause = f"\n    WHERE {' AND '.join(predicates)}" if predicates else ""
 
     if valid_persist_run_id is not None:
-        cand_where = f"WHERE {' AND '.join(predicates)} AND " if predicates else "WHERE "
+        cand_preds = _build_predicates("cand.trace_id")
+        cand_where = f"WHERE {' AND '.join(cand_preds)} AND " if cand_preds else "WHERE "
         return f"""-- Preview AI.EVALUATE_AGENT Persistence over Silver `v_eval_agent_turns` ({canary_sample_pct}% Sample)
 INSERT INTO `{valid_project}.{valid_dataset}.eval_results` (
   eval_id, eval_run_id, trace_id, outcome_id, apphub_application_id, rubric_id, judge_model,
   sampling_stratum, rule0_pass, reasoning_trace, ordinal_score, binary_pass, judge_status,
-  judge_input_tokens, judge_output_tokens, judge_thinking_tokens, evaluated_at
+  judge_input_tokens, judge_output_tokens, judge_thinking_tokens, is_synthetic, evaluated_at
 )
 WITH evaluated AS (
   SELECT
@@ -433,6 +453,7 @@ SELECT
   judge_input_tokens,
   judge_output_tokens,
   0 AS judge_thinking_tokens,
+  FALSE AS is_synthetic,
   CURRENT_TIMESTAMP() AS evaluated_at
 FROM evaluated;
 """  # noqa: S608

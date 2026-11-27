@@ -2,6 +2,7 @@
 
 mock_provider "google" {}
 mock_provider "google-beta" {}
+mock_provider "time" {}
 
 run "standalone_cold_project_defaults" {
   command = plan
@@ -62,8 +63,8 @@ run "standalone_cold_project_defaults" {
   }
 
   assert {
-    condition     = length(google_bigquery_dataset.silver) == 4 && length(google_bigquery_table.shape3_payloads) == 1
-    error_message = "Standalone mode must provision 4 Silver datasets and Hive BigLake shape3_payloads."
+    condition     = length(google_bigquery_dataset.silver) == 4 && length(google_bigquery_table.shape3_payloads) == 1 && length(time_sleep.biglake_iam_propagation) == 1 && time_sleep.biglake_iam_propagation[0].create_duration == "30s"
+    error_message = "Standalone mode must provision 4 Silver datasets, 30s BigLake IAM propagation wait, and Hive BigLake shape3_payloads."
   }
 
   assert {
@@ -176,4 +177,15 @@ run "standalone_disjoint_shape3_prefix_and_worm_retention" {
     condition     = length(google_storage_bucket.shared[0].lifecycle_rule) == 0 && length(google_storage_bucket.gold_worm_archive[0].lifecycle_rule) == 0
     error_message = "WORM and payload buckets must omit Delete lifecycle rules when disabled."
   }
+}
+
+run "reject_invalid_iam_propagation_wait_duration" {
+  command = plan
+
+  variables {
+    project_id                    = "demo-bq-eval-bad5"
+    iam_propagation_wait_duration = "forever"
+  }
+
+  expect_failures = [var.iam_propagation_wait_duration]
 }
