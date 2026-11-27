@@ -1,0 +1,120 @@
+{
+  "bootstrap_gold_mode": {
+    "apply_passed": true,
+    "dry_run_passed": true,
+    "silver_schema_columns_verified": 685,
+    "statements_checkable": 109,
+    "statements_skipped": 22,
+    "statements_total": 131
+  },
+  "bronze_snapshot_counts": {
+    "logs": 144875,
+    "spans": 40781
+  },
+  "captured_date_utc": "2026-11-27",
+  "gold_staged_open_kpi": {
+    "cached_hit": true,
+    "cached_wall_ms": 738,
+    "row_count": 25,
+    "uncached_bytes_processed": 7070,
+    "uncached_wall_ms": 906,
+    "view": "v_staged_capacity_hourly_burndown_export"
+  },
+  "release_tag": "v0.7.0-rc1",
+  "restricted_sa_two_hop_authorized_view_isolation": {
+    "caller_grants": "roles/bigquery.jobUser + READER on agent_eval only (zero access to agent_eval_internal, silver_internal, Bronze)",
+    "direct_bronze_spans_http": 403,
+    "direct_gold_internal_http": 403,
+    "direct_silver_internal_http": 403,
+    "entitled_retail_summary_http": 200,
+    "entitled_retail_summary_rows": [
+      [
+        "retail-assist-app",
+        "1"
+      ]
+    ],
+    "entitled_retail_summary_wall_ms": 1648,
+    "entitled_retail_trace_eval_http": 200,
+    "entitled_retail_trace_eval_rows": [
+      [
+        "tr-iso-retail-01",
+        "retail-assist-app",
+        "retail",
+        "t-retail"
+      ]
+    ],
+    "entitled_retail_trace_eval_wall_ms": 1137,
+    "revoked_entitlement_summary_count": 0,
+    "revoked_entitlement_summary_http": 200,
+    "revoked_entitlement_trace_eval_count": 0,
+    "revoked_entitlement_trace_eval_http": 200,
+    "wealth_tenant_rows_leaked": 0
+  },
+  "schema_version": "m20-silver-gold-live-receipt-v1",
+  "silver_tvf_uncached_live": {
+    "events_open": {
+      "bytes_processed": 52011981,
+      "rows": 444,
+      "wall_ms": 2360
+    },
+    "model_calls": {
+      "bytes_processed": 27441593,
+      "rows": 1092,
+      "wall_ms": 2349
+    },
+    "outcome_links": {
+      "bytes_processed": 0,
+      "rows": 0,
+      "wall_ms": 676
+    },
+    "outcomes_open": {
+      "bytes_processed": 52011981,
+      "rows": 474,
+      "wall_ms": 3732
+    },
+    "spans": {
+      "bytes_processed": 27441593,
+      "rows": 39944,
+      "wall_ms": 2066
+    },
+    "tool_calls": {
+      "bytes_processed": 27710864,
+      "rows": 0,
+      "wall_ms": 3366
+    },
+    "tool_calls_open": {
+      "bytes_processed": 27710785,
+      "rows": 180,
+      "wall_ms": 2646
+    },
+    "trace_payloads": {
+      "bytes_processed": 27710864,
+      "rows": 0,
+      "wall_ms": 7190
+    },
+    "traces": {
+      "bytes_processed": 30670475,
+      "rows": 0,
+      "wall_ms": 5014
+    },
+    "traces_open": {
+      "bytes_processed": 30670396,
+      "rows": 10751,
+      "wall_ms": 4646
+    }
+  },
+  "target_environment": "single-project-sandbox-bigquery-us",
+  "unprobed_in_single_project_sandbox": [
+    "org_level_vpc_sc_perimeters",
+    "live_cloud_kms_cmek_keys",
+    "information_schema_table_storage_physical_bytes",
+    "multi_project_isolated_workflow_events_perimeters",
+    "dual_human_sme_blind_calibration_sheets"
+  ],
+  "v8_js_jcs_live_checks": {
+    "float_and_neg_zero_parity": true,
+    "over_65532_bytes_fails_null": true,
+    "tool_args_canonical_parity": true,
+    "wall_ms": 873
+  }
+}

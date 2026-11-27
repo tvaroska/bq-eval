@@ -225,6 +225,7 @@ def test_every_committed_receipt_has_manifest_entry() -> None:
         "m2_live_receipt.json",
         "m16_live_cloud_proof.json",
         "m16_anonymized_traces_100.jsonl",
+        "m20_silver_gold_live_receipt.json",
     }
 
     manifest: dict[str, str] = {}
