@@ -100,26 +100,18 @@ span_rollup AS (
     ARRAY_AGG(JSON_VALUE(labels, '$.a2a_task_state') IGNORE NULLS ORDER BY st, sid LIMIT 1)[SAFE_OFFSET(0)] AS e_a2s,
     ARRAY_AGG(JSON_VALUE(labels, '$.adk_invocation_id') IGNORE NULLS ORDER BY st, sid LIMIT 1)[SAFE_OFFSET(0)] AS e_adk,
     ARRAY_AGG(IF(is_p, caller_app_id, NULL) IGNORE NULLS ORDER BY st, sid LIMIT 1)[SAFE_OFFSET(0)] AS g_capp,
-    ARRAY_AGG(IF(is_p AND caller_app_id IS NOT NULL, st, NULL) IGNORE NULLS ORDER BY st, sid LIMIT 1)[SAFE_OFFSET(0)] AS g_cst
+    ARRAY_AGG(IF(is_p AND caller_app_id IS NOT NULL, st, NULL) IGNORE NULLS ORDER BY st, sid LIMIT 1)[SAFE_OFFSET(0)] AS g_cst,
+    COUNTIF(parent_span_id IS NOT NULL AND STRPOS(CONCAT('|', COALESCE(all_sids, ''), '|'), CONCAT('|', parent_span_id, '|')) = 0 AND COALESCE(otel_kind, '') NOT IN ('SERVER', 'CONSUMER')) AS mp_c,
+    MAX(IF(is_r AND parent_span_id IS NOT NULL AND STRPOS(CONCAT('|', COALESCE(all_sids, ''), '|'), CONCAT('|', parent_span_id, '|')) = 0, 1, 0)) = 1 AS rpm
   FROM (
     SELECT sp.*, sp.start_time AS st, sp.span_id AS sid, (sp.is_model_call IS TRUE) AS is_m, (sp.source_class = 'platform') AS is_p,
       (sp.source_class IS NOT NULL AND ROW_NUMBER() OVER (PARTITION BY sp.trace_id ORDER BY IF(sp.source_class IS NOT NULL, 0, 1), sp.start_time ASC, sp.span_id ASC) = 1) AS is_r,
       (sp.is_model_call IS TRUE AND sp.model_confidence IS NOT NULL AND ROW_NUMBER() OVER (PARTITION BY sp.trace_id ORDER BY IF(sp.is_model_call IS TRUE AND sp.model_confidence IS NOT NULL, 0, 1), sp.end_time DESC, sp.span_id DESC) = 1) AS is_c,
       ROW_NUMBER() OVER (PARTITION BY sp.trace_id ORDER BY sp.start_time ASC, sp.span_id ASC) AS e_rn,
-      FIRST_VALUE(IF(sp.source_class IS NOT NULL, sp.user_id, NULL)) OVER (PARTITION BY sp.trace_id ORDER BY IF(sp.source_class IS NOT NULL, 0, 1), sp.start_time ASC, sp.span_id ASC) AS tr_uid
+      FIRST_VALUE(IF(sp.source_class IS NOT NULL, sp.user_id, NULL)) OVER (PARTITION BY sp.trace_id ORDER BY IF(sp.source_class IS NOT NULL, 0, 1), sp.start_time ASC, sp.span_id ASC) AS tr_uid,
+      STRING_AGG(sp.span_id, '|') OVER (PARTITION BY sp.trace_id) AS all_sids
     FROM base_spans AS sp
   ) GROUP BY trace_id
-),
-parent_agg AS (
-  SELECT s.trace_id,
-    COUNTIF(p.span_id IS NULL AND s.parent_span_id IS NOT NULL AND COALESCE(s.otel_kind, '') NOT IN ('SERVER', 'CONSUMER')) AS mp_c,
-    MAX(IF(s.r_rn = 1 AND s.source_class IS NOT NULL AND p.span_id IS NULL AND s.parent_span_id IS NOT NULL, 1, 0)) = 1 AS rpm
-  FROM (
-    SELECT trace_id, span_id, parent_span_id, otel_kind, source_class,
-      ROW_NUMBER() OVER (PARTITION BY trace_id ORDER BY IF(source_class IS NOT NULL, 0, 1), start_time ASC, span_id ASC) AS r_rn
-    FROM base_spans
-  ) AS s LEFT JOIN base_spans AS p ON p.trace_id = s.trace_id AND p.span_id = s.parent_span_id
-  GROUP BY s.trace_id
 ),
 tool_agg AS (
   SELECT trace_id, COUNT(*) AS tc_c, COUNTIF(writes_state IS TRUE) AS mt_c,
@@ -290,8 +282,8 @@ SELECT
   IF(c.span_app_count = 0 AND c.trace_owner_app_id IS NOT NULL, 1, c.span_app_count) AS participating_app_count,
   c.root_span_id, (c.root_span_id IS NOT NULL) AS has_root_span, c.is_turn, c.root_status, c.trace_start_time,
   IF(c.f_sc IS NULL, 'runtime', 'application') AS trace_start_writer,
-  c.trace_end_time, c.last_span_arrival_time, COALESCE(pa.mp_c, 0) AS missing_parent_count,
-  IF(c.root_span_id IS NULL, CAST(NULL AS BOOL), COALESCE(pa.rpm, FALSE)) AS entry_parent_outside,
+  c.trace_end_time, c.last_span_arrival_time, COALESCE(c.mp_c, 0) AS missing_parent_count,
+  IF(c.root_span_id IS NULL, CAST(NULL AS BOOL), COALESCE(c.rpm, FALSE)) AS entry_parent_outside,
   (TIMESTAMP_DIFF(c.trace_end_time, c.trace_start_time, MILLISECOND) > ${READ_MARGIN_MINUTES} * 60 * 1000) AS exceeds_read_margin,
   COALESCE(IF(c.th_hex IS NOT NULL, 1.0 - (CAST(SAFE_CAST(CONCAT('0x', RPAD(c.th_hex, 14, '0')) AS INT64) AS FLOAT64) / 72057594037927936.0), NULL), c.r_sp, c.f_sp, c.e_sp) AS sampling_probability,
   COALESCE(c.g_tp, c.r_tp, c.e_tp) AS trigger_principal, COALESCE(c.g_ap, c.r_ap, c.e_ap) AS agent_principal, COALESCE(c.g_act, c.r_act, c.e_act) AS act_chain,
@@ -327,7 +319,6 @@ SELECT
   IF(TO_JSON_STRING(c.rl) = '{}', CAST(NULL AS JSON), c.rl) AS restricted_labels,
   IF(TO_JSON_STRING(c.ol) = '{}', CAST(NULL AS JSON), c.ol) AS open_labels
 FROM core AS c
-LEFT JOIN parent_agg AS pa ON pa.trace_id = c.trace_id
 LEFT JOIN tool_agg AS ta ON ta.trace_id = c.trace_id
 LEFT JOIN event_agg AS ea ON ea.trace_id = c.trace_id
 LEFT JOIN skill_checks AS sc ON sc.trace_id = c.trace_id

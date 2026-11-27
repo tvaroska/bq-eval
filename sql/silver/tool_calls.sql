@@ -117,37 +117,50 @@ CREATE OR REPLACE TABLE FUNCTION `${PROJECT_ID}.${SILVER_INTERNAL_DATASET}.tool_
   folded_tools AS (
     SELECT
       s.*,
-      MAX(
-        CASE
-          WHEN s.otel_kind = 'SERVER'
-            AND peer.span_id IS NOT NULL
-            AND COALESCE(peer.otel_kind, '') != 'SERVER'
-            AND (
-              s.parent_span_id = peer.span_id
-              OR (s.mcp_session_id IS NOT NULL AND s.mcp_session_id = peer.mcp_session_id AND peer.span_id = s.p2_id)
-            )
-          THEN 1 ELSE 0
-        END
-      ) OVER (PARTITION BY s.trace_id, s.span_id) AS is_folded_server,
-      MAX(CASE WHEN COALESCE(s.otel_kind, '') != 'SERVER' AND peer.otel_kind = 'SERVER' AND (peer.parent_span_id = s.span_id OR (peer.mcp_session_id IS NOT NULL AND peer.mcp_session_id = s.mcp_session_id AND s.span_id = peer.p2_id)) AND peer.span_status = 'ERROR' THEN 1 ELSE 0 END) OVER (PARTITION BY s.trace_id, s.span_id) AS has_srv_error,
-      MAX(CASE WHEN COALESCE(s.otel_kind, '') != 'SERVER' AND peer.otel_kind = 'SERVER' AND (peer.parent_span_id = s.span_id OR (peer.mcp_session_id IS NOT NULL AND peer.mcp_session_id = s.mcp_session_id AND s.span_id = peer.p2_id)) AND peer.source_class = 'platform' THEN peer.emitted_args_sha256 END) OVER (PARTITION BY s.trace_id, s.span_id) AS srv_proxy_sha,
-      MAX(CASE WHEN COALESCE(s.otel_kind, '') != 'SERVER' AND peer.otel_kind = 'SERVER' AND (peer.parent_span_id = s.span_id OR (peer.mcp_session_id IS NOT NULL AND peer.mcp_session_id = s.mcp_session_id AND s.span_id = peer.p2_id)) THEN peer.authz_mode END) OVER (PARTITION BY s.trace_id, s.span_id) AS srv_authz_mode,
-      MAX(CASE WHEN COALESCE(s.otel_kind, '') != 'SERVER' AND peer.otel_kind = 'SERVER' AND (peer.parent_span_id = s.span_id OR (peer.mcp_session_id IS NOT NULL AND peer.mcp_session_id = s.mcp_session_id AND s.span_id = peer.p2_id)) THEN peer.job_id END) OVER (PARTITION BY s.trace_id, s.span_id) AS srv_job_id,
-      MAX(CASE WHEN COALESCE(s.otel_kind, '') != 'SERVER' AND peer.otel_kind = 'SERVER' AND (peer.parent_span_id = s.span_id OR (peer.mcp_session_id IS NOT NULL AND peer.mcp_session_id = s.mcp_session_id AND s.span_id = peer.p2_id)) THEN peer.bytes_scanned END) OVER (PARTITION BY s.trace_id, s.span_id) AS srv_bytes_scanned,
-      MAX(CASE WHEN COALESCE(s.otel_kind, '') != 'SERVER' AND peer.otel_kind = 'SERVER' AND (peer.parent_span_id = s.span_id OR (peer.mcp_session_id IS NOT NULL AND peer.mcp_session_id = s.mcp_session_id AND s.span_id = peer.p2_id)) THEN peer.bytes_billed END) OVER (PARTITION BY s.trace_id, s.span_id) AS srv_bytes_billed,
-      MAX(CASE WHEN COALESCE(s.otel_kind, '') != 'SERVER' AND peer.otel_kind = 'SERVER' AND (peer.parent_span_id = s.span_id OR (peer.mcp_session_id IS NOT NULL AND peer.mcp_session_id = s.mcp_session_id AND s.span_id = peer.p2_id)) THEN peer.slot_ms END) OVER (PARTITION BY s.trace_id, s.span_id) AS srv_slot_ms,
-      MAX(CASE WHEN COALESCE(s.otel_kind, '') != 'SERVER' AND peer.otel_kind = 'SERVER' AND (peer.parent_span_id = s.span_id OR (peer.mcp_session_id IS NOT NULL AND peer.mcp_session_id = s.mcp_session_id AND s.span_id = peer.p2_id)) THEN peer.acl_dropped_count END) OVER (PARTITION BY s.trace_id, s.span_id) AS srv_acl_dropped_count,
-      MAX(CASE WHEN COALESCE(s.otel_kind, '') != 'SERVER' AND peer.otel_kind = 'SERVER' AND (peer.parent_span_id = s.span_id OR (peer.mcp_session_id IS NOT NULL AND peer.mcp_session_id = s.mcp_session_id AND s.span_id = peer.p2_id)) THEN peer.corpus_digest END) OVER (PARTITION BY s.trace_id, s.span_id) AS srv_corpus_digest,
-      MAX(CASE WHEN COALESCE(s.otel_kind, '') != 'SERVER' AND peer.otel_kind = 'SERVER' AND (peer.parent_span_id = s.span_id OR (peer.mcp_session_id IS NOT NULL AND peer.mcp_session_id = s.mcp_session_id AND s.span_id = peer.p2_id)) THEN peer.sandbox_cpu_sec END) OVER (PARTITION BY s.trace_id, s.span_id) AS srv_sandbox_cpu_sec,
-      MAX(CASE WHEN COALESCE(s.otel_kind, '') != 'SERVER' AND peer.otel_kind = 'SERVER' AND (peer.parent_span_id = s.span_id OR (peer.mcp_session_id IS NOT NULL AND peer.mcp_session_id = s.mcp_session_id AND s.span_id = peer.p2_id)) THEN peer.sandbox_mem_gb_sec END) OVER (PARTITION BY s.trace_id, s.span_id) AS srv_sandbox_mem_gb_sec,
-      MAX(CASE WHEN COALESCE(s.otel_kind, '') != 'SERVER' AND peer.otel_kind = 'SERVER' AND (peer.parent_span_id = s.span_id OR (peer.mcp_session_id IS NOT NULL AND peer.mcp_session_id = s.mcp_session_id AND s.span_id = peer.p2_id)) THEN peer.sandbox_status END) OVER (PARTITION BY s.trace_id, s.span_id) AS srv_sandbox_status,
-      MAX(CASE WHEN COALESCE(s.otel_kind, '') != 'SERVER' AND peer.otel_kind = 'SERVER' AND (peer.parent_span_id = s.span_id OR (peer.mcp_session_id IS NOT NULL AND peer.mcp_session_id = s.mcp_session_id AND s.span_id = peer.p2_id)) THEN peer.inline_arguments END) OVER (PARTITION BY s.trace_id, s.span_id) AS srv_inline_arguments,
-      MAX(CASE WHEN COALESCE(s.otel_kind, '') != 'SERVER' AND peer.otel_kind = 'SERVER' AND (peer.parent_span_id = s.span_id OR (peer.mcp_session_id IS NOT NULL AND peer.mcp_session_id = s.mcp_session_id AND s.span_id = peer.p2_id)) THEN peer.inline_results END) OVER (PARTITION BY s.trace_id, s.span_id) AS srv_inline_results,
-      ROW_NUMBER() OVER (PARTITION BY s.trace_id, s.span_id ORDER BY peer.span_id ASC) AS peer_rn
+      CASE WHEN s.otel_kind = 'SERVER' AND peer.span_id IS NOT NULL THEN 1 ELSE 0 END AS is_folded_server,
+      CASE WHEN COALESCE(s.otel_kind, '') != 'SERVER' AND peer.span_status = 'ERROR' THEN 1 ELSE 0 END AS has_srv_error,
+      CASE WHEN COALESCE(s.otel_kind, '') != 'SERVER' AND peer.source_class = 'platform' THEN peer.emitted_args_sha256 END AS srv_proxy_sha,
+      CASE WHEN COALESCE(s.otel_kind, '') != 'SERVER' THEN peer.authz_mode END AS srv_authz_mode,
+      CASE WHEN COALESCE(s.otel_kind, '') != 'SERVER' THEN peer.job_id END AS srv_job_id,
+      CASE WHEN COALESCE(s.otel_kind, '') != 'SERVER' THEN peer.bytes_scanned END AS srv_bytes_scanned,
+      CASE WHEN COALESCE(s.otel_kind, '') != 'SERVER' THEN peer.bytes_billed END AS srv_bytes_billed,
+      CASE WHEN COALESCE(s.otel_kind, '') != 'SERVER' THEN peer.slot_ms END AS srv_slot_ms,
+      CASE WHEN COALESCE(s.otel_kind, '') != 'SERVER' THEN peer.acl_dropped_count END AS srv_acl_dropped_count,
+      CASE WHEN COALESCE(s.otel_kind, '') != 'SERVER' THEN peer.corpus_digest END AS srv_corpus_digest,
+      CASE WHEN COALESCE(s.otel_kind, '') != 'SERVER' THEN peer.sandbox_cpu_sec END AS srv_sandbox_cpu_sec,
+      CASE WHEN COALESCE(s.otel_kind, '') != 'SERVER' THEN peer.sandbox_mem_gb_sec END AS srv_sandbox_mem_gb_sec,
+      CASE WHEN COALESCE(s.otel_kind, '') != 'SERVER' THEN peer.sandbox_status END AS srv_sandbox_status,
+      CASE WHEN COALESCE(s.otel_kind, '') != 'SERVER' THEN peer.inline_arguments END AS srv_inline_arguments,
+      CASE WHEN COALESCE(s.otel_kind, '') != 'SERVER' THEN peer.inline_results END AS srv_inline_results,
+      ROW_NUMBER() OVER (
+        PARTITION BY s.trace_id, s.span_id
+        ORDER BY
+          CASE WHEN peer.source_class = 'platform' THEN 0 ELSE 1 END ASC,
+          CASE WHEN peer.span_status = 'ERROR' THEN 0 ELSE 1 END ASC,
+          peer.span_id ASC
+      ) AS peer_rn
     FROM tool_spans AS s
     LEFT JOIN tool_spans AS peer
       ON peer.trace_id = s.trace_id
       AND peer.span_id != s.span_id
+      AND (
+        (
+          s.otel_kind = 'SERVER'
+          AND COALESCE(peer.otel_kind, '') != 'SERVER'
+          AND (
+            s.parent_span_id = peer.span_id
+            OR (s.mcp_session_id IS NOT NULL AND s.mcp_session_id = peer.mcp_session_id AND peer.span_id = s.p2_id)
+          )
+        )
+        OR (
+          COALESCE(s.otel_kind, '') != 'SERVER'
+          AND peer.otel_kind = 'SERVER'
+          AND (
+            peer.parent_span_id = s.span_id
+            OR (peer.mcp_session_id IS NOT NULL AND peer.mcp_session_id = s.mcp_session_id AND s.span_id = peer.p2_id)
+          )
+        )
+      )
   ),
   kept_tools AS (
     SELECT

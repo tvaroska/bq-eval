@@ -63,35 +63,6 @@ CREATE OR REPLACE TABLE FUNCTION `${PROJECT_ID}.${SILVER_INTERNAL_DATASET}.spans
     )
     WHERE trace_first_start_time >= from_time AND trace_first_start_time < to_time
   ),
-  -- Narrow tree for innermost token-span ancestor detection without deep self-join fan-out.
-  span_tree AS (
-    SELECT
-      trace_id, span_id, parent_span_id, span_name,
-      JSON_VALUE(attributes, '$."gen_ai.operation.name"') AS op_name,
-      (
-        COALESCE(SAFE_CAST(JSON_VALUE(attributes, '$."gen_ai.usage.input_tokens"') AS INT64), 0) > 0
-        OR COALESCE(SAFE_CAST(JSON_VALUE(attributes, '$."gen_ai.usage.output_tokens"') AS INT64), 0) > 0
-        OR COALESCE(SAFE_CAST(JSON_VALUE(attributes, '$."gen_ai.usage.cache_read.input_tokens"') AS INT64), 0) > 0
-        OR COALESCE(SAFE_CAST(JSON_VALUE(attributes, '$."gen_ai.usage.cache_write.input_tokens"') AS INT64), 0) > 0
-        OR COALESCE(SAFE_CAST(JSON_VALUE(attributes, '$."gen_ai.usage.reasoning.output_tokens"') AS INT64), 0) > 0
-        OR COALESCE(SAFE_CAST(JSON_VALUE(attributes, '$."gen_ai.usage.thoughts_tokens"') AS INT64), 0) > 0
-      ) AS has_tok
-    FROM in_window
-  ),
-  enclosing_spans AS (
-    SELECT DISTINCT anc.trace_id, ancestor_span_id
-    FROM (
-      SELECT
-        t.trace_id,
-        CASE WHEN t.has_tok OR (p1.span_name = 'call_llm' AND t.op_name = 'generate_content') THEN t.parent_span_id END AS a1,
-        CASE WHEN t.has_tok THEN p1.parent_span_id END AS a2
-      FROM span_tree AS t
-      LEFT JOIN span_tree AS p1 ON p1.trace_id = t.trace_id AND p1.span_id = t.parent_span_id
-      WHERE t.has_tok OR t.op_name = 'generate_content'
-    ) AS anc
-    CROSS JOIN UNNEST(JSON_VALUE_ARRAY(JSON_ARRAY(anc.a1, anc.a2))) AS ancestor_span_id
-    WHERE ancestor_span_id IS NOT NULL AND ancestor_span_id != ''
-  ),
   adk_parents AS (
     SELECT
       w.trace_id, w.span_id,
@@ -116,12 +87,28 @@ CREATE OR REPLACE TABLE FUNCTION `${PROJECT_ID}.${SILVER_INTERNAL_DATASET}.spans
         OR NULLIF(JSON_VALUE(w.attributes, '$."gcp.vertex.agent.llm_request"'), '{}') IS NOT NULL
         OR NULLIF(JSON_VALUE(w.attributes, '$."gcp.vertex.agent.llm_response"'), '{}') IS NOT NULL
       ) AS has_model_inline_content
-    FROM in_window AS w
-    WHERE w.span_name = 'call_llm'
+    FROM (
+      SELECT r.*,
+        ROW_NUMBER() OVER (
+          PARTITION BY r.trace_id, r.span_id
+          ORDER BY CASE WHEN r.source_class = 'platform' THEN 0 WHEN r.source_class = 'application' THEN 1 ELSE 2 END,
+            r.receive_time DESC, r.end_time DESC, r.span_id ASC
+        ) AS rn
+      FROM raw_union AS r
+    ) AS w
+    WHERE w.rn = 1 AND w.span_name = 'call_llm'
   ),
-  parsed AS (
+  parsed_raw AS (
     SELECT
       w.landing_place, w.source_class, w.trace_id, w.span_id, w.parent_span_id, w.span_name,
+      (
+        COALESCE(SAFE_CAST(JSON_VALUE(w.attributes, '$."gen_ai.usage.input_tokens"') AS INT64), 0) > 0
+        OR COALESCE(SAFE_CAST(JSON_VALUE(w.attributes, '$."gen_ai.usage.output_tokens"') AS INT64), 0) > 0
+        OR COALESCE(SAFE_CAST(JSON_VALUE(w.attributes, '$."gen_ai.usage.cache_read.input_tokens"') AS INT64), 0) > 0
+        OR COALESCE(SAFE_CAST(JSON_VALUE(w.attributes, '$."gen_ai.usage.cache_write.input_tokens"') AS INT64), 0) > 0
+        OR COALESCE(SAFE_CAST(JSON_VALUE(w.attributes, '$."gen_ai.usage.reasoning.output_tokens"') AS INT64), 0) > 0
+        OR COALESCE(SAFE_CAST(JSON_VALUE(w.attributes, '$."gen_ai.usage.thoughts_tokens"') AS INT64), 0) > 0
+      ) AS has_tok,
       CASE w.raw_kind WHEN 1 THEN 'INTERNAL' WHEN 2 THEN 'SERVER' WHEN 3 THEN 'CLIENT' WHEN 4 THEN 'PRODUCER' WHEN 5 THEN 'CONSUMER' ELSE CAST(NULL AS STRING) END AS otel_kind,
       w.start_time, w.end_time, w.receive_time,
       GREATEST(0, TIMESTAMP_DIFF(w.end_time, w.start_time, MILLISECOND)) AS duration_ms,
@@ -306,6 +293,28 @@ CREATE OR REPLACE TABLE FUNCTION `${PROJECT_ID}.${SILVER_INTERNAL_DATASET}.spans
       )) AS stripped_labels
     FROM in_window AS w
   ),
+  parsed_anc1 AS (
+    SELECT
+      pr.*,
+      STRING_AGG(IF(pr.has_tok AND pr.parent_span_id IS NOT NULL AND pr.parent_span_id != '', pr.parent_span_id, NULL), '|') OVER (PARTITION BY pr.trace_id) AS tok_pids,
+      STRING_AGG(IF(pr.operation_name = 'generate_content' AND pr.parent_span_id IS NOT NULL AND pr.parent_span_id != '', pr.parent_span_id, NULL), '|') OVER (PARTITION BY pr.trace_id) AS gc_pids
+    FROM parsed_raw AS pr
+  ),
+  parsed AS (
+    SELECT
+      pa.*,
+      STRING_AGG(
+        IF(
+          pa.span_id IS NOT NULL AND pa.span_id != ''
+            AND STRPOS(CONCAT('|', COALESCE(pa.tok_pids, ''), '|'), CONCAT('|', pa.span_id, '|')) > 0
+            AND pa.parent_span_id IS NOT NULL AND pa.parent_span_id != '',
+          pa.parent_span_id,
+          NULL
+        ),
+        '|'
+      ) OVER (PARTITION BY pa.trace_id) AS tok_gpids
+    FROM parsed_anc1 AS pa
+  ),
   folded AS (
     SELECT
       p.*,
@@ -313,11 +322,13 @@ CREATE OR REPLACE TABLE FUNCTION `${PROJECT_ID}.${SILVER_INTERNAL_DATASET}.spans
       CASE WHEN p.operation_name = 'generate_content' AND ap.span_id IS NOT NULL THEN COALESCE(p.raw_conversation_id, ap.raw_conversation_id) ELSE p.raw_conversation_id END AS conversation_id,
       CASE WHEN p.operation_name = 'generate_content' AND ap.span_id IS NOT NULL THEN COALESCE(p.raw_finish_reason, ap.raw_finish_reason) ELSE p.raw_finish_reason END AS finish_reason,
       CASE
-        WHEN enc.ancestor_span_id IS NOT NULL THEN FALSE
+        WHEN p.span_id IS NOT NULL AND p.span_id != '' AND (
+          STRPOS(CONCAT('|', COALESCE(p.tok_pids, ''), '|'), CONCAT('|', p.span_id, '|')) > 0
+          OR (p.span_name = 'call_llm' AND STRPOS(CONCAT('|', COALESCE(p.gc_pids, ''), '|'), CONCAT('|', p.span_id, '|')) > 0)
+          OR STRPOS(CONCAT('|', COALESCE(p.tok_gpids, ''), '|'), CONCAT('|', p.span_id, '|')) > 0
+        ) THEN FALSE
         WHEN p.span_kind IN ('model_call', 'embedding')
-          OR COALESCE(p.input_tokens, 0) > 0 OR COALESCE(p.output_tokens, 0) > 0
-          OR COALESCE(p.cache_read_tokens, 0) > 0 OR COALESCE(p.cache_write_tokens, 0) > 0
-          OR COALESCE(p.reasoning_tokens, 0) > 0 THEN TRUE
+          OR p.has_tok THEN TRUE
         ELSE FALSE
       END AS is_model_call,
       CASE
@@ -327,7 +338,6 @@ CREATE OR REPLACE TABLE FUNCTION `${PROJECT_ID}.${SILVER_INTERNAL_DATASET}.spans
       MAX(CASE WHEN p.has_msg_ref THEN 1 ELSE 0 END) OVER (PARTITION BY p.trace_id) = 1 AS trace_has_shape3_ref
     FROM parsed AS p
     LEFT JOIN adk_parents AS ap ON ap.trace_id = p.trace_id AND ap.span_id = p.parent_span_id
-    LEFT JOIN enclosing_spans AS enc ON enc.trace_id = p.trace_id AND enc.ancestor_span_id = p.span_id
   ),
   with_app AS (
     SELECT

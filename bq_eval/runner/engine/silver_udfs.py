@@ -16,6 +16,8 @@ JsonStepFn = Callable[[object, list[str | int]], tuple[bool, object]]
 
 MAX_JCS_INPUT_BYTES = 65_532
 MAX_JCS_DEPTH = 64
+_BQ_JSON_BOOL_TRUE = "__BQ_JSON_BOOL_TRUE__"
+_BQ_JSON_BOOL_FALSE = "__BQ_JSON_BOOL_FALSE__"
 
 DEFAULT_SILVER_SQL_PARAMS: Mapping[str, str] = {
     "PROJECT_ID": "showcase-project",
@@ -270,6 +272,12 @@ def _sqlite_json_object(*args: object) -> str:
         if key is None:
             continue
         val = args[idx + 1]
+        if val == _BQ_JSON_BOOL_TRUE:
+            out[str(key)] = True
+            continue
+        if val == _BQ_JSON_BOOL_FALSE:
+            out[str(key)] = False
+            continue
         if isinstance(val, str) and val[:1] in "{[":
             try:
                 parsed = json.loads(val)
@@ -537,14 +545,69 @@ def _extract_sha256_hex_expr(inner: exp.Expr) -> exp.Expr | None:
     return None
 
 
+_BOOL_EXPR_TYPES: tuple[type[exp.Expr], ...] = (
+    exp.Boolean,
+    exp.Not,
+    exp.And,
+    exp.Or,
+    exp.Is,
+    exp.In,
+    exp.EQ,
+    exp.NEQ,
+    exp.GT,
+    exp.GTE,
+    exp.LT,
+    exp.LTE,
+)
+
+
+def _is_bool_ast_expr(expr: exp.Expr) -> bool:
+    if isinstance(expr, _BOOL_EXPR_TYPES):
+        return True
+    if isinstance(expr, exp.Paren) and expr.this is not None:
+        return _is_bool_ast_expr(expr.this)
+    if isinstance(expr, exp.If):
+        t_branch = expr.args.get("true")
+        f_branch = expr.args.get("false")
+        return (isinstance(t_branch, exp.Expr) and _is_bool_ast_expr(t_branch)) or (
+            isinstance(f_branch, exp.Expr) and _is_bool_ast_expr(f_branch)
+        )
+    if isinstance(expr, exp.Coalesce):
+        c_args = [expr.this, *expr.expressions]
+        return any(isinstance(a, exp.Expr) and _is_bool_ast_expr(a) for a in c_args)
+    return False
+
+
+def _wrap_json_object_val(expr: exp.Expr) -> exp.Expr:
+    copied = expr.copy()
+    if not _is_bool_ast_expr(copied):
+        return copied
+    if isinstance(copied, exp.Boolean):
+        return exp.Literal.string(_BQ_JSON_BOOL_TRUE if copied.this else _BQ_JSON_BOOL_FALSE)
+    return exp.Case(
+        ifs=[
+            exp.If(this=exp.Is(this=copied.copy(), expression=exp.Null()), true=exp.Null()),
+            exp.If(this=copied.copy(), true=exp.Literal.string(_BQ_JSON_BOOL_TRUE)),
+        ],
+        default=exp.Literal.string(_BQ_JSON_BOOL_FALSE),
+    )
+
+
+def _rewrite_json_object_pairs(exprs: list[exp.Expr]) -> list[exp.Expr]:
+    return [
+        _wrap_json_object_val(item) if idx % 2 == 1 else item.copy()
+        for idx, item in enumerate(exprs)
+    ]
+
+
 def _rewrite_json_object_ast(node: exp.JSONObject) -> exp.Expr:
-    kv_args: list[exp.Expr] = []
+    raw_kv: list[exp.Expr] = []
     for item in node.expressions:
         if isinstance(item, exp.JSONKeyValue):
-            kv_args.extend([item.this.copy(), item.expression.copy()])
+            raw_kv.extend([item.this, item.expression])
         else:
-            kv_args.append(item.copy())
-    return exp.Anonymous(this="BQ_JSON_OBJECT", expressions=kv_args)
+            raw_kv.append(item)
+    return exp.Anonymous(this="BQ_JSON_OBJECT", expressions=_rewrite_json_object_pairs(raw_kv))
 
 
 def _rewrite_silver_anonymous(node: exp.Anonymous) -> exp.Expr | None:
@@ -554,15 +617,14 @@ def _rewrite_silver_anonymous(node: exp.Anonymous) -> exp.Expr | None:
         "JSON_STRIP_NULLS": "BQ_JSON_STRIP_NULLS",
         "PARSE_JSON": "BQ_PARSE_JSON",
     }
-    vararg_map = {
-        "JSON_ARRAY": "BQ_JSON_ARRAY",
-        "JSON_OBJECT": "BQ_JSON_OBJECT",
-    }
     if upper in single_arg_map and node.expressions:
         out = exp.Anonymous(this=single_arg_map[upper], expressions=[node.expressions[0].copy()])
-    elif upper in vararg_map:
+    elif upper == "JSON_ARRAY":
+        out = exp.Anonymous(this="BQ_JSON_ARRAY", expressions=[e.copy() for e in node.expressions])
+    elif upper == "JSON_OBJECT":
         out = exp.Anonymous(
-            this=vararg_map[upper], expressions=[e.copy() for e in node.expressions]
+            this="BQ_JSON_OBJECT",
+            expressions=_rewrite_json_object_pairs(list(node.expressions)),
         )
     elif upper == "TO_JSON" and node.expressions:
         agg_rewrite = _rewrite_to_json_array_agg(node.expressions[0])

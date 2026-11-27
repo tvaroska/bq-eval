@@ -554,8 +554,8 @@ def _new_sqlite_bq_conn(
     conn.create_function("BQ_SESSION_USER", 0, lambda: session_user)
     conn.create_function("SESSION_USER", 0, lambda: session_user)
     conn.create_function("BQ_DATE", 1, lambda ts: str(ts)[:10] if ts is not None else None)
-    conn.create_function("JSON_FORMAT", 1, lambda v: None if v is None else str(v))
-    conn.create_function("TO_JSON_STRING", 1, lambda v: None if v is None else str(v))
+    conn.create_function("JSON_FORMAT", 1, lambda v: "null" if v is None else str(v))
+    conn.create_function("TO_JSON_STRING", 1, lambda v: "null" if v is None else str(v))
     # typeshed's sqlite3._AggregateProtocol models only 1-arg step(); these aggregates take 3-5 args.
     conn.create_aggregate("BQ_APPROX_QUANTILE", 3, _SQLiteQuantileAgg)  # type: ignore[arg-type]
     conn.create_aggregate("BQ_ARRAY_FIRST", 5, _SQLiteArrayFirstAgg)  # type: ignore[arg-type]

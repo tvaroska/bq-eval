@@ -366,26 +366,15 @@ lane_hourly AS (
     ON e.apphub_application_id = af.apphub_application_id
   GROUP BY 1, 2, 3, 4, 5, 6
 ),
-app_hourly AS (
-  SELECT
-    usage_hour,
-    apphub_application_id,
-    SUM(total_weighted_burndown_tokens) AS app_hour_burndown_tokens
-  FROM lane_hourly
-  GROUP BY usage_hour, apphub_application_id
-),
 hourly_totals AS (
   SELECT
     lh.*,
-    ah.app_hour_burndown_tokens,
+    SUM(lh.total_weighted_burndown_tokens) OVER (PARTITION BY lh.usage_hour, lh.apphub_application_id) AS app_hour_burndown_tokens,
     SUM(lh.total_weighted_burndown_tokens) OVER (PARTITION BY lh.usage_hour) AS hour_total_burndown_tokens,
     pf.pool_total_funded_gsus,
     COALESCE(po.fixed_term_order_share, 0.0) AS fixed_term_order_share,
     COALESCE(po.auto_renew_order_share, 0.0) AS auto_renew_order_share
   FROM lane_hourly AS lh
-  INNER JOIN app_hourly AS ah
-    ON lh.usage_hour = ah.usage_hour
-    AND lh.apphub_application_id = ah.apphub_application_id
   CROSS JOIN pool_funding AS pf
   LEFT JOIN pool_orders AS po
     ON lh.runtime_pool_id = po.runtime_pool_id

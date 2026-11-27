@@ -221,14 +221,14 @@ silver_payloads AS (
     tp.trace_id,
     COALESCE(
       JSON_VALUE(tp.turn_prompt, '$.text'),
-      TO_JSON_STRING(tp.turn_prompt),
+      NULLIF(TO_JSON_STRING(tp.turn_prompt), 'null'),
       ''
     ) AS user_prompt,
-    COALESCE(TO_JSON_STRING(tp.turn_context), '') AS retrieved_context,
-    COALESCE(TO_JSON_STRING(tp.step_outputs), '') AS step_outputs,
+    COALESCE(NULLIF(TO_JSON_STRING(tp.turn_context), 'null'), '') AS retrieved_context,
+    COALESCE(NULLIF(TO_JSON_STRING(tp.step_outputs), 'null'), '') AS step_outputs,
     COALESCE(
       JSON_VALUE(tp.turn_output, '$.text'),
-      TO_JSON_STRING(tp.turn_output),
+      NULLIF(TO_JSON_STRING(tp.turn_output), 'null'),
       ''
     ) AS final_response,
     (tp.previous_interaction_id IS NOT NULL AND tp.prior_history IS NULL) AS missing_session_context

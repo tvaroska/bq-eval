@@ -118,11 +118,11 @@ WITH raw_tp AS (
     tp.previous_interaction_id,
     t.conversation_id,
     t.trace_start_time,
-    COALESCE(JSON_VALUE(tp.turn_prompt, '$.text'), JSON_VALUE(tp.turn_prompt, '$.parts[0].content'), TO_JSON_STRING(tp.turn_prompt), '') AS user_prompt,
-    COALESCE(TO_JSON_STRING(tp.turn_context), '') AS retrieved_context,
-    COALESCE(TO_JSON_STRING(tp.step_outputs), '') AS step_outputs,
-    COALESCE(JSON_VALUE(tp.turn_output, '$.text'), JSON_VALUE(tp.turn_output, '$.parts[0].content'), TO_JSON_STRING(tp.turn_output), '') AS final_response,
-    COALESCE(TO_JSON_STRING(tp.prior_history), '') AS inline_prior_history,
+    COALESCE(JSON_VALUE(tp.turn_prompt, '$.text'), JSON_VALUE(tp.turn_prompt, '$.parts[0].content'), NULLIF(TO_JSON_STRING(tp.turn_prompt), 'null'), '') AS user_prompt,
+    COALESCE(NULLIF(TO_JSON_STRING(tp.turn_context), 'null'), '') AS retrieved_context,
+    COALESCE(NULLIF(TO_JSON_STRING(tp.step_outputs), 'null'), '') AS step_outputs,
+    COALESCE(JSON_VALUE(tp.turn_output, '$.text'), JSON_VALUE(tp.turn_output, '$.parts[0].content'), NULLIF(TO_JSON_STRING(tp.turn_output), 'null'), '') AS final_response,
+    COALESCE(NULLIF(TO_JSON_STRING(tp.prior_history), 'null'), '') AS inline_prior_history,
     (
       COALESCE(tp.turn_prompt_read_whole, TRUE)
       AND COALESCE(tp.turn_context_read_whole, TRUE)

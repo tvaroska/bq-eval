@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 
 import pytest
@@ -243,6 +244,21 @@ def _assert_unregistered_and_cliff_and_tool_loop_sql_guards() -> None:
         ).rows[0]
         assert worm_row["silver_sql_version"] == "v0.7.0"
         assert len(str(worm_row["snapshot_sha256"])) == 64
+        worm_verdicts = json.loads(str(worm_row["policy_verdicts_json"]))
+        assert worm_verdicts["rule0_pass"] is True
+        assert worm_verdicts["identity_gate_pass"] is True
+        assert worm_verdicts["skill_gate_pass"] is True
+        worm_t9 = runner.query(
+            "SELECT policy_verdicts_json FROM `agent_eval.v_gold_worm_snapshot_candidates` "
+            "WHERE trace_id = 'tr-tools-9'"
+        ).rows[0]
+        assert json.loads(str(worm_t9["policy_verdicts_json"]))["rule0_pass"] is False
+        opt_row = runner.query(
+            "SELECT mounted_skills FROM `agent_eval.v_optimizer_gold_export` "
+            "WHERE apphub_application_id = 'tool-app'"
+        ).rows[0]
+        assert opt_row["mounted_skills"] is None
+        assert runner.query("SELECT TO_JSON_STRING(CAST(NULL AS JSON)) AS s").rows[0]["s"] == "null"
 
         runner.load_rows(
             "silver_internal.workflow_events_sor",
