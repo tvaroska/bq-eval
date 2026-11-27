@@ -25,7 +25,6 @@ from bq_eval.deploy.engine.bootstrap import (
 )
 from bq_eval.deploy.engine.bq_client import bq_cli_query_runner, format_bq_job_labels
 from scripts.empirical_proof import (
-    _IDENT_RE,
     analyze_unconfounded_context_cliff_arms,
     build_information_schema_jobs_sync_sql,
 )
@@ -42,6 +41,7 @@ from scripts.m16_vertex_otel_probe import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+_IDENT_RE = re.compile(r"^[a-zA-Z0-9_-]{2,64}$")
 
 
 @dataclass(frozen=True)
@@ -499,7 +499,7 @@ def apply_terraform_and_bootstrap(
                     [
                         "bootstrap",
                         "--mode",
-                        "full",
+                        "gold",
                         "--project-id",
                         project_id,
                         "--dataset-id",
@@ -515,7 +515,7 @@ def apply_terraform_and_bootstrap(
             time.sleep(10.0 * (attempt + 1))
         bootstrap_rcs[label] = rc
         if rc != 0:
-            raise RuntimeError(f"`bq-eval bootstrap --mode full {label}` exited {rc}.")
+            raise RuntimeError(f"`bq-eval bootstrap --mode gold {label}` exited {rc}.")
 
     return {
         "provision_infra_requested": True,

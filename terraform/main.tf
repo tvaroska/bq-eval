@@ -14,7 +14,7 @@ provider "google-beta" {
 }
 
 locals {
-  required_apis = toset([
+  base_apis = [
     "bigquery.googleapis.com",
     "bigqueryconnection.googleapis.com",
     "bigquerydatatransfer.googleapis.com",
@@ -23,15 +23,23 @@ locals {
     "logging.googleapis.com",
     "observability.googleapis.com",
     "telemetry.googleapis.com",
-  ])
+  ]
+  required_apis = toset(
+    var.create_rtbf_kms_keyring ? concat(local.base_apis, ["cloudkms.googleapis.com"]) : local.base_apis
+  )
 
   resolved_bucket_name = var.shared_bucket_name != "" ? var.shared_bucket_name : var.project_id
+  resolved_worm_bucket_name = (
+    var.worm_archive_bucket_name != ""
+    ? var.worm_archive_bucket_name
+    : "${local.resolved_bucket_name}-worm"
+  )
 
-  trimmed_prefix       = trim(var.payload_prefix, "/")
-  normalized_prefix    = "${local.trimmed_prefix}/"
-  trimmed_shape3       = trim(var.silver_shape3_prefix, "/")
-  normalized_shape3    = "${local.trimmed_shape3}/"
-  shape3_in_payload    = startswith(local.normalized_shape3, local.normalized_prefix)
+  trimmed_prefix    = trim(var.payload_prefix, "/")
+  normalized_prefix = "${local.trimmed_prefix}/"
+  trimmed_shape3    = trim(var.silver_shape3_prefix, "/")
+  normalized_shape3 = "${local.trimmed_shape3}/"
+  shape3_in_payload = startswith(local.normalized_shape3, local.normalized_prefix)
   biglake_viewer_expr = (
     var.create_silver_datasets && !local.shape3_in_payload
     ? "resource.name.startsWith(\"projects/_/buckets/${local.effective_bucket_name}/objects/${local.normalized_prefix}\") || resource.name.startsWith(\"projects/_/buckets/${local.effective_bucket_name}/objects/${local.normalized_shape3}\")"
@@ -62,14 +70,13 @@ locals {
     : var.vertex_connection_service_account_email
   )
 
-  completions_source_uri = "gs://${local.effective_bucket_name}/${local.normalized_prefix}*.jsonl"
-  shape3_hive_prefix     = "gs://${local.effective_bucket_name}/${local.normalized_shape3}"
-  shape3_source_uri      = "${local.shape3_hive_prefix}*"
+  shape3_hive_prefix = "gs://${local.effective_bucket_name}/${local.normalized_shape3}"
+  shape3_source_uri  = "${local.shape3_hive_prefix}*"
 
   silver_datasets = {
     internal   = { id = var.silver_internal_dataset_id, desc = "Silver internal spans, JCS UDF, unit_entitlements, and workflow_events copies." }
-    ref        = { id = var.silver_ref_dataset_id, desc = "Silver SCD-2 reference tables (app_registry, tools, skill_registry)." }
-    open       = { id = var.silver_open_dataset_id, desc = "Silver open text-free published TVFs and wrapper views." }
+    ref        = { id = var.silver_ref_dataset_id, desc = "Silver SCD-2 reference tables (app_registry, tools, skill_registry, capacity pools, allowed_models)." }
+    open       = { id = var.silver_open_dataset_id, desc = "Silver open text-free published TVFs, requests, burst_metrics_1m, and wrapper views." }
     restricted = { id = var.silver_restricted_dataset_id, desc = "Silver restricted caller-filtered TVFs and Shape-3 BigLake payloads." }
   }
 
@@ -137,16 +144,70 @@ data "google_storage_bucket" "shared" {
   name = local.resolved_bucket_name
 }
 
+resource "google_storage_bucket" "gold_worm_archive" {
+  count = var.create_worm_archive_bucket ? 1 : 0
+
+  project                     = var.project_id
+  name                        = local.resolved_worm_bucket_name
+  location                    = var.region
+  storage_class               = "STANDARD"
+  uniform_bucket_level_access = true
+  public_access_prevention    = "enforced"
+  force_destroy               = !var.deletion_protection
+  labels                      = local.effective_labels
+
+  retention_policy {
+    retention_period = var.worm_retention_seconds
+    is_locked        = var.lock_worm_retention
+  }
+
+  dynamic "encryption" {
+    for_each = var.kms_key_name != "" ? [1] : []
+    content {
+      default_kms_key_name = var.kms_key_name
+    }
+  }
+
+  depends_on = [google_project_service.apis]
+}
+
+resource "google_kms_key_ring" "rtbf_subject_keys" {
+  count = var.create_rtbf_kms_keyring ? 1 : 0
+
+  project  = var.project_id
+  name     = "bq-eval-rtbf-subjects"
+  location = var.region
+
+  depends_on = [google_project_service.apis]
+}
+
+resource "google_kms_crypto_key" "rtbf_subject_dek_template" {
+  count = var.create_rtbf_kms_keyring ? 1 : 0
+
+  name                       = "subject-dek-template"
+  key_ring                   = google_kms_key_ring.rtbf_subject_keys[0].id
+  rotation_period            = "7776000s"
+  destroy_scheduled_duration = "86400s"
+  labels                     = local.effective_labels
+}
+
 resource "google_bigquery_dataset" "agent_eval" {
   count = var.create_eval_dataset ? 1 : 0
 
   project                    = var.project_id
   dataset_id                 = var.eval_dataset_id
-  friendly_name              = "BQ Eval & FinOps"
-  description                = "BigQuery Agent Evaluation, Dual-Path Telemetry Views, Calibration, and CPVO FinOps."
+  friendly_name              = "BQ Eval & FinOps (Gold)"
+  description                = "BigQuery Gold Evaluation, MRM Calibration, WORM Audit, and CPVO FinOps over Silver."
   location                   = var.dataset_location
   delete_contents_on_destroy = !var.deletion_protection
   labels                     = local.effective_labels
+
+  dynamic "default_encryption_configuration" {
+    for_each = var.kms_key_name != "" ? [1] : []
+    content {
+      kms_key_name = var.kms_key_name
+    }
+  }
 
   depends_on = [google_project_service.apis]
 }
@@ -165,7 +226,7 @@ resource "google_bigquery_connection" "vertex_ai" {
   location      = var.vertex_connection_location
   connection_id = var.vertex_connection_id
   friendly_name = "BQ Eval Vertex AI & BigLake Connection"
-  description   = "Cloud Resource connection for BigLake completion tables and AI.GENERATE_TABLE judges."
+  description   = "Cloud Resource connection for Shape-3 BigLake payload tables and AI.GENERATE_TABLE judges."
 
   cloud_resource {}
 
@@ -215,35 +276,6 @@ resource "google_storage_bucket_iam_member" "biglake_viewer" {
   }
 }
 
-resource "google_bigquery_table" "completions" {
-  project             = var.project_id
-  dataset_id          = local.effective_eval_dataset_id
-  table_id            = "completions"
-  description         = "Dual-schema BigLake external table over GenAI prompt/context/completion JSONL objects."
-  deletion_protection = var.deletion_protection
-  labels              = local.effective_labels
-
-  schema = jsonencode([
-    { name = "payload", type = "JSON", mode = "NULLABLE", description = "Uploaded OTel GenAI prompt/context/completion JSON payload." },
-    { name = "user_prompt", type = "STRING", mode = "NULLABLE", description = "Optional top-level user prompt text." },
-    { name = "retrieved_context", type = "STRING", mode = "NULLABLE", description = "Optional top-level retrieved context." },
-    { name = "final_response", type = "STRING", mode = "NULLABLE", description = "Optional top-level final response." }
-  ])
-
-  external_data_configuration {
-    autodetect            = false
-    ignore_unknown_values = true
-    source_format         = "NEWLINE_DELIMITED_JSON"
-    source_uris           = [local.completions_source_uri]
-    connection_id         = local.effective_connection_name
-  }
-
-  depends_on = [
-    google_storage_bucket_iam_member.biglake_viewer,
-    google_storage_bucket_iam_member.biglake_lister,
-  ]
-}
-
 resource "google_bigquery_dataset" "silver" {
   for_each = var.create_silver_datasets ? local.silver_datasets : {}
 
@@ -271,7 +303,7 @@ resource "google_bigquery_table" "shape3_payloads" {
   project             = var.project_id
   dataset_id          = google_bigquery_dataset.silver["restricted"].dataset_id
   table_id            = "shape3_payloads"
-  description         = "Hive-partitioned BigLake external table over Shape-3 content-by-reference payloads (alongside legacy completions until M19-2)."
+  description         = "Hive-partitioned BigLake external table over Shape-3 content-by-reference payloads."
   deletion_protection = var.deletion_protection
   labels              = local.effective_labels
 
@@ -319,7 +351,7 @@ resource "google_logging_linked_dataset" "obs_logs" {
   location    = "global"
   bucket      = google_logging_project_bucket_config.default_analytics[0].bucket_id
   link_id     = "obs_logs"
-  description = "Cloud Logging _Default analytics linked dataset (_AllLogs) for GenAI completion events."
+  description = "Cloud Logging _Default analytics linked dataset (_AllLogs) for gateway requests and events."
 }
 
 resource "google_bigquery_data_transfer_config" "daily_quota_guarded_judge" {

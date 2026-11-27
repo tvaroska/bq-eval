@@ -1,4 +1,4 @@
-"""CLI handler for `bq-eval bootstrap --mode light|full|hybrid [--dry-run|--apply]`."""
+"""CLI handler for `bq-eval bootstrap --mode silver|gold [--dry-run|--apply]`."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import json
 import shutil
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import cast
 
@@ -17,18 +18,21 @@ from bq_eval.deploy.engine.bootstrap import (
 )
 from bq_eval.deploy.engine.bq_client import apply_bootstrap_statements, format_bq_job_labels
 
+SubprocessRunner = Callable[..., subprocess.CompletedProcess[str]]
+WhichFn = Callable[[str], str | None]
+
 
 def register_bootstrap_subparser(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     """Attach the `bootstrap` subcommand to the root `bq-eval` CLI parser."""
     boot_p = sub.add_parser(
         "bootstrap",
-        help="Render, validate, or apply cold-start BigQuery SQL for light, full, or hybrid modes.",
+        help="Render, validate, or apply BigQuery SQL for Silver core (`silver`) or Silver + Gold (`gold`).",
     )
     boot_p.add_argument(
         "--mode",
-        choices=("light", "full", "hybrid", "silver"),
-        default="full",
-        help="Capture/deploy mode: light, full, hybrid, or silver (ADR-048 4-dataset Silver core).",
+        choices=("silver", "gold"),
+        default="gold",
+        help="Deploy mode: silver (4-dataset Silver core + capacity) or gold (Silver + Gold stack, default: gold).",
     )
     boot_p.add_argument(
         "--location",
@@ -79,6 +83,12 @@ def register_bootstrap_subparser(sub: argparse._SubParsersAction[argparse.Argume
         help="Silver outcomes lookback window in days (default: 30).",
     )
     boot_p.add_argument(
+        "--gold-lookback-hours",
+        type=int,
+        default=720,
+        help="Gold fixed-window view lookback over Silver TVFs in hours (default: 720).",
+    )
+    boot_p.add_argument(
         "--traces-dataset-id",
         default="obs_traces",
         help="Linked Cloud Trace dataset ID (default: obs_traces).",
@@ -117,7 +127,7 @@ def register_bootstrap_subparser(sub: argparse._SubParsersAction[argparse.Argume
     boot_p.add_argument(
         "--dataset-id",
         default="agent_eval",
-        help="Target BigQuery dataset ID (default: agent_eval).",
+        help="Target Gold BigQuery dataset ID (default: agent_eval).",
     )
     boot_p.add_argument(
         "--connection-id",
@@ -127,7 +137,7 @@ def register_bootstrap_subparser(sub: argparse._SubParsersAction[argparse.Argume
     boot_p.add_argument(
         "--payload-bucket",
         default=None,
-        help="GCS bucket for GenAI completion payloads (defaults to <project-id> single-bucket convention).",
+        help="GCS bucket for Shape-3 BigLake payloads (defaults to <project-id> single-bucket convention).",
     )
     boot_p.add_argument(
         "--payload-prefix",
@@ -135,34 +145,14 @@ def register_bootstrap_subparser(sub: argparse._SubParsersAction[argparse.Argume
         help="GCS object prefix inside payload bucket (default: bq-eval/).",
     )
     boot_p.add_argument(
-        "--include-omni",
-        action="store_true",
-        help="Include BigQuery Omni multi-cloud zero-egress spoke views (requires Omni target flags).",
+        "--flash-judge-endpoint",
+        default="gemini-3.8-flash",
+        help="Vertex AI endpoint for `gemini_3_8_flash_judge` REMOTE MODEL DDL (default: gemini-3.8-flash).",
     )
     boot_p.add_argument(
-        "--aws-omni-connection-id",
-        default=None,
-        help="AWS BigQuery Omni connection ID (required with --include-omni).",
-    )
-    boot_p.add_argument(
-        "--aws-s3-bucket",
-        default=None,
-        help="AWS S3 bucket holding spoke OTel Parquet/Iceberg files (required with --include-omni).",
-    )
-    boot_p.add_argument(
-        "--azure-omni-connection-id",
-        default=None,
-        help="Azure BigQuery Omni connection ID (required with --include-omni).",
-    )
-    boot_p.add_argument(
-        "--azure-storage-account",
-        default=None,
-        help="Azure ADLS storage account name (required with --include-omni).",
-    )
-    boot_p.add_argument(
-        "--azure-container",
-        default=None,
-        help="Azure Blob/ADLS container name (required with --include-omni).",
+        "--argon-judge-endpoint",
+        default="gemini-4-argon",
+        help="Vertex AI endpoint for `gemini_4_argon_judge` REMOTE MODEL DDL (default: gemini-4-argon).",
     )
     exec_group = boot_p.add_mutually_exclusive_group()
     exec_group.add_argument(
@@ -195,8 +185,10 @@ def _run_gcp_dry_run(
     stmts: list[tuple[str, str]],
     *,
     location: str = "US",
+    which_fn: WhichFn = shutil.which,
+    run_cmd: SubprocessRunner = subprocess.run,
 ) -> list[str]:
-    bq_bin = shutil.which("bq")
+    bq_bin = which_fn("bq")
     if bq_bin is None:
         raise ValueError(
             "`bq` CLI not found on PATH; omit --dry-run for credential-free offline validation."
@@ -206,7 +198,7 @@ def _run_gcp_dry_run(
     for label, stmt in stmts:
         if should_skip_dry_run_statement(stmt):
             continue
-        proc = subprocess.run(  # noqa: S603
+        proc = run_cmd(
             [
                 bq_bin,
                 "query",
@@ -236,7 +228,7 @@ def _format_bootstrap_markdown(report: BootstrapValidationReport) -> str:
         f"- **Connection ID:** `{report.connection_id}`",
         f"- **Payload URI Pattern:** `{report.payload_uri_pattern}`",
         f"- **Statements:** `{report.statement_count}` total (`{report.checked_count}` checkable, `{report.skipped_count}` DDL/proc skipped)",
-        f"- **Span Schema Columns Verified:** `{report.schema_column_count}`",
+        f"- **Silver Schema Columns Verified:** `{report.schema_column_count}`",
         f"- **Live GCP `--dry_run` Executed:** `{report.live_dry_run_executed}`",
         f"- **Live GCP `--apply` Executed:** `{report.live_apply_executed}`",
     ]
@@ -278,14 +270,11 @@ def run_bootstrap_command(args: argparse.Namespace) -> int:
         read_margin_minutes=args.read_margin_minutes,
         settle_minutes=args.settle_minutes,
         outcome_lookback_days=args.outcome_lookback_days,
+        gold_lookback_hours=args.gold_lookback_hours,
         shape3_prefix=args.shape3_prefix,
         shape3_format=args.shape3_format,
-        include_omni=bool(args.include_omni),
-        aws_omni_connection_id=args.aws_omni_connection_id,
-        aws_s3_bucket=args.aws_s3_bucket,
-        azure_omni_connection_id=args.azure_omni_connection_id,
-        azure_storage_account=args.azure_storage_account,
-        azure_container=args.azure_container,
+        flash_judge_endpoint=getattr(args, "flash_judge_endpoint", "gemini-3.8-flash"),
+        argon_judge_endpoint=getattr(args, "argon_judge_endpoint", "gemini-4-argon"),
     )
 
     extra_errors: list[str] = list(report.errors)
@@ -301,6 +290,7 @@ def run_bootstrap_command(args: argparse.Namespace) -> int:
                 effective_project,
                 stmts,
                 mode=mode,
+                dataset_id=args.dataset_id,
                 location=args.location,
                 ensure_traces_link=bool(args.ensure_observability_link),
                 silver_internal_dataset=args.silver_internal_dataset,

@@ -21,6 +21,8 @@ SILVER_SQL_ORDER: tuple[str, ...] = (
     "silver/traces.sql",
     "silver/trace_payloads.sql",
     "silver/outcomes.sql",
+    "silver/capacity/tables.sql",
+    "silver/capacity/requests.sql",
     "silver/wrapper_views.sql",
 )
 
@@ -201,6 +203,7 @@ _SILVER_TVF_SCHEMAS: frozenset[str] = frozenset(
         "outcomes",
         "outcomes_open",
         "outcome_links",
+        "requests",
     }
 )
 _SILVER_INTERNAL_BASES: frozenset[str] = frozenset(
@@ -284,6 +287,7 @@ def build_silver_routine_authorizations(  # noqa: PLR0913
     traces_dataset_id: str = "obs_traces",
     platform_traces_dataset_id: str = "silver_internal",
     logs_dataset_id: str = "obs_logs",
+    gold_dataset_id: str | None = None,
 ) -> dict[str, tuple[tuple[str, str, str], ...]]:
     """Return `{target_dataset: ((project_id, routine_dataset, routine_id), ...)}` for 2-hop TVF auth."""
     internal_bronze_tvfs = (
@@ -296,16 +300,17 @@ def build_silver_routine_authorizations(  # noqa: PLR0913
         (project_id, silver_restricted_dataset, "tool_calls"),
         (project_id, silver_restricted_dataset, "trace_payloads"),
     )
-    ref_reading_tvfs = (
+    ref_reading_tvfs: list[tuple[str, str, str]] = [
         (project_id, silver_internal_dataset, "spans"),
         (project_id, silver_internal_dataset, "tool_calls_base"),
         (project_id, silver_internal_dataset, "events_base"),
         (project_id, silver_internal_dataset, "traces_base"),
         (project_id, silver_internal_dataset, "outcomes_base"),
         (project_id, silver_open_dataset, "model_calls"),
+        (project_id, silver_open_dataset, "requests"),
         (project_id, silver_restricted_dataset, "tool_calls"),
         (project_id, silver_restricted_dataset, "trace_payloads"),
-    )
+    ]
     outer_open_tvfs = (
         (project_id, silver_open_dataset, "model_calls"),
         (project_id, silver_open_dataset, "tool_calls_open"),
@@ -326,7 +331,6 @@ def build_silver_routine_authorizations(  # noqa: PLR0913
     def _add(target_ds: str, routines: Sequence[tuple[str, str, str]]) -> None:
         bucket = auth_lists.setdefault(target_ds, [])
         for entry in routines:
-            # Skip self-dataset routine entries (routines already read tables in their own dataset).
             if entry[1] == target_ds:
                 continue
             if entry not in bucket:
@@ -334,7 +338,17 @@ def build_silver_routine_authorizations(  # noqa: PLR0913
 
     _add(traces_dataset_id, (*internal_bronze_tvfs, *restricted_bronze_tvfs))
     _add(platform_traces_dataset_id, (*internal_bronze_tvfs, *restricted_bronze_tvfs))
-    _add(logs_dataset_id, ((project_id, silver_internal_dataset, "events_base"),))
+    _add(
+        logs_dataset_id,
+        (
+            (project_id, silver_internal_dataset, "events_base"),
+            (project_id, silver_open_dataset, "requests"),
+        ),
+    )
+    if gold_dataset_id is not None:
+        gold_routine = (project_id, gold_dataset_id, "gold_call_costs")
+        ref_reading_tvfs.append(gold_routine)
+        _add(silver_open_dataset, (gold_routine,))
     _add(silver_ref_dataset, ref_reading_tvfs)
     _add(silver_internal_dataset, (*outer_open_tvfs, *outer_restricted_tvfs))
     return {ds: tuple(entries) for ds, entries in auth_lists.items() if entries}
@@ -421,7 +435,7 @@ def _validate_one_silver_statement(  # noqa: PLR0913
 ) -> list[str]:
     stmt_errors: list[str] = []
     if "omni_spoke_views" in label:
-        stmt_errors.append(f"{label}: Silver bootstrap must exclude omni_spoke_views.sql")
+        stmt_errors.append(f"{label}: Silver bootstrap must exclude retired omni spoke SQL")
     upper_stmt = stmt.upper()
     if "CREATE OR REPLACE TABLE FUNCTION" in upper_stmt or (
         "CREATE OR REPLACE FUNCTION" in upper_stmt

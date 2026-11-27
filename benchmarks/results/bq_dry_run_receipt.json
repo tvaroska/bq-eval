@@ -1,5 +1,5 @@
 {
-  "checked": 109,
+  "checked": 104,
   "generated_statements": [
     "build_ai_generate_table_judge_sql",
     "build_ai_evaluate_agent_sql"
@@ -7,40 +7,35 @@
   "live_bq_dry_run_executed": false,
   "mode": "offline_sqlglot_manifest",
   "per_file": {
-    "core/bqaa_adapter_views.sql": {
-      "checked": 7,
-      "skipped": 1,
-      "total": 8
-    },
     "core/ddl.sql": {
-      "checked": 12,
-      "skipped": 6,
-      "total": 18
+      "checked": 9,
+      "skipped": 5,
+      "total": 14
     },
-    "core/otel_compat_views.sql": {
-      "checked": 4,
+    "core/gold_cost_views.sql": {
+      "checked": 6,
       "skipped": 0,
-      "total": 4
+      "total": 6
+    },
+    "core/gold_eval_gates.sql": {
+      "checked": 9,
+      "skipped": 0,
+      "total": 9
     },
     "core/pricing_seed.sql": {
       "checked": 2,
       "skipped": 0,
       "total": 2
     },
-    "core/step1_trace_views.sql": {
-      "checked": 9,
-      "skipped": 1,
-      "total": 10
-    },
     "core/step2_stateless_eval.sql": {
-      "checked": 8,
-      "skipped": 2,
-      "total": 10
+      "checked": 10,
+      "skipped": 3,
+      "total": 13
     },
     "core/step3_daily_quota_guard.sql": {
-      "checked": 6,
+      "checked": 7,
       "skipped": 1,
-      "total": 7
+      "total": 8
     },
     "core/step3_saved_results.sql": {
       "checked": 4,
@@ -48,29 +43,29 @@
       "total": 5
     },
     "core/summary_views.sql": {
+      "checked": 3,
+      "skipped": 0,
+      "total": 3
+    },
+    "demo/demo_time_shift_loadgen.sql": {
+      "checked": 3,
+      "skipped": 1,
+      "total": 4
+    },
+    "finops/capacity_views.sql": {
+      "checked": 8,
+      "skipped": 0,
+      "total": 8
+    },
+    "silver/capacity/requests.sql": {
       "checked": 1,
       "skipped": 0,
       "total": 1
     },
-    "core/views.sql": {
-      "checked": 5,
-      "skipped": 0,
-      "total": 5
-    },
-    "demo/demo_time_shift_loadgen.sql": {
+    "silver/capacity/tables.sql": {
       "checked": 4,
-      "skipped": 1,
-      "total": 5
-    },
-    "finops/capacity_views.sql": {
-      "checked": 6,
       "skipped": 0,
-      "total": 6
-    },
-    "finops/omni_spoke_views.sql": {
-      "checked": 4,
-      "skipped": 2,
-      "total": 6
+      "total": 4
     },
     "silver/events.sql": {
       "checked": 4,
@@ -128,9 +123,9 @@
       "total": 3
     },
     "silver/wrapper_views.sql": {
-      "checked": 11,
+      "checked": 12,
       "skipped": 0,
-      "total": 11
+      "total": 12
     }
   },
   "project_id": "showcase-project",
@@ -145,5 +140,5 @@
     "CREATE PROCEDURE",
     "ALTER TABLE"
   ],
-  "skipped": 23
+  "skipped": 19
 }

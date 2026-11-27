@@ -38,14 +38,14 @@ if [[ $# -eq 0 ]]; then
   RUN_TMP="$(mktemp -d /tmp/bq_eval_gate.XXXXXX)"
   trap 'rm -rf "${RUN_TMP}"' EXIT
   uv run --no-sync bq-eval demo --html-out "${RUN_TMP}/scorecard.html" >/dev/null
-  uv run --no-sync bq-eval loadgen --replicas 5 --last-hour-replicas 2 >/dev/null
+  uv run --no-sync bq-eval loadgen --replicas 5 --last-hour-replicas 2 --jsonl-out "${RUN_TMP}/loadgen_jsonl" >/dev/null
   uv run --no-sync bq-eval judge-sql --project-id demo-proj >/dev/null
   uv run --no-sync bq-eval judge-sql --engine evaluate-agent --project-id demo-proj >/dev/null
-  uv run --no-sync bq-eval bootstrap --mode light --project-id demo-proj >/dev/null
-  uv run --no-sync bq-eval bootstrap --mode full --project-id demo-proj >/dev/null
-  uv run --no-sync bq-eval bootstrap --mode hybrid --project-id demo-proj >/dev/null
   uv run --no-sync bq-eval bootstrap --mode silver --project-id demo-proj >/dev/null
+  uv run --no-sync bq-eval bootstrap --mode gold --project-id demo-proj >/dev/null
   uv run --no-sync bq-eval capacity-export --corpus m2-live >/dev/null
   uv run --no-sync python -m bq_eval.runner.engine.loader --manifest tests/fixtures/silver/manifest.json --max-seconds 5.0 >/dev/null
+  printf '{"apphub_application_id":"kyc-app","final_response":"ok","judge_ordinal_score":4,"retrieved_context":"ctx","trace_id":"tr-1","user_prompt":"verify"}\n' > "${RUN_TMP}/sme_seed.jsonl"
+  uv run --no-sync python scripts/blind_sme_kit.py export --traces-jsonl "${RUN_TMP}/sme_seed.jsonl" --out-dir "${RUN_TMP}/blind_pack" --sealed-key-out "${RUN_TMP}/sealed_key.json" --min-cases 1 >/dev/null
   uv run --no-sync python examples/run_showcase_demo.py >/dev/null
 fi

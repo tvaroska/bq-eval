@@ -1,27 +1,18 @@
-"""FinOps boundaries, BQAA edge cases, Step-3 pairing, StratPPI parity, and multi-app outcomes."""
+"""FinOps boundaries, Step-3 pairing, StratPPI parity, and multi-app W3C outcomes on Silver + Gold."""
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
-from pathlib import Path
+from datetime import UTC, datetime
 
 import pytest
 
 from bq_eval.cli.app import main as cli_main
 from bq_eval.core.contract.otel import (
-    BQAAAgentEvent,
-    FinOpsTrafficType,
-    GenAISpanKind,
     OTelGenAISpanRecord,
     compute_weighted_burndown_tokens,
 )
 from bq_eval.core.contract.pricing import ModelPricingSKU
 from bq_eval.core.contract.results import ConfusionMatrix
-from bq_eval.core.engine.bqaa import (
-    bqaa_events_to_otel_spans,
-    bqaa_events_to_trace_payloads,
-    deduplicate_bqaa_events,
-)
 from bq_eval.core.engine.calibration import (
     rogan_gladen_calibrate,
     rogan_gladen_wilson_ci,
@@ -31,21 +22,18 @@ from bq_eval.core.engine.cost import compute_span_cost_usd
 from bq_eval.core.engine.sql_eval import (
     build_ai_evaluate_agent_sql,
     build_ai_generate_table_judge_sql,
-    evaluate_traces_in_sqlite,
 )
 from bq_eval.finops.engine.spend import (
     allocate_focus_two_pool_chargeback,
     diagnose_prefix_cache_dilution,
 )
-from tests.conftest import make_span
-
-REPO_ROOT = Path(__file__).resolve().parent.parent
+from tests.conftest import REPO_ROOT, eval_traces, make_span, open_runner_for_spans
 
 
 def test_engine_b_and_cli_managed_metrics_and_judge_model_override(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Verify --managed-metrics, --run-id, and --judge-model flags on `bq-eval judge-sql`."""
+    """Verify --managed-metrics, --run-id, and --judge-model flags on `bq-eval judge-sql` over Silver."""
     sql_b = build_ai_evaluate_agent_sql(
         project_id="demo-proj",
         dataset_id="agent_eval",
@@ -56,6 +44,7 @@ def test_engine_b_and_cli_managed_metrics_and_judge_model_override(
     assert "'hallucination_v1'" in sql_b
     assert "'safety_v1'" in sql_b
     assert "'tool_use_quality_v1'" not in sql_b
+    assert "v_eval_agent_turns" in sql_b
     assert "WHERE run_id = 'run-m5-01'" in sql_b
 
     rc_b = cli_main(
@@ -96,148 +85,8 @@ def test_engine_b_and_cli_managed_metrics_and_judge_model_override(
         build_ai_generate_table_judge_sql(project_id="demo-proj", judge_model="unknown-model")
 
 
-def test_bqaa_edge_cases_tool_error_classification_and_outcome_closed() -> None:
-    """Cover context-aware TOOL_ERROR status, invalid traffic fallback, and OUTCOME_CLOSED."""
-    ts = datetime(2026, 11, 14, 12, 0, 0, tzinfo=UTC)
-    events = [
-        BQAAAgentEvent(
-            event_id="evt-edge-01",
-            timestamp=ts,
-            event_type="USER_MESSAGE_RECEIVED",
-            agent="edge-agent",
-            session_id="sess-1",
-            invocation_id="inv-edge-01",
-            trace_id="trace-edge-01",
-            span_id="span-edge-01",
-            content={"text": "Check policy", "meta": [1, 2]},
-            attributes={
-                "custom_metadata": {
-                    "gcp.apphub.application.id": "edge-app",
-                    "finops.traffic_type": "not_a_real_type",
-                },
-            },
-        ),
-        BQAAAgentEvent(
-            event_id="evt-edge-02",
-            timestamp=ts + timedelta(milliseconds=100),
-            event_type="TOOL_ERROR",
-            agent="edge-agent",
-            session_id="sess-1",
-            invocation_id="inv-edge-01",
-            trace_id="trace-edge-01",
-            span_id="span-edge-02",
-            status="OK",
-            error_message="internal plugin crash",
-            content={"tool_name": "carrier_api", "code": 500},
-            attributes={"custom_metadata": {"gcp.apphub.application.id": "edge-app"}},
-        ),
-        BQAAAgentEvent(
-            event_id="evt-edge-02b",
-            timestamp=ts + timedelta(milliseconds=120),
-            event_type="TOOL_ERROR",
-            agent="edge-agent",
-            session_id="sess-1",
-            invocation_id="inv-edge-01",
-            trace_id="trace-edge-01",
-            span_id="span-edge-02b",
-            error_message="deadline exceeded timeout",
-            content={"tool_name": "carrier_api"},
-            attributes={"custom_metadata": {"gcp.apphub.application.id": "edge-app"}},
-        ),
-        BQAAAgentEvent(
-            event_id="evt-edge-02c",
-            timestamp=ts + timedelta(milliseconds=140),
-            event_type="TOOL_ERROR",
-            agent="edge-agent",
-            session_id="sess-1",
-            invocation_id="inv-edge-01",
-            trace_id="trace-edge-01",
-            span_id="span-edge-02c",
-            error_message="HTTP 429 quota resource_exhausted",
-            content={"tool_name": "carrier_api"},
-            attributes={"custom_metadata": {"gcp.apphub.application.id": "edge-app"}},
-        ),
-        BQAAAgentEvent(
-            event_id="evt-edge-02d",
-            timestamp=ts + timedelta(milliseconds=160),
-            event_type="TOOL_ERROR",
-            agent="edge-agent",
-            session_id="sess-1",
-            invocation_id="inv-edge-01",
-            trace_id="trace-edge-01",
-            span_id="span-edge-02d",
-            error_message="JSON schema validation error",
-            content={"tool_name": "carrier_api"},
-            attributes={"custom_metadata": {"gcp.apphub.application.id": "edge-app"}},
-        ),
-        BQAAAgentEvent(
-            event_id="evt-edge-03",
-            timestamp=ts + timedelta(milliseconds=200),
-            event_type="OUTCOME_CLOSED",
-            agent="edge-agent",
-            session_id="sess-1",
-            invocation_id="inv-edge-01",
-            trace_id="trace-edge-01",
-            span_id="span-edge-03",
-            content={"outcome_status": "VERIFIED"},
-            attributes={
-                "custom_metadata": {
-                    "gcp.apphub.application.id": "edge-app",
-                    "outcome.id": "oc-edge-1",
-                }
-            },
-        ),
-        BQAAAgentEvent(
-            event_id="evt-edge-04",
-            timestamp=ts + timedelta(milliseconds=250),
-            event_type="AGENT_RESPONSE",
-            agent="edge-agent",
-            session_id="sess-1",
-            invocation_id="inv-edge-01",
-            trace_id="trace-edge-01",
-            span_id="span-edge-04",
-            content={"answer": 42},
-            attributes={"custom_metadata": {"gcp.apphub.application.id": "edge-app"}},
-        ),
-        BQAAAgentEvent(
-            event_id="evt-edge-05",
-            timestamp=ts + timedelta(milliseconds=300),
-            event_type="AGENT_COMPLETED",
-            agent="edge-agent",
-            session_id="sess-1",
-            invocation_id="inv-edge-01",
-            trace_id="trace-edge-01",
-            span_id="span-edge-05",
-            content={"done": True},
-            attributes={
-                "custom_metadata": {
-                    "gcp.apphub.application.id": "edge-app",
-                    "finops.traffic_type": "not_a_real_type",
-                }
-            },
-        ),
-    ]
-    deduped = deduplicate_bqaa_events(events)
-    spans = bqaa_events_to_otel_spans(deduped)
-    payloads = bqaa_events_to_trace_payloads(deduped)
-
-    assert len(spans) == 6
-    assert spans[0].status_code == "ERROR"
-    assert spans[0].tool_call_status == "TOOL_ERROR"
-    assert spans[0].rule0_pass is False
-    assert spans[1].tool_call_status == "TIMEOUT"
-    assert spans[2].tool_call_status == "RATE_LIMITED"
-    assert spans[3].tool_call_status == "VALIDATION_ERROR"
-    assert spans[4].span_kind == GenAISpanKind.INVOKE_AGENT
-    assert spans[4].outcome_id == "oc-edge-1"
-    assert spans[5].finops_traffic_type == FinOpsTrafficType.UNCLASSIFIED
-    assert len(payloads) == 1
-    assert "Check policy" in payloads[0].user_prompt
-    assert "42" in payloads[0].final_response
-
-
-def test_weighted_burndown_200k_cliff_boundary() -> None:
-    """Exact 200,000 input tokens stays standard; 200,001 crosses into >200K cliff."""
+def test_weighted_burndown_and_cost_200k_cliff_boundary() -> None:
+    """Exact 200,000 total context stays standard; 200,001 crosses into >200K cliff and dilution."""
     bd_200k = compute_weighted_burndown_tokens(
         input_tokens=200_000, cached_input_tokens=0, output_tokens=0, thinking_tokens=0
     )
@@ -247,9 +96,6 @@ def test_weighted_burndown_200k_cliff_boundary() -> None:
     assert bd_200k == pytest.approx(200_000.0)
     assert bd_200k_plus1 == pytest.approx(400_002.0)
 
-
-def test_compute_span_cost_usd_with_explicit_sku_cliff() -> None:
-    """`compute_span_cost_usd` switches from standard to long-context SKU rates at 200,001 tokens."""
     sku = ModelPricingSKU(
         model_name="gemini-3.8-flash",
         effective_start=datetime(2026, 1, 1, tzinfo=UTC),
@@ -280,9 +126,18 @@ def test_compute_span_cost_usd_with_explicit_sku_cliff() -> None:
     assert compute_span_cost_usd(std_span, sku) == pytest.approx(0.03)
     assert compute_span_cost_usd(cliff_span, sku) == pytest.approx((200_001 / 1e6) * 0.30)
 
+    cached_cliff_span = make_span(
+        "trace-clif-002",
+        "span-clif-002",
+        input_tokens=200_001,
+        cached_input_tokens=100_000,
+        output_tokens=0,
+        thinking_tokens=0,
+    )
+    assert compute_span_cost_usd(cached_cliff_span, sku) == pytest.approx(
+        (100_001 / 1e6) * 0.30 + (100_000 / 1e6) * 0.030
+    )
 
-def test_prefix_cache_dilution_long_context_recoverable_window_usd() -> None:
-    """`>200K` prefix-cache dilution computes 1.8x burndown delta and `recoverable_window_usd`."""
     long_span = make_span(
         "trace-dil-001",
         "span-dil-001",
@@ -321,98 +176,103 @@ def test_focus_chargeback_payg_overflow_and_removed_legacy_kwarg() -> None:
 
 
 def test_step3_paired_run_comparison_temporal_order_and_dedup() -> None:
-    """Transpiled `v_step3_paired_run_comparison` orders `run_9` -> `run_10` temporally."""
-    from tests.sql_helpers import (
-        _extract_view_sql_text,
-        _new_sqlite_bq_conn,
-        _transpile_bq_view_to_sqlite,
-    )
-
-    step3_path = REPO_ROOT / "sql" / "core" / "step3_saved_results.sql"
-    view_sql = _transpile_bq_view_to_sqlite(
-        _extract_view_sql_text(step3_path, "agent_eval.v_step3_paired_run_comparison")
-    )
-    conn = _new_sqlite_bq_conn()
-    conn.execute(
-        "CREATE TABLE eval_results (apphub_application_id TEXT, rubric_id TEXT, eval_run_id TEXT, "
-        "trace_id TEXT, ordinal_score INT, binary_pass INT, reasoning_trace TEXT, "
-        "policy_sha256 TEXT, amended_clause_ids TEXT, target_clause_id TEXT DEFAULT NULL, evaluated_at TEXT)"
-    )
-    conn.executemany(
-        "INSERT INTO eval_results ("
-        "apphub_application_id, rubric_id, eval_run_id, trace_id, ordinal_score, "
-        "binary_pass, reasoning_trace, policy_sha256, amended_clause_ids, evaluated_at"
-        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        [
-            (
-                "app-1",
-                "groundedness_4pt_v1",
-                "run_9",
-                "tr-1",
-                2,
-                0,
-                "stale",
-                "a" * 64,
-                None,
-                "2026-11-10T09:00:00+00:00",
-            ),
-            (
-                "app-1",
-                "groundedness_4pt_v1",
-                "run_9",
-                "tr-1",
-                4,
-                1,
-                "good",
-                "a" * 64,
-                None,
-                "2026-11-10T10:00:00+00:00",
-            ),
-            (
-                "app-1",
-                "groundedness_4pt_v1",
-                "run_10",
-                "tr-1",
-                2,
-                0,
-                "regressed",
-                "b" * 64,
-                "c_02",
-                "2026-11-11T10:00:00+00:00",
-            ),
-        ],
-    )
-    conn.execute(f"CREATE VIEW v_step3_paired_run_comparison AS {view_sql}")
-    rows = conn.execute(
-        "SELECT baseline_run_id, candidate_run_id, is_negative_flip, is_positive_flip, "
-        "policy_changed, amended_clause_ids "
-        "FROM v_step3_paired_run_comparison"
-    ).fetchall()
-    conn.close()
+    """`v_step3_paired_run_comparison` orders `run_9` -> `run_10` temporally and pairs `shadow_of_trace_id`."""
+    with open_runner_for_spans() as runner:
+        runner.load_rows(
+            "agent_eval.eval_results",
+            [
+                {
+                    "eval_id": "e-r9-stale",
+                    "apphub_application_id": "app-1",
+                    "rubric_id": "groundedness_4pt_v1",
+                    "eval_run_id": "run_9",
+                    "trace_id": "tr-1",
+                    "sampling_stratum": "FULL_100PCT",
+                    "rule0_pass": True,
+                    "ordinal_score": 2,
+                    "binary_pass": False,
+                    "judge_status": "SCORED",
+                    "reasoning_trace": "stale",
+                    "judge_model": "gemini-3.8-flash",
+                    "judge_input_tokens": 100,
+                    "judge_output_tokens": 20,
+                    "judge_thinking_tokens": 0,
+                    "policy_sha256": "a" * 64,
+                    "amended_clause_ids": None,
+                    "evaluated_at": "2026-11-10T09:00:00+00:00",
+                },
+                {
+                    "eval_id": "e-r9-good",
+                    "apphub_application_id": "app-1",
+                    "rubric_id": "groundedness_4pt_v1",
+                    "eval_run_id": "run_9",
+                    "trace_id": "tr-1",
+                    "sampling_stratum": "FULL_100PCT",
+                    "rule0_pass": True,
+                    "ordinal_score": 4,
+                    "binary_pass": True,
+                    "judge_status": "SCORED",
+                    "reasoning_trace": "good",
+                    "judge_model": "gemini-3.8-flash",
+                    "judge_input_tokens": 100,
+                    "judge_output_tokens": 20,
+                    "judge_thinking_tokens": 0,
+                    "policy_sha256": "a" * 64,
+                    "amended_clause_ids": None,
+                    "evaluated_at": "2026-11-10T10:00:00+00:00",
+                },
+                {
+                    "eval_id": "e-r10-shadow",
+                    "apphub_application_id": "app-1",
+                    "rubric_id": "groundedness_4pt_v1",
+                    "eval_run_id": "run_10",
+                    "trace_id": "tr-shadow-1",
+                    "shadow_of_trace_id": "tr-1",
+                    "sampling_stratum": "FULL_100PCT",
+                    "rule0_pass": True,
+                    "ordinal_score": 2,
+                    "binary_pass": False,
+                    "judge_status": "SCORED",
+                    "reasoning_trace": "regressed",
+                    "judge_model": "gemini-3.8-flash",
+                    "judge_input_tokens": 100,
+                    "judge_output_tokens": 20,
+                    "judge_thinking_tokens": 0,
+                    "policy_sha256": "b" * 64,
+                    "amended_clause_ids": "c_02",
+                    "evaluated_at": "2026-11-11T10:00:00+00:00",
+                },
+            ],
+            append=True,
+        )
+        rows = runner.query(
+            "SELECT baseline_run_id, candidate_run_id, is_negative_flip, is_positive_flip, "
+            "policy_changed, amended_clause_ids "
+            "FROM `agent_eval.v_step3_paired_run_comparison`"
+        ).rows
     assert len(rows) == 1
-    assert tuple(rows[0]) == ("run_9", "run_10", 1, 0, 1, "c_02")
+    row = rows[0]
+    assert (
+        row["baseline_run_id"],
+        row["candidate_run_id"],
+        bool(row["is_negative_flip"]),
+        bool(row["is_positive_flip"]),
+        bool(row["policy_changed"]),
+        row["amended_clause_ids"],
+    ) == ("run_9", "run_10", True, False, True, "c_02")
 
 
-def _build_stratppi_20_to_1_fixture() -> tuple[
-    list[OTelGenAISpanRecord],
-    dict[str, bool],
-    dict[str, str],
-    list[tuple[object, ...]],
-    list[tuple[object, ...]],
-]:
+def test_stratppi_20_to_1_tail_sampling_sql_python_parity() -> None:
+    """`20:1` tail-skewed fixture proves `< 1e-12` Silver+Gold SQL vs Python parity and unbiased `calibrated_pass_rate`."""
     base = datetime(2026, 11, 21, 12, 0, 0, tzinfo=UTC)
     spans: list[OTelGenAISpanRecord] = []
     judge_outcomes: dict[str, bool] = {}
     sampling_strata: dict[str, str] = {}
-    sql_span_rows: list[tuple[object, ...]] = []
-    sql_eval_rows: list[tuple[object, ...]] = []
 
     for i in range(1000):
         is_tail = i < 50
         tid = f"tr-strat-{i:04d}"
         latency_ms = 6_000.0 if is_tail else 500.0
-        t0 = base + timedelta(seconds=i)
-        t1 = t0 + timedelta(milliseconds=latency_ms)
         spans.append(
             make_span(
                 tid,
@@ -427,124 +287,32 @@ def _build_stratppi_20_to_1_fixture() -> tuple[
                 base_time=base,
             )
         )
-        sql_span_rows.append(
-            (
-                tid,
-                f"sp-strat-{i:04d}",
-                None,
-                "invoke_agent",
-                "strat-app",
-                "svc",
-                "agent",
-                "SPAN_KIND_SERVER",
-                "invoke_agent",
-                "gemini-3.8-flash",
-                None,
-                None,
-                "OK",
-                1,
-                "production_inference",
-                None,
-                "strat-app",
-                None,
-                None,
-                None,
-                None,
-                t0.isoformat(),
-                t1.isoformat(),
-                t1.isoformat(),
-                latency_ms,
-                1_000,
-                0,
-                100,
-                0,
-                "{}",
-            )
-        )
         if is_tail or i < 100:
             stratum = "ERROR_OR_SLA_TAIL" if is_tail else "CANARY_5PCT"
             passed = (i < 10) if is_tail else ((i - 50) < 48)
             judge_outcomes[tid] = passed
             sampling_strata[tid] = stratum
-            sql_eval_rows.append(
-                (
-                    f"ev-{i}",
-                    "run-strat",
-                    tid,
-                    None,
-                    "strat-app",
-                    "groundedness_4pt_v1",
-                    "gemini-3.8-flash",
-                    stratum,
-                    1,
-                    "rationale",
-                    4 if passed else 2,
-                    1 if passed else 0,
-                    1000,
-                    100,
-                    0,
-                    t1.isoformat(),
-                )
-            )
-    return spans, judge_outcomes, sampling_strata, sql_span_rows, sql_eval_rows
-
-
-def test_stratppi_20_to_1_tail_sampling_sql_sqlite_python_parity() -> None:
-    """`20:1` tail-skewed fixture proves `< 1e-12` SQL/SQLite/Python parity and unbiased `calibrated_pass_rate`."""
-    from tests.sql_helpers import (
-        ENTERPRISE_EVAL_RESULTS_BASE_INSERT,
-        ENTERPRISE_OTEL_SPANS_BASE_INSERT,
-        _create_enterprise_sqlite_fixture,
-        _install_enterprise_views,
-        _new_sqlite_bq_conn,
-    )
-
-    spans, judge_outcomes, sampling_strata, sql_span_rows, sql_eval_rows = (
-        _build_stratppi_20_to_1_fixture()
-    )
-    conn = _new_sqlite_bq_conn()
-    _create_enterprise_sqlite_fixture(conn)
-    _install_enterprise_views(conn)
-    conn.executemany(ENTERPRISE_OTEL_SPANS_BASE_INSERT, sql_span_rows)
-    conn.executemany(ENTERPRISE_EVAL_RESULTS_BASE_INSERT, sql_eval_rows)
-    sme_rows = (
-        [("strat-app", "groundedness_4pt_v1", 1, 4, 1, 4, 1)] * 87
-        + [("strat-app", "groundedness_4pt_v1", 1, 4, 1, 2, 0)] * 2
-        + [("strat-app", "groundedness_4pt_v1", 1, 1, 0, 1, 0)] * 7
-        + [("strat-app", "groundedness_4pt_v1", 1, 1, 0, 4, 1)] * 4
-    )
-    conn.executemany("INSERT INTO sme_labels VALUES (?,?,?,?,?,?,?)", sme_rows)
 
     cm = ConfusionMatrix(tp=87, fn=2, tn=7, fp=4)
     py_strat = stratified_rogan_gladen_calibrate(
         strata=[(50, 50, 10), (950, 50, 48)],
         confusion=cm,
     )
-    sqlite_summary = evaluate_traces_in_sqlite(
+    sql_summary = eval_traces(
         spans=spans,
         judge_outcomes=judge_outcomes,
         sme_confusion=cm,
         sampling_strata=sampling_strata,
         sla_latency_ms=5000.0,
     )["strat-app"]
-    bq_row = conn.execute(
-        "SELECT * FROM v_agent_eval_and_finops_summary WHERE apphub_application_id = 'strat-app'"
-    ).fetchone()
-    conn.close()
 
     assert py_strat.raw_pass_rate == pytest.approx(0.922, abs=1e-12)
-    assert sqlite_summary.raw_judge_pass_rate == pytest.approx(py_strat.raw_pass_rate, abs=1e-12)
-    assert float(bq_row["raw_judge_pass_rate"]) == pytest.approx(py_strat.raw_pass_rate, abs=1e-12)
-    assert sqlite_summary.calibrated_pass_rate == pytest.approx(
+    assert sql_summary.raw_judge_pass_rate == pytest.approx(py_strat.raw_pass_rate, abs=1e-12)
+    assert sql_summary.calibrated_pass_rate == pytest.approx(
         py_strat.calibrated_pass_rate, abs=1e-12
     )
-    assert float(bq_row["calibrated_pass_rate"]) == pytest.approx(
-        py_strat.calibrated_pass_rate, abs=1e-12
-    )
-    assert sqlite_summary.calibrated_ci_95_lower == pytest.approx(py_strat.ci_95_lower, abs=1e-12)
-    assert float(bq_row["calibrated_ci_95_lower"]) == pytest.approx(py_strat.ci_95_lower, abs=1e-12)
-    assert sqlite_summary.calibrated_ci_95_upper == pytest.approx(py_strat.ci_95_upper, abs=1e-12)
-    assert float(bq_row["calibrated_ci_95_upper"]) == pytest.approx(py_strat.ci_95_upper, abs=1e-12)
+    assert sql_summary.calibrated_ci_95_lower == pytest.approx(py_strat.ci_95_lower, abs=1e-12)
+    assert sql_summary.calibrated_ci_95_upper == pytest.approx(py_strat.ci_95_upper, abs=1e-12)
 
     perfect_cm = ConfusionMatrix(tp=50, fn=0, tn=20, fp=0)
     wilson_lo, wilson_hi = rogan_gladen_wilson_ci(1.0, 20, perfect_cm)
@@ -554,14 +322,15 @@ def test_stratppi_20_to_1_tail_sampling_sql_sqlite_python_parity() -> None:
     assert default_res.ci_95_upper == pytest.approx(wilson_hi, abs=1e-12)
 
 
-def test_sqlite_multi_app_w3c_trace_per_app_sme_and_outcome_cpvo() -> None:
-    """Cross-app W3C trace stays 1 trace under root `outcome_owner`, SME keys isolate per app, and outcome CPVO computes."""
+def test_multi_app_w3c_trace_per_app_sme_and_outcome_cpvo() -> None:
+    """Cross-app W3C trace stays 1 trace under root `outcome_owner`, SME keys isolate per app, and CPVO computes."""
     base = datetime(2026, 11, 21, 12, 0, 0, tzinfo=UTC)
     spans = [
         make_span(
             "trace-cross-001",
             "span-root-001",
             app_id="app-alpha",
+            service_name="svc-alpha",
             outcome_id="out-alpha-1",
             outcome_owner="app-alpha",
             input_tokens=100_000,
@@ -576,6 +345,7 @@ def test_sqlite_multi_app_w3c_trace_per_app_sme_and_outcome_cpvo() -> None:
             "span-child-001",
             parent_span_id="span-root-001",
             app_id="app-downstream",
+            service_name="svc-downstream",
             outcome_id="out-alpha-1",
             outcome_owner="app-alpha",
             input_tokens=100_000,
@@ -592,6 +362,7 @@ def test_sqlite_multi_app_w3c_trace_per_app_sme_and_outcome_cpvo() -> None:
             parent_span_id="span-root-001",
             span_name="outcome.closed",
             app_id="app-alpha",
+            service_name="svc-alpha",
             outcome_id="out-alpha-1",
             outcome_owner="app-alpha",
             model_name="none",
@@ -606,11 +377,11 @@ def test_sqlite_multi_app_w3c_trace_per_app_sme_and_outcome_cpvo() -> None:
         ),
         make_span("trace-beta-001", "span-beta-001", app_id="app-beta", offset_s=5, base_time=base),
     ]
-    summaries = evaluate_traces_in_sqlite(
+    summaries = eval_traces(
         spans=spans,
         judge_outcomes={"trace-cross-001": True, "trace-beta-001": True},
         sme_confusion={"app-alpha": ConfusionMatrix(tp=87, fn=2, tn=7, fp=4)},
-        sme_ordinal_pairs={"app-alpha": [(4, 4), (4, 3), (3, 3), (2, 2), (1, 1)]},
+        sme_ordinal_pairs={"app-alpha": [(4, 4), (4, 3), (3, 3), (2, 2), (1, 1)] * 2},
         judge_cost_per_call_usd=0.0025,
     )
     assert set(summaries) == {"app-alpha", "app-beta"}
@@ -666,15 +437,6 @@ def test_policy_sha256_and_amended_clause_ids_in_judge_sql_and_ddl() -> None:
 
 def test_public_doc_hygiene_marks_evaluate_agent_preview() -> None:
     """All files citing `AI.EVALUATE_AGENT` explicitly note preview/non-public status."""
-    sql_files = (
-        REPO_ROOT / "sql" / "core" / "step2_stateless_eval.sql",
-        REPO_ROOT / "sql" / "core" / "step3_saved_results.sql",
-    )
-    for path in sql_files:
-        lower = path.read_text(encoding="utf-8").lower()
-        assert "ai.evaluate_agent" in lower
-        assert "preview" in lower or "non-public" in lower
-
     for md_path in sorted(REPO_ROOT.rglob("*.md")):
         if ".venv" in md_path.parts or md_path.name in {"roadmap.md", "roadmap-history.md"}:
             continue

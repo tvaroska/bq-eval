@@ -17,6 +17,11 @@ run "standalone_cold_project_defaults" {
   }
 
   assert {
+    condition     = length(google_storage_bucket.gold_worm_archive) == 1 && google_storage_bucket.gold_worm_archive[0].retention_policy[0].retention_period == 31536000 && google_storage_bucket.gold_worm_archive[0].retention_policy[0].is_locked == false
+    error_message = "Standalone mode must provision the PII-free Gold WORM bucket with 365d retention and opt-in lock."
+  }
+
+  assert {
     condition     = length(google_bigquery_dataset.agent_eval) == 1 && length(data.google_bigquery_dataset.agent_eval) == 0
     error_message = "Standalone mode must create 1 agent_eval dataset and 0 data lookups."
   }
@@ -37,8 +42,8 @@ run "standalone_cold_project_defaults" {
   }
 
   assert {
-    condition     = output.completions_source_uri == "gs://demo-bq-eval-cold/bq-eval/*.jsonl"
-    error_message = "BigLake completions table must point to gs://<project_id>/bq-eval/*.jsonl."
+    condition     = output.shape3_source_uri == "gs://demo-bq-eval-cold/bq-eval/shape3/*"
+    error_message = "Shape-3 BigLake table must point to gs://<project_id>/bq-eval/shape3/*."
   }
 
   assert {
@@ -52,13 +57,13 @@ run "standalone_cold_project_defaults" {
   }
 
   assert {
-    condition     = google_storage_bucket.shared[0].force_destroy == false && google_bigquery_table.completions.deletion_protection == true
+    condition     = google_storage_bucket.shared[0].force_destroy == false && google_bigquery_table.shape3_payloads[0].deletion_protection == true
     error_message = "Standalone defaults must enable deletion_protection = true (S-24)."
   }
 
   assert {
     condition     = length(google_bigquery_dataset.silver) == 4 && length(google_bigquery_table.shape3_payloads) == 1
-    error_message = "Standalone mode must provision 4 Silver datasets and Hive BigLake shape3_payloads alongside legacy completions."
+    error_message = "Standalone mode must provision 4 Silver datasets and Hive BigLake shape3_payloads."
   }
 
   assert {
@@ -81,13 +86,14 @@ run "standalone_scale_to_zero_disables_scheduled_judge" {
   }
 }
 
-run "standalone_active_enables_scheduled_judge_and_cmek" {
+run "standalone_active_enables_scheduled_judge_cmek_and_rtbf_kms" {
   command = plan
 
   variables {
-    project_id   = "demo-bq-eval-active"
-    power_policy = "active"
-    kms_key_name = "projects/demo-bq-eval-active/locations/us/keyRings/bq/cryptoKeys/silver"
+    project_id              = "demo-bq-eval-active"
+    power_policy            = "active"
+    kms_key_name            = "projects/demo-bq-eval-active/locations/us/keyRings/bq/cryptoKeys/silver"
+    create_rtbf_kms_keyring = true
   }
 
   assert {
@@ -96,8 +102,12 @@ run "standalone_active_enables_scheduled_judge_and_cmek" {
   }
 
   assert {
-    condition     = google_bigquery_dataset.silver["restricted"].default_encryption_configuration[0].kms_key_name == "projects/demo-bq-eval-active/locations/us/keyRings/bq/cryptoKeys/silver"
-    error_message = "Silver datasets must apply CMEK default_encryption_configuration when kms_key_name is set."
+    condition = (
+      google_bigquery_dataset.silver["restricted"].default_encryption_configuration[0].kms_key_name == "projects/demo-bq-eval-active/locations/us/keyRings/bq/cryptoKeys/silver"
+      && google_storage_bucket.gold_worm_archive[0].encryption[0].default_kms_key_name == "projects/demo-bq-eval-active/locations/us/keyRings/bq/cryptoKeys/silver"
+      && length(google_kms_crypto_key.rtbf_subject_dek_template) == 1
+    )
+    error_message = "Silver/WORM resources must apply CMEK and opt-in RTBF KMS keyring when enabled."
   }
 }
 
@@ -163,7 +173,7 @@ run "standalone_disjoint_shape3_prefix_and_worm_retention" {
   }
 
   assert {
-    condition     = length(google_storage_bucket.shared[0].lifecycle_rule) == 0
-    error_message = "Disabling enable_payload_lifecycle_delete must omit Delete lifecycle rules for WORM safety."
+    condition     = length(google_storage_bucket.shared[0].lifecycle_rule) == 0 && length(google_storage_bucket.gold_worm_archive[0].lifecycle_rule) == 0
+    error_message = "WORM and payload buckets must omit Delete lifecycle rules when disabled."
   }
 }

@@ -1,4 +1,4 @@
-"""Workbench, Empirical Receipt, Cross-Repo Wire Contracts & Tests."""
+"""Workbench, Empirical Receipt, `< 5s` `CI_ONLY` Optimizer Export & Cross-Repo Wire Contracts."""
 
 from __future__ import annotations
 
@@ -26,18 +26,20 @@ from bq_eval.demo.pipeline import (
     DEFAULT_M2_RECEIPT_PATH,
     DEFAULT_M2_SHA256_PATH,
     build_retail_2app_bundle,
+    render_markdown_report,
     run_showcase_pipeline,
     verify_receipt_sha256,
 )
-from bq_eval.demo.render.renderer import render_html_scorecard
+from bq_eval.demo.render.renderer import render_html_scorecard, render_page_view_html
+from bq_eval.demo.render.view import build_showcase_page_view
 from bq_eval.finops.contract.results import FocusChargebackRow
 from bq_eval.finops.engine.spend import (
     allocate_focus_hourly_chargeback,
     diagnose_prefix_cache_dilution,
     plan_off_peak_eval_schedule,
 )
-from bq_eval.finops.engine.sqlite_capacity import evaluate_hourly_burndown_in_sqlite
-from tests.conftest import make_span
+from bq_eval.runner.engine.eval_adapter import run_ci_only_eval
+from tests.conftest import eval_hourly_burndown, make_span, open_runner_for_spans
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -183,9 +185,6 @@ def test_m2_live_receipt_sha256_manifest_and_custom_scenario_replay(
     assert receipt.kyc_cohort.po_box_step1_traps_caught == 8
     assert receipt.kyc_cohort.ocr_step1_rejects == 8
 
-    from bq_eval.demo.render.renderer import render_page_view_html
-    from bq_eval.demo.render.view import build_showcase_page_view
-
     workbench_html = render_page_view_html(build_showcase_page_view(m2_artifacts, live_api=False))
     assert "28 structural + 8 PO Box + 8 OCR" in workbench_html
     assert "44 of 280 cases rejected" in workbench_html
@@ -205,8 +204,6 @@ def test_m2_live_receipt_sha256_manifest_and_custom_scenario_replay(
     assert kyc_sum.outcome_cost_per_verified_ai_usd is not None
     assert kyc_sum.outcome_cost_per_verified_usd > kyc_sum.outcome_cost_per_verified_ai_usd
 
-    from bq_eval.demo.pipeline import render_markdown_report
-
     md_report = render_markdown_report(m2_artifacts)
     assert "## 5. Reconstructed Fleet Cohort Receipts" in md_report
     assert "reconstructed_from_bundle_spans" in md_report
@@ -217,13 +214,6 @@ def test_capacity_wire_contract_hourly_burndown_jsonl_and_hourly_focus_chargebac
     tmp_path: Path,
 ) -> None:
     """Verify `v_capacity_hourly_burndown_export`, `otel_spans.jsonl`, and `allocate_focus_hourly_chargeback`."""
-    from tests.sql_helpers import (
-        ENTERPRISE_OTEL_SPANS_BASE_INSERT,
-        _create_enterprise_sqlite_fixture,
-        _install_enterprise_views,
-        _new_sqlite_bq_conn,
-    )
-
     t_h0 = datetime(2026, 11, 21, 10, 15, 0, tzinfo=UTC)
     t_h1 = datetime(2026, 11, 21, 11, 30, 0, tzinfo=UTC)
     spans = [
@@ -248,63 +238,25 @@ def test_capacity_wire_contract_hourly_burndown_jsonl_and_hourly_focus_chargebac
             base_time=t_h1,
         ),
     ]
-    sqlite_rows = evaluate_hourly_burndown_in_sqlite(spans)
-    assert len(sqlite_rows) == 2
+    export_rows = eval_hourly_burndown(spans)
+    assert len(export_rows) == 2
 
-    conn = _new_sqlite_bq_conn()
-    _create_enterprise_sqlite_fixture(conn)
-    _install_enterprise_views(conn)
-    for s in spans:
-        conn.execute(
-            ENTERPRISE_OTEL_SPANS_BASE_INSERT,
-            (
-                s.trace_id,
-                s.span_id,
-                s.parent_span_id,
-                "invoke_agent",
-                s.gcp_apphub_application_id,
-                s.service_name,
-                s.agent_name,
-                s.otel_span_kind,
-                str(s.span_kind),
-                s.model_name,
-                None,
-                None,
-                s.status_code,
-                1,
-                str(s.finops_traffic_type),
-                None,
-                s.gcp_apphub_application_id,
-                None,
-                None,
-                None,
-                None,
-                s.start_time.isoformat(),
-                s.end_time.isoformat(),
-                s.end_time.isoformat(),
-                s.latency_ms,
-                s.input_tokens,
-                s.cached_input_tokens,
-                s.output_tokens,
-                s.thinking_tokens,
-                "{}",
-            ),
-        )
-    bq_rows = conn.execute(
-        "SELECT * FROM v_capacity_hourly_burndown_export ORDER BY timestamp ASC, tenant ASC"
-    ).fetchall()
-    conn.close()
+    with open_runner_for_spans(spans) as runner:
+        bq_rows = runner.query(
+            "SELECT * FROM `agent_eval.v_capacity_hourly_burndown_export` "
+            "ORDER BY timestamp ASC, tenant ASC"
+        ).rows
 
     assert len(bq_rows) == 2
-    for bq_r, twin_r in zip(bq_rows, sqlite_rows, strict=True):
+    for bq_r, exp_r in zip(bq_rows, export_rows, strict=True):
         parsed_ts = datetime.fromisoformat(str(bq_r["timestamp"]).replace("Z", "+00:00"))
         assert parsed_ts.minute == 0
-        assert bq_r["tenant"] == twin_r.tenant == twin_r.apphub_application_id
-        assert bq_r["model"] == twin_r.model == twin_r.model_name
-        assert int(bq_r["cached_tokens"]) == twin_r.cached_tokens == twin_r.cached_input_tokens
-        assert int(bq_r["thoughts_tokens"]) == twin_r.thoughts_tokens == twin_r.thinking_tokens
-        assert float(bq_r["precomputed_weighted_burndown_tokens"]) == pytest.approx(
-            twin_r.precomputed_weighted_burndown_tokens, abs=1e-12
+        assert bq_r["tenant"] == exp_r.tenant == exp_r.apphub_application_id
+        assert bq_r["model"] == exp_r.model == exp_r.model_name
+        assert int(str(bq_r["cached_tokens"])) == exp_r.cached_tokens == exp_r.cached_input_tokens
+        assert int(str(bq_r["thoughts_tokens"])) == exp_r.thoughts_tokens == exp_r.thinking_tokens
+        assert float(str(bq_r["precomputed_weighted_burndown_tokens"])) == pytest.approx(
+            exp_r.precomputed_weighted_burndown_tokens, abs=1e-12
         )
 
     seed_spans, seed_payloads, _ = generate_time_shifted_corpus(
@@ -351,125 +303,96 @@ def test_capacity_wire_contract_hourly_burndown_jsonl_and_hourly_focus_chargebac
     )
 
 
-def test_docubridge_canonical_select_views_contract() -> None:
-    """Execute DocuBridge's 4 canonical `SELECT` queries against transpiled `bq-eval` views."""
-    from tests.sql_helpers import (
-        ENTERPRISE_OTEL_SPANS_BASE_INSERT,
-        _create_enterprise_sqlite_fixture,
-        _extract_view_sql_text,
-        _install_enterprise_views,
-        _new_sqlite_bq_conn,
-        _transpile_bq_view_to_sqlite,
-    )
+def test_docubridge_canonical_select_views_and_ci_only_optimizer_export() -> None:
+    """Execute DocuBridge's 4 canonical `SELECT` queries and `< 5s` `CI_ONLY` Optimizer Gold export."""
+    base = datetime(2026, 11, 21, 12, 0, 0, tzinfo=UTC)
+    spans = [
+        make_span(
+            "tr-db-1",
+            "sp-db-1",
+            app_id="meridian-loan-consolidation",
+            service_name="bridge-meridian",
+            agent_name="meridian_underwriter",
+            otel_span_kind="SPAN_KIND_SERVER",
+            outcome_id="out-db-1",
+            outcome_owner="meridian-loan-consolidation",
+            source_mode="PDF_PATH_B_FLASH",
+            skill_id="loan-payoff-statement",
+            skill_version="1.1.0",
+            latency_ms=2000.0,
+            input_tokens=5_000,
+            cached_input_tokens=2_000,
+            output_tokens=400,
+            thinking_tokens=0,
+            attributes={
+                "bq_eval.case_id": "case-001",
+                "bq_eval.eval_run_id": "opt-run-1",
+                "bq_eval.eval_split": "train",
+                "bq_eval.skill.sha256": "a" * 64,
+                "bq_eval.skill.protected_block_sha256": "b" * 64,
+            },
+            base_time=base,
+        ),
+        make_span(
+            "tr-db-1",
+            "sp-db-close",
+            parent_span_id="sp-db-1",
+            span_name="outcome.closed",
+            app_id="meridian-loan-consolidation",
+            service_name="bridge-meridian",
+            agent_name="meridian_underwriter",
+            outcome_id="out-db-1",
+            outcome_owner="meridian-loan-consolidation",
+            model_name="none",
+            input_tokens=0,
+            cached_input_tokens=0,
+            output_tokens=0,
+            thinking_tokens=0,
+            latency_ms=0.0,
+            offset_s=2,
+            attributes={"outcome.status": "succeeded", "outcome.verified": "true"},
+            base_time=base,
+        ),
+    ]
 
-    conn = _new_sqlite_bq_conn()
-    _create_enterprise_sqlite_fixture(conn)
-    _install_enterprise_views(conn)
-    step1_path = REPO_ROOT / "sql" / "core" / "step1_trace_views.sql"
-    for extra_view in ("agent_eval.v_cost_per_verified_outcome", "agent_eval.v_skill_lineage_roi"):
-        short = extra_view.split(".", 1)[1]
-        sql = _transpile_bq_view_to_sqlite(_extract_view_sql_text(step1_path, extra_view))
-        conn.execute(f"CREATE VIEW {short} AS {sql}")
-
-    t0 = "2026-11-21T12:00:00+00:00"
-    t1 = "2026-11-21T12:00:02+00:00"
-    conn.executemany(
-        ENTERPRISE_OTEL_SPANS_BASE_INSERT,
-        [
+    with open_runner_for_spans(spans) as runner:
+        docubridge_queries = (
             (
-                "tr-db-1",
-                "sp-db-1",
-                None,
-                "invoke_agent",
-                "meridian-loan-consolidation",
-                "bridge-meridian",
-                "meridian_underwriter",
-                "SPAN_KIND_SERVER",
-                "invoke_agent",
-                "gemini-3.8-flash",
-                None,
-                None,
-                "OK",
-                1,
-                "production_inference",
-                "out-db-1",
-                "meridian-loan-consolidation",
-                "PDF_PATH_B_FLASH",
-                "loan-payoff-statement",
-                "1.1.0",
-                "LOAN-1",
-                t0,
-                t1,
-                t1,
-                2000.0,
-                5_000,
-                2_000,
-                400,
-                0,
-                "{}",
+                "SELECT apphub_application_id, source_mode, agent_name, total_outcomes, "
+                "verified_outcomes, measured_model_cost_usd, measured_judge_cost_usd, "
+                "estimated_infra_cost_usd, cost_per_verified_outcome_ai_usd, "
+                "cost_per_verified_outcome_usd FROM `agent_eval.v_cost_per_verified_outcome`"
             ),
             (
-                "tr-db-1",
-                "sp-db-close",
-                "sp-db-1",
-                "outcome.closed",
-                "meridian-loan-consolidation",
-                "bridge-meridian",
-                "meridian_underwriter",
-                "SPAN_KIND_INTERNAL",
-                "invoke_agent",
-                "none",
-                None,
-                None,
-                "OK",
-                1,
-                "production_inference",
-                "out-db-1",
-                "meridian-loan-consolidation",
-                "PDF_PATH_B_FLASH",
-                "loan-payoff-statement",
-                "1.1.0",
-                "LOAN-1",
-                t1,
-                t1,
-                t1,
-                0.0,
-                0,
-                0,
-                0,
-                0,
-                '{"outcome.status": "succeeded", "outcome.verified": "true"}',
+                "SELECT apphub_application_id, total_traces, attributed_traces, attributed_spend_usd, "
+                "unattributed_spend_usd, attribution_coverage_pct, passes_coverage_gate "
+                "FROM `agent_eval.v_attribution_coverage`"
             ),
-        ],
-    )
+            (
+                "SELECT apphub_application_id, skill_id, skill_version, skill_stage, total_outcomes, "
+                "verified_outcomes, human_reviews_per_verified_outcome, cost_per_verified_outcome_usd "
+                "FROM `agent_eval.v_skill_lineage_roi`"
+            ),
+            (
+                "SELECT apphub_application_id, rubric_id, total_traces, rule0_pass_rate, "
+                "calibration_status, calibrated_pass_rate, total_spend_usd, "
+                "cost_per_verified_outcome_usd FROM `agent_eval.v_agent_eval_and_finops_summary`"
+            ),
+        )
+        for query in docubridge_queries:
+            rows = runner.query(query).rows
+            assert len(rows) == 1
 
-    docubridge_queries = (
-        (
-            "SELECT apphub_application_id, source_mode, agent_name, total_outcomes, "
-            "verified_outcomes, measured_model_cost_usd, measured_judge_cost_usd, "
-            "estimated_infra_cost_usd, cost_per_verified_outcome_ai_usd, "
-            "cost_per_verified_outcome_usd FROM v_cost_per_verified_outcome"
-        ),
-        (
-            "SELECT apphub_application_id, total_traces, attributed_traces, attributed_spend_usd, "
-            "unattributed_spend_usd, attribution_coverage_pct, passes_coverage_gate "
-            "FROM v_attribution_coverage"
-        ),
-        (
-            "SELECT apphub_application_id, skill_id, skill_version, skill_stage, total_outcomes, "
-            "verified_outcomes, human_reviews_per_verified_outcome, cost_per_verified_outcome_usd "
-            "FROM v_skill_lineage_roi"
-        ),
-        (
-            "SELECT apphub_application_id, rubric_id, total_traces, rule0_pass_rate, "
-            "calibration_status, calibrated_pass_rate, total_spend_usd, "
-            "cost_per_verified_outcome_usd FROM v_agent_eval_and_finops_summary"
-        ),
-    )
-    for query in docubridge_queries:
-        rows = conn.execute(query).fetchall()
-        assert len(rows) == 1
-    conn.close()
+    ci_res = run_ci_only_eval(spans[:1], max_seconds=5.0)
+    assert ci_res["calibration_mode"] == "CI_ONLY"
+    assert float(str(ci_res["elapsed_sec"])) < 5.0
+    cands = ci_res["candidates"]
+    assert isinstance(cands, list) and len(cands) == 1
+    cand = cands[0]
+    assert cand["optimizer_mode"] == "CI_ONLY"
+    assert bool(cand["split_disjoint_verified"]) is True
+    assert bool(cand["passes_prefix_cache_floor"]) is True
+    assert cand["calibrated_holdout_pass_rate"] is None
 
 
 def test_rubric_temperature_mixed_app_rejection_and_root_span_order() -> None:

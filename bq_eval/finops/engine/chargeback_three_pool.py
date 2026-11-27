@@ -281,14 +281,20 @@ def parse_utc_hour(raw_hour: str) -> datetime:
 
 
 def contiguous_utc_hours(raw_hours: Sequence[str], *, max_hours: int = 168) -> tuple[datetime, ...]:
-    """Expand observed ISO hour keys into a contiguous UTC hourly grid (no silent gaps)."""
+    """Expand observed ISO hour keys into a contiguous UTC hourly grid (failing loudly past `max_hours`)."""
+    if max_hours < 1:
+        raise ValueError("max_hours must be >= 1.")
     parsed = sorted({parse_utc_hour(h) for h in raw_hours})
     if not parsed:
         return ()
     start, end = parsed[0], parsed[-1]
     span_hours = int((end - start).total_seconds() // 3600) + 1
-    count = min(max_hours, max(1, span_hours))
-    return tuple(start + timedelta(hours=offset) for offset in range(count))
+    if span_hours > max_hours:
+        raise ValueError(
+            f"Observed UTC window spans {span_hours} hours, which exceeds max_hours={max_hours} "
+            "(refusing to truncate silently)."
+        )
+    return tuple(start + timedelta(hours=offset) for offset in range(max(1, span_hours)))
 
 
 def build_capacity_residual_schedule_request(  # noqa: PLR0913
@@ -300,12 +306,13 @@ def build_capacity_residual_schedule_request(  # noqa: PLR0913
     deadline_jobs: Sequence[CapacityDeadlineJobPayload] = (),
     evergreen_backfill_tokens: float = 0.0,
     paygo_per_1m_burndown_tokens_usd: float = 0.50,
+    max_hours: int = 168,
 ) -> CapacityResidualSchedulePayload:
-    """Export a `<= 85%` off-peak PT valley scavenging payload matching `capacity` `ResidualScheduleRequest`."""
+    """Export an off-peak PT valley scavenging payload matching `capacity` `ResidualScheduleRequest`."""
     if not hourly_rows:
         raise ValueError("hourly_rows must be non-empty.")
-    if not (0.1 < safety_headroom_ratio <= 0.85):
-        raise ValueError("safety_headroom_ratio must satisfy 0.1 < ratio <= 0.85.")
+    if not (0.1 < safety_headroom_ratio <= 1.0):
+        raise ValueError("safety_headroom_ratio must satisfy 0.1 < ratio <= 1.0.")
 
     revenue_by_hour: dict[datetime, float] = {}
     matched_raw_hours: list[str] = []
@@ -325,7 +332,7 @@ def build_capacity_residual_schedule_request(  # noqa: PLR0913
     if not matched_raw_hours:
         raise ValueError(f"No hourly burndown rows matched model {model!r}.")
 
-    grid = contiguous_utc_hours(matched_raw_hours, max_hours=168)
+    grid = contiguous_utc_hours(matched_raw_hours, max_hours=max_hours)
     ordered_tpm = tuple(round(revenue_by_hour.get(h, 0.0), 2) for h in grid)
     effective_backfill = (
         evergreen_backfill_tokens if evergreen_backfill_tokens > 0.0 else inferred_evergreen

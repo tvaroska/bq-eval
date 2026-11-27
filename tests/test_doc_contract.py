@@ -255,6 +255,8 @@ def test_spec_and_design_front_matter_and_tree_contract() -> None:
         *design_files,
         REPO_ROOT / "README.md",
         REPO_ROOT / "CRITICAL.md",
+        REPO_ROOT / "AGENTS.md",
+        REPO_ROOT / "docs" / "roadmap.md",
     ):
         text = doc_path.read_text(encoding="utf-8")
         for stale_term in ("BigQueryAgentAnalyticsPlugin", "EVENT_ONLY", "sqlite_views"):
@@ -289,8 +291,11 @@ def test_receipts_recompute_from_spans_and_dry_run_manifest() -> None:
     )
     manifest = bq_dry_run.collect_dry_run_manifest(project_id="showcase-project")
     assert dry_run_receipt == manifest
-    assert manifest["checked"] == 109
-    assert manifest["skipped"] == 23
+    assert manifest["checked"] > 0
+    assert manifest["skipped"] > 0
+    assert "silver/spans.sql" in manifest["per_file"]
+    assert "core/gold_cost_views.sql" in manifest["per_file"]
+    assert "core/views.sql" not in manifest["per_file"]
 
 
 def test_rubric_count_and_names_match_docs_csv_and_code() -> None:

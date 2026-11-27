@@ -1,323 +1,296 @@
-"""Transpiled SQL boundary and mutant-killing guard helpers for core, adapter, and FinOps views."""
+"""Gold-on-Silver SQL boundary, attribution gate (`S-16`), WORM, and mutant-killing guard tests."""
 
 from __future__ import annotations
 
-import json
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 
 import pytest
 
-from tests.conftest import make_span
-from tests.sql_helpers import (
-    ENTERPRISE_OTEL_SPANS_BASE_INSERT,
-    SQL_DIR,
-    _create_enterprise_sqlite_fixture,
-    _extract_view_sql_text,
-    _install_enterprise_views,
-    _new_sqlite_bq_conn,
-    _transpile_bq_view_to_sqlite,
-    insert_enterprise_sqlite_span,
-)
+from bq_eval.core.contract.otel import FinOpsTrafficType, GenAISpanKind, OTelGenAISpanRecord
+from bq_eval.core.contract.results import ConfusionMatrix
+from tests.conftest import make_span, open_runner_for_spans, seed_sme_confusion
+
+
+def test_attribution_coverage_unpriced_unattributed_fails_gate() -> None:
+    """`v_attribution_coverage` fails `passes_coverage_gate` on unpriced, unattributed, or unregistered apps (`S-16`)."""
+    base = datetime(2026, 11, 21, 12, 0, 0, tzinfo=UTC)
+    spans = [
+        make_span(
+            "tr-cov-clean",
+            "sp-cov-clean",
+            app_id="app-clean",
+            outcome_id="out-clean-1",
+            outcome_owner="app-clean",
+            input_tokens=50_000,
+            cached_input_tokens=0,
+            output_tokens=1_000,
+            thinking_tokens=0,
+            base_time=base,
+        ),
+        make_span(
+            "tr-cov-unpriced",
+            "sp-cov-unpriced",
+            app_id="app-unpriced",
+            model_name="mystery-unpriced-sku",
+            outcome_id="out-unpriced-1",
+            outcome_owner="app-unpriced",
+            input_tokens=50_000,
+            cached_input_tokens=0,
+            output_tokens=1_000,
+            thinking_tokens=0,
+            offset_s=1,
+            base_time=base,
+        ),
+        make_span(
+            "tr-cov-half-1",
+            "sp-cov-half-1",
+            app_id="app-low-cov",
+            outcome_id="out-half-1",
+            outcome_owner="app-low-cov",
+            input_tokens=50_000,
+            cached_input_tokens=0,
+            output_tokens=1_000,
+            thinking_tokens=0,
+            offset_s=2,
+            base_time=base,
+        ),
+        make_span(
+            "tr-cov-half-2",
+            "sp-cov-half-2",
+            app_id="app-low-cov",
+            outcome_id=None,
+            input_tokens=50_000,
+            cached_input_tokens=0,
+            output_tokens=1_000,
+            thinking_tokens=0,
+            offset_s=3,
+            base_time=base,
+        ),
+        make_span(
+            "tr-cov-unreg",
+            "sp-cov-unreg",
+            app_id=None,
+            outcome_id="out-unreg-1",
+            input_tokens=50_000,
+            cached_input_tokens=0,
+            output_tokens=1_000,
+            thinking_tokens=0,
+            offset_s=4,
+            base_time=base,
+        ),
+    ]
+    with open_runner_for_spans(spans) as runner:
+        by_app = {
+            str(r["apphub_application_id"]): dict(r)
+            for r in runner.query("SELECT * FROM `agent_eval.v_attribution_coverage`").rows
+        }
+
+    assert int(str(by_app["app-clean"]["unpriced_spans"])) == 0
+    assert float(str(by_app["app-clean"]["attribution_coverage_pct"])) == pytest.approx(100.0)
+    assert bool(by_app["app-clean"]["passes_coverage_gate"]) is True
+
+    assert int(str(by_app["app-unpriced"]["unpriced_spans"])) == 1
+    assert by_app["app-unpriced"]["total_spend_usd"] is None
+    assert bool(by_app["app-unpriced"]["passes_coverage_gate"]) is False
+
+    assert float(str(by_app["app-low-cov"]["attribution_coverage_pct"])) == pytest.approx(50.0)
+    assert bool(by_app["app-low-cov"]["passes_coverage_gate"]) is False
+
+    assert bool(by_app["unregistered_app"]["passes_coverage_gate"]) is False
 
 
 def _assert_unregistered_and_cliff_and_tool_loop_sql_guards() -> None:
-    """Guard `'unregistered_app'` fallback, exact 200K boundary, 8-vs-9 tool limit, and BQAA retry dedup."""
-    conn = _new_sqlite_bq_conn()
-    _create_enterprise_sqlite_fixture(conn)
-    _install_enterprise_views(conn)
-    adapter_path = SQL_DIR / "core" / "bqaa_adapter_views.sql"
-    conn.execute(
-        """
-        CREATE TABLE agent_events (
-            event_id TEXT, timestamp TEXT, event_type TEXT, agent TEXT,
-            session_id TEXT, invocation_id TEXT, trace_id TEXT, span_id TEXT,
-            parent_span_id TEXT, content TEXT, attributes TEXT, latency_ms TEXT,
-            status TEXT, error_message TEXT
-        )
-        """
-    )
-    conn.execute(
-        "CREATE TABLE agent_events_eval_turn (trace_id TEXT, turn_id TEXT, has_tool_loop INTEGER)"
-    )
-    for view_name in (
-        "agent_eval.v_bqaa_otel_spans",
-        "agent_eval.v_bqaa_trace_payloads",
-        "agent_eval.v_bqaa_eval_turn_filtered",
-    ):
-        short = view_name.split(".", maxsplit=1)[1]
-        conn.execute(
-            f"CREATE VIEW {short} AS "
-            f"{_transpile_bq_view_to_sqlite(_extract_view_sql_text(adapter_path, view_name))}"
-        )
-
-    t0 = "2026-11-21T12:00:00+00:00"
-    t1 = "2026-11-21T12:00:01+00:00"
-    # Seed unregistered fallback, exact 200,000 vs 200,001 cliff boundary, and 8-vs-9 tool spans.
-    span_rows: list[tuple[object, ...]] = [
-        (
+    """Guard `'unregistered_app'` fallback, exact `200K` (`input + cache_read`) cliff, `min_cache_tokens`, and `8`-vs-`9` tools."""
+    base = datetime(2026, 11, 21, 12, 0, 0, tzinfo=UTC)
+    spans: list[OTelGenAISpanRecord] = [
+        make_span(
             "tr-unreg-1",
             "sp-unreg-1",
-            None,
-            "chat",
-            None,
-            "self-reported-svc",
-            "agent",
-            "SPAN_KIND_SERVER",
-            "chat",
-            "gemini-3.8-flash",
-            None,
-            None,
-            "OK",
-            1,
-            "production_inference",
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            t0,
-            t1,
-            t1,
-            100.0,
-            200_000,
-            0,
-            10_000,
-            0,
-            "{}",
+            app_id=None,
+            service_name="self-reported-svc",
+            otel_span_kind="SPAN_KIND_SERVER",
+            input_tokens=200_000,
+            cached_input_tokens=0,
+            output_tokens=10_000,
+            thinking_tokens=0,
+            base_time=base,
         ),
-        (
+        make_span(
+            "tr-cliff-200k-cached",
+            "sp-cliff-200k-cached",
+            app_id="cliff-app",
+            input_tokens=200_000,
+            cached_input_tokens=50_000,
+            output_tokens=10_000,
+            thinking_tokens=0,
+            offset_s=1,
+            base_time=base,
+        ),
+        make_span(
             "tr-cliff-200001",
             "sp-cliff-200001",
-            None,
-            "chat",
-            "cliff-app",
-            "svc",
-            "agent",
-            "SPAN_KIND_SERVER",
-            "chat",
-            "gemini-3.8-flash",
-            None,
-            None,
-            "OK",
-            1,
-            "production_inference",
-            None,
-            "cliff-app",
-            None,
-            None,
-            None,
-            None,
-            t0,
-            t1,
-            t1,
-            100.0,
-            200_001,
-            0,
-            10_000,
-            0,
-            "{}",
+            app_id="cliff-app",
+            input_tokens=200_001,
+            cached_input_tokens=50_000,
+            output_tokens=10_000,
+            thinking_tokens=0,
+            offset_s=2,
+            base_time=base,
+        ),
+        make_span(
+            "tr-sub-cache-floor",
+            "sp-sub-cache-floor",
+            app_id="cliff-app",
+            input_tokens=512,
+            cached_input_tokens=0,
+            output_tokens=100,
+            thinking_tokens=0,
+            offset_s=3,
+            base_time=base,
         ),
     ]
     for count_tag, n_tools in (("tr-tools-8", 8), ("tr-tools-9", 9)):
+        root_id = f"sp-{count_tag}-root"
+        spans.append(
+            make_span(
+                count_tag,
+                root_id,
+                app_id="tool-app",
+                span_kind=GenAISpanKind.INVOKE_AGENT,
+                input_tokens=2_000,
+                cached_input_tokens=0,
+                output_tokens=100,
+                thinking_tokens=0,
+                offset_s=10,
+                base_time=base,
+            )
+        )
         for i in range(n_tools):
-            span_rows.append(
-                (
+            spans.append(
+                make_span(
                     count_tag,
                     f"sp-{count_tag}-{i}",
-                    None if i == 0 else f"sp-{count_tag}-0",
-                    "execute_tool",
-                    "tool-app",
-                    "svc",
-                    "agent",
-                    "SPAN_KIND_INTERNAL",
-                    "execute_tool",
-                    "none",
-                    "lookup",
-                    "SUCCESS",
-                    "OK",
-                    1,
-                    "production_inference",
-                    None,
-                    "tool-app",
-                    None,
-                    None,
-                    None,
-                    None,
-                    t0,
-                    t1,
-                    t1,
-                    10.0,
-                    0,
-                    0,
-                    0,
-                    0,
-                    "{}",
+                    parent_span_id=root_id,
+                    span_name="execute_tool",
+                    app_id="tool-app",
+                    span_kind=GenAISpanKind.EXECUTE_TOOL,
+                    model_name="none",
+                    tool_name="lookup",
+                    tool_call_status="SUCCESS",
+                    input_tokens=0,
+                    cached_input_tokens=0,
+                    output_tokens=0,
+                    thinking_tokens=0,
+                    latency_ms=10.0,
+                    offset_s=10,
+                    offset_ms=10 + i,
+                    attributes={"gen_ai.tool.call.arguments": f'{{"idx": {i}}}'},
+                    base_time=base,
                 )
             )
-    conn.executemany(ENTERPRISE_OTEL_SPANS_BASE_INSERT, span_rows)
 
-    # BQAA retry dedup (same event_id, older 1K tokens vs newer 5K tokens) + unregistered fallback
-    conn.executemany(
-        "INSERT INTO agent_events VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        [
-            (
-                "ev-retry-1",
-                "2026-11-21T12:00:01+00:00",
-                "LLM_RESPONSE",
-                "rogue_agent",
-                "s1",
-                "inv1",
-                "tr-bqaa-dedup",
-                "sp-d1",
-                None,
-                "{}",
-                json.dumps(
-                    {
-                        "adk": {"app_name": "self_reported_adk"},
-                        "model": "gemini-3.8-flash",
-                        "usage_metadata": {
-                            "prompt_token_count": 1_000,
-                            "candidates_token_count": 50,
-                        },
-                    }
-                ),
-                '{"total_ms": 100}',
-                "OK",
-                None,
-            ),
-            (
-                "ev-retry-1",
-                "2026-11-21T12:00:05+00:00",
-                "LLM_RESPONSE",
-                "rogue_agent",
-                "s1",
-                "inv1",
-                "tr-bqaa-dedup",
-                "sp-d1",
-                None,
-                "{}",
-                json.dumps(
-                    {
-                        "adk": {"app_name": "self_reported_adk"},
-                        "model": "gemini-3.8-flash",
-                        "usage_metadata": {
-                            "prompt_token_count": 5_000,
-                            "candidates_token_count": 50,
-                        },
-                    }
-                ),
-                '{"total_ms": 120}',
-                "OK",
-                None,
-            ),
-        ],
-    )
-    conn.execute("INSERT INTO agent_events_eval_turn VALUES ('tr-bqaa-dedup', 't1', 0)")
+    with open_runner_for_spans(spans) as runner:
+        wf_200k = runner.query(
+            "SELECT apphub_application_id, is_long_context_cliff, meets_min_cache_floor, span_cost_usd "
+            "FROM `agent_eval.v_trace_waterfall` WHERE trace_id = 'tr-unreg-1'"
+        ).rows[0]
+        wf_200k_cached = runner.query(
+            "SELECT is_long_context_cliff FROM `agent_eval.v_trace_waterfall` "
+            "WHERE trace_id = 'tr-cliff-200k-cached'"
+        ).rows[0]
+        wf_200001 = runner.query(
+            "SELECT is_long_context_cliff FROM `agent_eval.v_trace_waterfall` "
+            "WHERE trace_id = 'tr-cliff-200001'"
+        ).rows[0]
+        wf_sub_floor = runner.query(
+            "SELECT meets_min_cache_floor, min_cache_tokens FROM `agent_eval.v_trace_waterfall` "
+            "WHERE trace_id = 'tr-sub-cache-floor'"
+        ).rows[0]
+        eval_unreg = runner.query(
+            "SELECT apphub_application_id, effective_risk_tier "
+            "FROM `agent_eval.v_trace_sql_evaluation` WHERE trace_id = 'tr-unreg-1'"
+        ).rows[0]
 
-    # Check empty-catalog 200K boundary + unregistered fallback
-    wf_200k = conn.execute(
-        "SELECT apphub_application_id, is_long_context_cliff, span_cost_usd "
-        "FROM v_trace_waterfall WHERE trace_id = 'tr-unreg-1'"
-    ).fetchone()
-    s1_wf_200k = conn.execute(
-        "SELECT apphub_application_id, is_long_context_cliff, span_cost_usd "
-        "FROM v_step1_trace_waterfall WHERE trace_id = 'tr-unreg-1'"
-    ).fetchone()
-    wf_200001 = conn.execute(
-        "SELECT is_long_context_cliff FROM v_trace_waterfall WHERE trace_id = 'tr-cliff-200001'"
-    ).fetchone()
-    eval_unreg = conn.execute(
-        "SELECT apphub_application_id FROM v_trace_sql_evaluation WHERE trace_id = 'tr-unreg-1'"
-    ).fetchone()
-    assert wf_200k["apphub_application_id"] == "unregistered_app"
-    assert s1_wf_200k["apphub_application_id"] == "unregistered_app"
-    assert eval_unreg["apphub_application_id"] == "unregistered_app"
-    assert int(wf_200k["is_long_context_cliff"]) == 0
-    assert int(s1_wf_200k["is_long_context_cliff"]) == 0
-    assert float(wf_200k["span_cost_usd"]) == pytest.approx(0.036, abs=1e-12)
-    assert float(s1_wf_200k["span_cost_usd"]) == pytest.approx(0.036, abs=1e-12)
-    assert int(wf_200001["is_long_context_cliff"]) == 1
+        assert wf_200k["apphub_application_id"] == "unregistered_app"
+        assert eval_unreg["apphub_application_id"] == "unregistered_app"
+        assert eval_unreg["effective_risk_tier"] == "RL-1"
+        assert int(str(wf_200k["is_long_context_cliff"])) == 0
+        assert int(str(wf_200k["meets_min_cache_floor"])) == 1
+        assert float(str(wf_200k["span_cost_usd"])) == pytest.approx(0.036, abs=1e-12)
+        assert int(str(wf_200k_cached["is_long_context_cliff"])) == 0
+        assert int(str(wf_200001["is_long_context_cliff"])) == 1
+        assert int(str(wf_sub_floor["min_cache_tokens"])) == 1024
+        assert int(str(wf_sub_floor["meets_min_cache_floor"])) == 0
 
-    # Also test populated catalog at exact 200K boundary (kills m.long_context_threshold_tokens >= mutant)
-    conn.execute(
-        """
-        INSERT INTO model_pricing_catalog (
-            model_name, provider, lifecycle_track, effective_start, effective_end,
-            input_usd_per_1m, cached_input_usd_per_1m, cache_write_5m_usd_per_1m,
-            cache_write_1h_usd_per_1m, output_usd_per_1m, long_context_threshold_tokens,
-            long_context_input_usd_per_1m, long_context_cached_usd_per_1m,
-            long_context_output_usd_per_1m, burndown_uncached_weight,
-            burndown_cached_weight, burndown_cache_write_5m_weight,
-            burndown_cache_write_1h_weight, burndown_output_weight,
-            burndown_long_uncached_weight, burndown_long_cached_weight,
-            burndown_long_output_weight, priority_paygo_multiplier, flex_paygo_multiplier
-        ) VALUES (
-            'gemini-3.8-flash', 'google', 'long_term_ga',
-            '2026-01-01T00:00:00+00:00', '2099-12-31T23:59:59+00:00',
-            0.15, 0.015, 0.15, 0.15, 0.60, 200000, 0.30, 0.030, 2.25,
-            1.0, 0.1, 1.0, 1.0, 4.0, 2.0, 0.2, 7.5, 1.8, 0.5
+        s1_t8 = runner.query(
+            "SELECT step1_pass FROM `agent_eval.v_step1_trace_eval` WHERE trace_id = 'tr-tools-8'"
+        ).rows[0]
+        s1_t9 = runner.query(
+            "SELECT step1_pass FROM `agent_eval.v_step1_trace_eval` WHERE trace_id = 'tr-tools-9'"
+        ).rows[0]
+        ent_t8 = runner.query(
+            "SELECT rule0_pass FROM `agent_eval.v_trace_sql_evaluation` WHERE trace_id = 'tr-tools-8'"
+        ).rows[0]
+        ent_t9 = runner.query(
+            "SELECT rule0_pass FROM `agent_eval.v_trace_sql_evaluation` WHERE trace_id = 'tr-tools-9'"
+        ).rows[0]
+        assert int(str(s1_t8["step1_pass"])) == 1 and int(str(ent_t8["rule0_pass"])) == 1
+        assert int(str(s1_t9["step1_pass"])) == 0 and int(str(ent_t9["rule0_pass"])) == 0
+
+        worm_row = runner.query(
+            "SELECT silver_sql_version, snapshot_sha256, policy_verdicts_json "
+            "FROM `agent_eval.v_gold_worm_snapshot_candidates` WHERE trace_id = 'tr-tools-8'"
+        ).rows[0]
+        assert worm_row["silver_sql_version"] == "v0.7.0"
+        assert len(str(worm_row["snapshot_sha256"])) == 64
+
+        runner.load_rows(
+            "silver_internal.workflow_events_sor",
+            [
+                {
+                    "event_id": "ev-orphan-1",
+                    "event_time": "2026-11-21T12:00:15+00:00",
+                    "event_type": "action.committed",
+                    "source_system": "core_ledger",
+                    "trace_id": "tr-tools-8",
+                    "span_id": None,
+                    "response_id": None,
+                    "outcome_id": None,
+                    "conversation_id": None,
+                    "action_id": "act-missing-tool-99",
+                    "nudge_id": None,
+                    "control_id": None,
+                    "control_layer": None,
+                    "control_action": None,
+                    "action_args": '{"amount":100}',
+                    "approved_expires_at": None,
+                    "user_id": None,
+                    "tenant_id": None,
+                    "actor_id": "system",
+                    "payload_json": None,
+                }
+            ],
+            append=False,
         )
-        """
-    )
-    wf_200k_cat = conn.execute(
-        "SELECT is_long_context_cliff, span_cost_usd FROM v_trace_waterfall WHERE trace_id = 'tr-unreg-1'"
-    ).fetchone()
-    assert int(wf_200k_cat["is_long_context_cliff"]) == 0
-    assert float(wf_200k_cat["span_cost_usd"]) == pytest.approx(0.036, abs=1e-12)
-
-    s1_t8 = conn.execute(
-        "SELECT step1_pass FROM v_step1_trace_eval WHERE trace_id = 'tr-tools-8'"
-    ).fetchone()
-    s1_t9 = conn.execute(
-        "SELECT step1_pass FROM v_step1_trace_eval WHERE trace_id = 'tr-tools-9'"
-    ).fetchone()
-    ent_t8 = conn.execute(
-        "SELECT rule0_pass FROM v_trace_sql_evaluation WHERE trace_id = 'tr-tools-8'"
-    ).fetchone()
-    ent_t9 = conn.execute(
-        "SELECT rule0_pass FROM v_trace_sql_evaluation WHERE trace_id = 'tr-tools-9'"
-    ).fetchone()
-    assert int(s1_t8["step1_pass"]) == 1 and int(ent_t8["rule0_pass"]) == 1
-    assert int(s1_t9["step1_pass"]) == 0 and int(ent_t9["rule0_pass"]) == 0
-
-    bqaa_spans = conn.execute("SELECT input_tokens FROM v_bqaa_otel_spans").fetchall()
-    bqaa_pl = conn.execute("SELECT apphub_application_id FROM v_bqaa_trace_payloads").fetchone()
-    bqaa_turn = conn.execute(
-        "SELECT apphub_application_id FROM v_bqaa_eval_turn_filtered"
-    ).fetchone()
-    conn.close()
-    assert len(bqaa_spans) == 1
-    assert int(bqaa_spans[0]["input_tokens"]) == 5_000
-    assert bqaa_pl["apphub_application_id"] == "unregistered_app"
-    assert bqaa_turn["apphub_application_id"] == "unregistered_app"
+        orphans = runner.query("SELECT * FROM `agent_eval.v_orphan_committed_actions`").rows
+        assert len(orphans) == 1
+        assert orphans[0]["orphan_status"] == "MISSING_TOOL_SPAN"
+        ent_t8_after_orphan = runner.query(
+            "SELECT orphan_commit_count, rule0_pass FROM `agent_eval.v_trace_sql_evaluation` "
+            "WHERE trace_id = 'tr-tools-8'"
+        ).rows[0]
+        assert int(str(ent_t8_after_orphan["orphan_commit_count"])) == 1
+        assert int(str(ent_t8_after_orphan["rule0_pass"])) == 0
 
 
 def _assert_dedup_cpvo_rule0_and_nfr_sql_guards() -> None:
     """Guard eval dedup DESC order, unverified CPVO denominator, Rule-0 filters, NFR gate fail, and lane default."""
-    conn = _new_sqlite_bq_conn()
-    _create_enterprise_sqlite_fixture(conn)
-    _install_enterprise_views(conn)
-    step3_path = SQL_DIR / "core" / "step3_saved_results.sql"
-    cap_path = SQL_DIR / "finops" / "capacity_views.sql"
-    for path, vname in (
-        (step3_path, "agent_eval.v_step3_paired_run_comparison"),
-        (step3_path, "agent_eval.v_step3_policy_nfr_gate"),
-        (cap_path, "agent_eval.v_focus_three_pool_hourly_chargeback"),
-    ):
-        short = vname.split(".", maxsplit=1)[1]
-        conn.execute(
-            f"CREATE VIEW {short} AS "
-            f"{_transpile_bq_view_to_sqlite(_extract_view_sql_text(path, vname))}"
-        )
-
     base = datetime(2026, 11, 21, 12, 0, 0, tzinfo=UTC)
-    # 10 Rule-0 passing traces + 2 Rule-0 failing traces; 2 outcomes (1 verified, 1 unverified)
+    spans: list[OTelGenAISpanRecord] = []
     for i in range(12):
         r0 = i < 10
         oid = f"out-g-{i:02d}" if i < 2 else None
-        insert_enterprise_sqlite_span(
-            conn,
+        spans.append(
             make_span(
                 f"trace-g-{i:02d}",
                 f"span-g-{i:02d}",
@@ -333,11 +306,10 @@ def _assert_dedup_cpvo_rule0_and_nfr_sql_guards() -> None:
                 latency_ms=500.0,
                 offset_s=i * 2,
                 base_time=base,
-            ),
+            )
         )
         if oid is not None:
-            insert_enterprise_sqlite_span(
-                conn,
+            spans.append(
                 make_span(
                     f"trace-g-{i:02d}",
                     f"span-g-close-{i:02d}",
@@ -358,214 +330,332 @@ def _assert_dedup_cpvo_rule0_and_nfr_sql_guards() -> None:
                         "outcome.verified": "true" if i == 0 else "false",
                     },
                     base_time=base,
-                ),
+                )
             )
 
-    # Unknown traffic type -> lane defaults to 'prod' (kills ELSE 'eval' mutant)
-    conn.execute(
-        ENTERPRISE_OTEL_SPANS_BASE_INSERT,
-        (
+    spans.append(
+        make_span(
             "tr-unk-lane",
             "sp-unk-lane",
-            None,
-            "chat",
-            "lane-app",
-            "svc",
-            "agent",
-            "SPAN_KIND_SERVER",
-            "chat",
-            "gemini-3.8-flash",
-            None,
-            None,
-            "OK",
-            1,
-            "custom_unknown_lane",
-            None,
-            "lane-app",
-            None,
-            None,
-            None,
-            None,
-            base.isoformat(),
-            (base + timedelta(seconds=1)).isoformat(),
-            (base + timedelta(seconds=1)).isoformat(),
-            100.0,
-            10_000,
-            0,
-            500,
-            0,
-            "{}",
-        ),
+            app_id="lane-app",
+            finops_traffic_type=FinOpsTrafficType.UNCLASSIFIED,
+            input_tokens=10_000,
+            cached_input_tokens=0,
+            output_tokens=500,
+            thinking_tokens=0,
+            offset_s=30,
+            base_time=base,
+        )
     )
 
-    # eval_results:
-    # - tr-g-00 has older FAIL (100K tokens) and newer PASS (1K tokens) in SAME run-1 -> DESC must win!
-    # - tr-g-10, tr-g-11 have rule0_pass=0, binary_pass=0 -> MUST be excluded from judged_samples/raw rate!
-    # - run-2 flips tr-g-01 from PASS -> FAIL on unamended clause -> passes_nfr_gate MUST be 0!
-    eval_rows: list[tuple[object, ...]] = [
-        (
-            "ev-g-00-old",
-            "run-1",
-            "trace-g-00",
-            "out-g-00",
-            "guard-app",
-            "groundedness_4pt_v1",
-            "gemini-3.8-flash",
-            "CANARY_5PCT",
-            1,
-            "old fail",
-            1,
-            0,
-            100_000,
-            10_000,
-            0,
-            "2026-11-21T12:01:00+00:00",
-            "sha-v1",
-            None,
-            "CL-1",
+    with open_runner_for_spans(spans) as runner:
+        eval_rows: list[dict[str, object]] = [
+            {
+                "eval_id": "ev-g-00-old",
+                "eval_run_id": "run-1",
+                "trace_id": "trace-g-00",
+                "outcome_id": "out-g-00",
+                "apphub_application_id": "guard-app",
+                "rubric_id": "groundedness_4pt_v1",
+                "judge_model": "gemini-3.8-flash",
+                "sampling_stratum": "CANARY_5PCT",
+                "rule0_pass": True,
+                "reasoning_trace": "old fail",
+                "ordinal_score": 1,
+                "binary_pass": False,
+                "judge_status": "SCORED",
+                "judge_input_tokens": 100_000,
+                "judge_output_tokens": 10_000,
+                "judge_thinking_tokens": 0,
+                "evaluated_at": "2026-11-21T12:01:00+00:00",
+                "policy_sha256": "sha-v1",
+                "amended_clause_ids": None,
+                "target_clause_id": "CL-1",
+            },
+            {
+                "eval_id": "ev-g-00-new",
+                "eval_run_id": "run-1",
+                "trace_id": "trace-g-00",
+                "outcome_id": "out-g-00",
+                "apphub_application_id": "guard-app",
+                "rubric_id": "groundedness_4pt_v1",
+                "judge_model": "gemini-3.8-flash",
+                "sampling_stratum": "CANARY_5PCT",
+                "rule0_pass": True,
+                "reasoning_trace": "new pass",
+                "ordinal_score": 4,
+                "binary_pass": True,
+                "judge_status": "SCORED",
+                "judge_input_tokens": 1_000,
+                "judge_output_tokens": 100,
+                "judge_thinking_tokens": 0,
+                "evaluated_at": "2026-11-21T12:05:00+00:00",
+                "policy_sha256": "sha-v1",
+                "amended_clause_ids": None,
+                "target_clause_id": "CL-1",
+            },
+        ]
+        for i in range(1, 10):
+            eval_rows.append(
+                {
+                    "eval_id": f"ev-g-{i:02d}",
+                    "eval_run_id": "run-1",
+                    "trace_id": f"trace-g-{i:02d}",
+                    "outcome_id": f"out-g-{i:02d}" if i < 2 else None,
+                    "apphub_application_id": "guard-app",
+                    "rubric_id": "groundedness_4pt_v1",
+                    "judge_model": "gemini-3.8-flash",
+                    "sampling_stratum": "CANARY_5PCT",
+                    "rule0_pass": True,
+                    "reasoning_trace": "pass",
+                    "ordinal_score": 4,
+                    "binary_pass": True,
+                    "judge_status": "SCORED",
+                    "judge_input_tokens": 1_000,
+                    "judge_output_tokens": 100,
+                    "judge_thinking_tokens": 0,
+                    "evaluated_at": "2026-11-21T12:05:00+00:00",
+                    "policy_sha256": "sha-v1",
+                    "amended_clause_ids": None,
+                    "target_clause_id": "CL-1",
+                }
+            )
+        for i in (10, 11):
+            eval_rows.append(
+                {
+                    "eval_id": f"ev-g-r0f-{i}",
+                    "eval_run_id": "run-1",
+                    "trace_id": f"trace-g-{i:02d}",
+                    "outcome_id": None,
+                    "apphub_application_id": "guard-app",
+                    "rubric_id": "groundedness_4pt_v1",
+                    "judge_model": "gemini-3.8-flash",
+                    "sampling_stratum": "ERROR_OR_SLA_TAIL",
+                    "rule0_pass": False,
+                    "reasoning_trace": "r0 fail",
+                    "ordinal_score": 1,
+                    "binary_pass": False,
+                    "judge_status": "SCORED",
+                    "judge_input_tokens": 1_000,
+                    "judge_output_tokens": 100,
+                    "judge_thinking_tokens": 0,
+                    "evaluated_at": "2026-11-21T12:05:00+00:00",
+                    "policy_sha256": "sha-v1",
+                    "amended_clause_ids": None,
+                    "target_clause_id": "CL-1",
+                }
+            )
+        eval_rows.append(
+            {
+                "eval_id": "ev-g-01-flip",
+                "eval_run_id": "run-2",
+                "trace_id": "trace-g-01",
+                "outcome_id": "out-g-01",
+                "apphub_application_id": "guard-app",
+                "rubric_id": "groundedness_4pt_v1",
+                "judge_model": "gemini-3.8-flash",
+                "sampling_stratum": "CANARY_5PCT",
+                "rule0_pass": True,
+                "reasoning_trace": "regressed",
+                "ordinal_score": 1,
+                "binary_pass": False,
+                "judge_status": "SCORED",
+                "judge_input_tokens": 1_000,
+                "judge_output_tokens": 100,
+                "judge_thinking_tokens": 0,
+                "evaluated_at": "2026-11-21T13:00:00+00:00",
+                "policy_sha256": "sha-v2",
+                "amended_clause_ids": "CL-9",
+                "target_clause_id": "CL-1",
+            }
+        )
+        runner.load_rows("agent_eval.eval_results", eval_rows, append=False)
+        seed_sme_confusion(runner, "guard-app", ConfusionMatrix(tp=10, fn=0, tn=10, fp=0))
+        corrupt_sme = [
+            {
+                "label_id": f"corrupt-{idx}",
+                "trace_id": f"corrupt-tr-{idx}",
+                "apphub_application_id": "guard-app",
+                "rubric_id": "groundedness_4pt_v1",
+                "rater_id": "sme_corrupt",
+                "rule0_pass": False,
+                "human_ordinal_score": 4 if idx < 25 else 1,
+                "human_pass": idx < 25,
+                "judge_ordinal_score": 1 if idx < 25 else 4,
+                "judge_pass": idx >= 25,
+                "labeled_at": "2026-11-21T12:10:00+00:00",
+            }
+            for idx in range(50)
+        ]
+        runner.load_rows("agent_eval.sme_labels", corrupt_sme, append=True)
+
+        cpvo = runner.query(
+            "SELECT total_outcomes, verified_outcomes, total_ai_cost_usd, "
+            "cost_per_verified_outcome_ai_usd "
+            "FROM `agent_eval.v_enterprise_cost_per_verified_outcome` "
+            "WHERE apphub_application_id = 'guard-app'"
+        ).rows[0]
+        summ = runner.query(
+            "SELECT judged_samples, raw_judge_pass_rate, calibrated_pass_rate, gwet_ac2 "
+            "FROM `agent_eval.v_agent_eval_and_finops_summary` "
+            "WHERE apphub_application_id = 'guard-app'"
+        ).rows[0]
+        nfr = runner.query(
+            "SELECT unamended_negative_flips, passes_nfr_gate "
+            "FROM `agent_eval.v_step3_policy_nfr_gate` "
+            "WHERE apphub_application_id = 'guard-app'"
+        ).rows[0]
+        lane_row = runner.query(
+            "SELECT traffic_lane FROM `agent_eval.v_focus_three_pool_hourly_chargeback` "
+            "WHERE apphub_application_id = 'lane-app'"
+        ).rows[0]
+
+    assert int(str(cpvo["total_outcomes"])) == 2
+    assert int(str(cpvo["verified_outcomes"])) == 1
+    assert float(str(cpvo["cost_per_verified_outcome_ai_usd"])) == pytest.approx(
+        float(str(cpvo["total_ai_cost_usd"])), abs=1e-12
+    )
+    assert int(str(summ["judged_samples"])) == 10
+    assert float(str(summ["raw_judge_pass_rate"])) == pytest.approx(0.90, abs=1e-12)
+    assert float(str(summ["calibrated_pass_rate"])) == pytest.approx(0.90, abs=1e-12)
+    assert float(str(summ["gwet_ac2"])) == pytest.approx(1.0, abs=1e-12)
+    assert int(str(nfr["unamended_negative_flips"])) == 1
+    assert int(str(nfr["passes_nfr_gate"])) == 0
+    assert lane_row["traffic_lane"] == "prod"
+
+
+def test_rule0_repeat_loop_and_silent_empty_rag_gates() -> None:
+    """`rule0_pass` blocks identical tool-repeat loops (unless overridden) and silent empty-RAG traces."""
+    base = datetime(2026, 11, 21, 12, 0, 0, tzinfo=UTC)
+    spans: list[OTelGenAISpanRecord] = [
+        make_span(
+            "tr-repeat-loop",
+            "sp-rep-root",
+            app_id="loop-app",
+            span_kind=GenAISpanKind.INVOKE_AGENT,
+            input_tokens=1_500,
+            cached_input_tokens=0,
+            output_tokens=100,
+            base_time=base,
         ),
-        (
-            "ev-g-00-new",
-            "run-1",
-            "trace-g-00",
-            "out-g-00",
-            "guard-app",
-            "groundedness_4pt_v1",
-            "gemini-3.8-flash",
-            "CANARY_5PCT",
-            1,
-            "new pass",
-            4,
-            1,
-            1_000,
-            100,
-            0,
-            "2026-11-21T12:05:00+00:00",
-            "sha-v1",
-            None,
-            "CL-1",
+        *[
+            make_span(
+                "tr-repeat-loop",
+                f"sp-rep-{idx}",
+                parent_span_id="sp-rep-root",
+                span_name="execute_tool",
+                app_id="loop-app",
+                span_kind=GenAISpanKind.EXECUTE_TOOL,
+                model_name="none",
+                tool_name="lookup_customer",
+                tool_call_status="SUCCESS",
+                latency_ms=25.0,
+                offset_ms=10 + idx,
+                input_tokens=0,
+                cached_input_tokens=0,
+                output_tokens=0,
+                thinking_tokens=0,
+                attributes={"gen_ai.tool.call.arguments": '{"id": "A-1"}'},
+                base_time=base,
+            )
+            for idx in range(3)
+        ],
+        make_span(
+            "tr-empty-rag",
+            "sp-rag-root",
+            app_id="rag-app",
+            span_kind=GenAISpanKind.INVOKE_AGENT,
+            input_tokens=1_500,
+            cached_input_tokens=0,
+            output_tokens=100,
+            offset_s=10,
+            base_time=base,
+        ),
+        make_span(
+            "tr-empty-rag",
+            "sp-rag-ret",
+            parent_span_id="sp-rag-root",
+            span_name="retrieval",
+            app_id="rag-app",
+            span_kind=GenAISpanKind.RETRIEVAL,
+            model_name="none",
+            tool_name="policy_retriever",
+            tool_call_status="SUCCESS",
+            latency_ms=30.0,
+            offset_s=10,
+            offset_ms=20,
+            input_tokens=0,
+            cached_input_tokens=0,
+            output_tokens=0,
+            thinking_tokens=0,
+            attributes={"bq_eval.acl_dropped_count": 4, "gen_ai.tool.call.result": "[]"},
+            base_time=base,
+        ),
+        make_span(
+            "tr-nonempty-rag",
+            "sp-ok-rag-root",
+            app_id="rag-app",
+            span_kind=GenAISpanKind.INVOKE_AGENT,
+            input_tokens=1_500,
+            cached_input_tokens=0,
+            output_tokens=100,
+            offset_s=20,
+            base_time=base,
+        ),
+        make_span(
+            "tr-nonempty-rag",
+            "sp-ok-rag-ret",
+            parent_span_id="sp-ok-rag-root",
+            span_name="retrieval",
+            app_id="rag-app",
+            span_kind=GenAISpanKind.RETRIEVAL,
+            model_name="none",
+            tool_name="policy_retriever",
+            tool_call_status="SUCCESS",
+            latency_ms=30.0,
+            offset_s=20,
+            offset_ms=20,
+            input_tokens=0,
+            cached_input_tokens=0,
+            output_tokens=0,
+            thinking_tokens=0,
+            attributes={
+                "bq_eval.acl_dropped_count": 2,
+                "gen_ai.tool.call.result": '["chunk-visible"]',
+            },
+            base_time=base,
         ),
     ]
-    for i in range(1, 10):
-        eval_rows.append(
-            (
-                f"ev-g-{i:02d}",
-                "run-1",
-                f"trace-g-{i:02d}",
-                f"out-g-{i:02d}" if i < 2 else None,
-                "guard-app",
-                "groundedness_4pt_v1",
-                "gemini-3.8-flash",
-                "CANARY_5PCT",
-                1,
-                "pass",
-                4,
-                1,
-                1_000,
-                100,
-                0,
-                "2026-11-21T12:05:00+00:00",
-                "sha-v1",
-                None,
-                "CL-1",
-            )
-        )
-    for i in (10, 11):
-        eval_rows.append(
-            (
-                f"ev-g-r0f-{i}",
-                "run-1",
-                f"trace-g-{i:02d}",
-                None,
-                "guard-app",
-                "groundedness_4pt_v1",
-                "gemini-3.8-flash",
-                "ERROR_OR_SLA_TAIL",
-                0,
-                "r0 fail",
-                1,
-                0,
-                1_000,
-                100,
-                0,
-                "2026-11-21T12:05:00+00:00",
-                "sha-v1",
-                None,
-                "CL-1",
-            )
-        )
-    # Candidate run-2 flips trace-g-01 from PASS -> FAIL on unamended clause CL-1
-    eval_rows.append(
-        (
-            "ev-g-01-flip",
-            "run-2",
-            "trace-g-01",
-            "out-g-01",
-            "guard-app",
-            "groundedness_4pt_v1",
-            "gemini-3.8-flash",
-            "CANARY_5PCT",
-            1,
-            "regressed",
-            1,
-            0,
-            1_000,
-            100,
-            0,
-            "2026-11-21T13:00:00+00:00",
-            "sha-v2",
-            "CL-9",
-            "CL-1",
-        )
-    )
-    conn.executemany(
-        "INSERT INTO eval_results ("
-        "eval_id, eval_run_id, trace_id, outcome_id, apphub_application_id, rubric_id, "
-        "judge_model, sampling_stratum, rule0_pass, reasoning_trace, ordinal_score, "
-        "binary_pass, judge_input_tokens, judge_output_tokens, judge_thinking_tokens, "
-        "evaluated_at, policy_sha256, amended_clause_ids, target_clause_id"
-        ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        eval_rows,
-    )
-    # SME labels: valid rule0_pass=1 (perfect 10/10) + corrupted rule0_pass=0 (must be ignored!)
-    sme_rows = (
-        [("guard-app", "groundedness_4pt_v1", 1, 4, 1, 4, 1)] * 10
-        + [("guard-app", "groundedness_4pt_v1", 1, 1, 0, 1, 0)] * 10
-        + [("guard-app", "groundedness_4pt_v1", 0, 4, 1, 1, 0)] * 25
-        + [("guard-app", "groundedness_4pt_v1", 0, 1, 0, 4, 1)] * 25
-    )
-    conn.executemany("INSERT INTO sme_labels VALUES (?,?,?,?,?,?,?)", sme_rows)
 
-    cpvo = conn.execute(
-        "SELECT total_outcomes, verified_outcomes, total_ai_cost_usd, cost_per_verified_outcome_ai_usd "
-        "FROM v_enterprise_cost_per_verified_outcome WHERE apphub_application_id = 'guard-app'"
-    ).fetchone()
-    summ = conn.execute(
-        "SELECT judged_samples, raw_judge_pass_rate, calibrated_pass_rate, gwet_ac2 "
-        "FROM v_agent_eval_and_finops_summary WHERE apphub_application_id = 'guard-app'"
-    ).fetchone()
-    nfr = conn.execute(
-        "SELECT unamended_negative_flips, passes_nfr_gate FROM v_step3_policy_nfr_gate "
-        "WHERE apphub_application_id = 'guard-app'"
-    ).fetchone()
-    lane_row = conn.execute(
-        "SELECT traffic_lane FROM v_focus_three_pool_hourly_chargeback "
-        "WHERE apphub_application_id = 'lane-app'"
-    ).fetchone()
-    conn.close()
+    with open_runner_for_spans(spans) as runner:
+        by_trace = {
+            str(r["trace_id"]): dict(r)
+            for r in runner.query(
+                "SELECT trace_id, rule0_pass, repeated_tool_call_count, "
+                "silent_empty_rag_count, tail_root_cause, tail_class "
+                "FROM `agent_eval.v_trace_sql_evaluation`"
+            ).rows
+        }
+        assert int(str(by_trace["tr-repeat-loop"]["repeated_tool_call_count"])) == 2
+        assert int(str(by_trace["tr-repeat-loop"]["rule0_pass"])) == 0
+        assert by_trace["tr-repeat-loop"]["tail_root_cause"] == "REPEATED_TOOL_LOOP"
+        assert by_trace["tr-repeat-loop"]["tail_class"] == "LOOP_OR_ERROR_TAIL"
 
-    # Only out-g-00 is verified (tr-g-00 latest verdict=PASS); out-g-01 is unverified -> denom = 1
-    assert int(cpvo["total_outcomes"]) == 2
-    assert int(cpvo["verified_outcomes"]) == 1
-    assert float(cpvo["cost_per_verified_outcome_ai_usd"]) == pytest.approx(
-        float(cpvo["total_ai_cost_usd"]), abs=1e-12
-    )
-    # 10 rule0-passing judged (tr-g-00 latest=PASS, tr-g-01 latest in run-2=FAIL -> 9/10=0.90)
-    assert int(summ["judged_samples"]) == 10
-    assert float(summ["raw_judge_pass_rate"]) == pytest.approx(0.90, abs=1e-12)
-    # sme_raw ignored rule0_pass=0 corruption -> TPR=TNR=1.0 -> calibrated == raw == 0.90 and AC2 == 1.0
-    assert float(summ["calibrated_pass_rate"]) == pytest.approx(0.90, abs=1e-12)
-    assert float(summ["gwet_ac2"]) == pytest.approx(1.0, abs=1e-12)
-    assert int(nfr["unamended_negative_flips"]) == 1
-    assert int(nfr["passes_nfr_gate"]) == 0
-    assert lane_row["traffic_lane"] == "prod"
+        assert int(str(by_trace["tr-empty-rag"]["silent_empty_rag_count"])) == 1
+        assert int(str(by_trace["tr-empty-rag"]["rule0_pass"])) == 0
+        assert by_trace["tr-empty-rag"]["tail_root_cause"] == "SILENT_EMPTY_RAG"
+        assert by_trace["tr-empty-rag"]["tail_class"] == "LOOP_OR_ERROR_TAIL"
+
+        assert int(str(by_trace["tr-nonempty-rag"]["silent_empty_rag_count"])) == 0
+        assert int(str(by_trace["tr-nonempty-rag"]["rule0_pass"])) == 1
+        assert by_trace["tr-nonempty-rag"]["tail_class"] == "HEALTHY"
+
+        runner.conn.execute(
+            "UPDATE agent_eval__workload_thresholds "
+            "SET max_repeated_tool_calls = 2 WHERE apphub_application_id = 'loop-app'"
+        )
+        loop_override = runner.query(
+            "SELECT rule0_pass FROM `agent_eval.v_trace_sql_evaluation` "
+            "WHERE trace_id = 'tr-repeat-loop'"
+        ).rows[0]
+        assert int(str(loop_override["rule0_pass"])) == 1

@@ -60,7 +60,7 @@ class CapacityResidualSchedulePayload(BaseModel):
 
     model: str = Field(..., min_length=1)
     provisioned_gsus: int = Field(..., ge=1, le=100_000)
-    safety_headroom_ratio: Annotated[float, Field(gt=0.1, le=0.85, allow_inf_nan=False)] = 0.85
+    safety_headroom_ratio: Annotated[float, Field(gt=0.1, le=1.0, allow_inf_nan=False)] = 0.85
     revenue_tpm_by_hour: tuple[NonNegFloat, ...] = Field(..., min_length=1, max_length=168)
     deadline_jobs: tuple[CapacityDeadlineJobPayload, ...] = ()
     evergreen_backfill_tokens: NonNegFloat = 0.0

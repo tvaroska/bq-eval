@@ -16,7 +16,7 @@ tags: [bq-eval]
 
 Exact BigQuery column schemas (`sql/silver/schema/*.json`) and the registered `labels` key catalog (`sql/silver/schema/labels_registry.json`) are committed under `sql/silver/schema/` (`ADR-045`, closing missing-ID span counts, column-vs-`labels` placement, `payload_json` lifting for `linked_outcome_id`/`outcome_status`/`feedback_reason`, and bounded-lookback `outcomes` with `extends_outside_window`). Remaining Gold/extension items:
 
-- **Decided (`ADR-034`):** when the root span and a platform-class span elsewhere in the trace carry different user ids, Silver does not choose; which id is the requester is Gold's rule. Open with that rule: the rule itself (leaning: the platform-class id, because it is the verified one), and whether Silver then publishes that id beside the root span's (leaning: yes, Gold cannot read it otherwise).
+- **Decided (`ADR-034`, `ADR-049`):** Silver publishes both the root span's `user_id` and the earliest platform-class `platform_user_id`; Gold resolves the requester as `COALESCE(platform_user_id, user_id)`, fails closed on regulated tiers when `platform_user_id != user_id` or when neither `platform_user_id` nor `identity_attested` is present, and treats unbound/unregistered applications as `RL-1`.
 - **Decided (`ADR-033`):** Multi-trace/map-reduce outcomes default to worst-chunk `min_model_confidence` alongside `final_model_confidence`.
 - **Decided (`ADR-047`):** Single-cloud `silver_open` omits `user_id_hash`/`tenant_id_hash` (preserving `ADR-038`; single-cloud per-user cost reads `silver_restricted`, while out-of-band KMS-HMAC hashes remain in the multi-cloud extension). Multi-day `outcomes` select the winning close by authority (`system_of_record > platform > application`), then earliest `event_time` (tie-break `event_id` asc), with Silver stateless per window (`extends_outside_window`) and Gold deduplicating by `outcome_id`. Same-timestamp `(source_class, event_id)` ties in `workflow_events` break by canonical row-content lexical order (keeping the 20 fixed columns) while counting conflicts.
 
@@ -82,10 +82,10 @@ Google ADK `2.14.0` Format 1 (legacy) and Format 2 (`SPAN_ONLY`) have been recor
 ## Settled architecture items (`ADR-029`–`ADR-033`)
 
 - **Hub region & residency (`ADR-031`):** Multi-region (`US` or `EU`) is the default Hub topology with strict per-domain location/CMEK alignment (never mix `US` and `us-east4` in one query domain); non-hub sovereign/single regions act as spokes via the Hub Transfer Port.
-- **Regulated WORM & RTBF (`ADR-031`):** Regulated snapshots export to PII-free **GCS Bucket Retention-Lock + CMEK** archives (not BigQuery tables alone) paired with per-subject crypto-shredding DEKs for RTBF. Open: shipping the exact Terraform/DDL archival template.
+- **Regulated WORM & RTBF (`ADR-031`, `S-24`):** Regulated snapshots export to PII-free **GCS Bucket Retention-Lock + CMEK** archives (not BigQuery tables alone) paired with per-subject crypto-shredding DEKs for RTBF (`terraform/main.tf`, `sql/core/ddl.sql`, `v_gold_worm_snapshot_candidates`).
 - **Fast local/CI gates (`ADR-032`):** Sub-5s DevAI PR gates and offline optimizer sweeps run through the **Local/CI Eval Runner Port** (`CI_ONLY`), never polling BigQuery.
 - **Cross-cloud skew (`ADR-031`):** Hub views flag split traces whose remote spoke `transfer_watermark_utc` has not yet advanced as `remote_fragment_pending = true`.
-- **Outcome status (`ADR-029`):** `rejected | denied` added alongside `guardrail.intervention`. Open: syncing new enum values into cross-repo `EVAL-P11`.
+- **Outcome status (`ADR-029`):** `rejected | denied` added alongside `guardrail.intervention` and synced into cross-repo `EVAL-P11`.
 
 ## A step that fits no shape
 

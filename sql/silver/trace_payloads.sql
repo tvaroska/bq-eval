@@ -145,14 +145,12 @@ CREATE OR REPLACE TABLE FUNCTION `${PROJECT_ID}.${SILVER_RESTRICTED_DATASET}.tra
     FROM (
       SELECT
         s.trace_id, s.span_id, s.start_time, s.end_time, s.nudge_id,
-        alt.root_agent_name,
+        alt.root_agent_name, alt.document_bytes, alt.page_count, alt.attachment_sha256,
         COALESCE(
           s.agent_name,
           CASE WHEN p1.span_kind = 'agent' THEN p1.agent_name END,
           CASE WHEN p2.span_kind = 'agent' THEN p2.agent_name END,
-          CASE WHEN p3.span_kind = 'agent' THEN p3.agent_name END,
-          CASE WHEN p4.span_kind = 'agent' THEN p4.agent_name END,
-          p1.agent_name, p2.agent_name, p3.agent_name, p4.agent_name
+          p1.agent_name, p2.agent_name
         ) AS agent_name,
         COALESCE(JSON_VALUE(rs.attributes, '$."gen_ai.input.messages_ref"'), CASE WHEN s.operation_name = 'generate_content' AND p1.span_name = 'call_llm' THEN JSON_VALUE(prs.attributes, '$."gen_ai.input.messages_ref"') END) AS input_ref,
         COALESCE(JSON_VALUE(rs.attributes, '$."gen_ai.output.messages_ref"'), CASE WHEN s.operation_name = 'generate_content' AND p1.span_name = 'call_llm' THEN JSON_VALUE(prs.attributes, '$."gen_ai.output.messages_ref"') END) AS output_ref,
@@ -220,8 +218,6 @@ CREATE OR REPLACE TABLE FUNCTION `${PROJECT_ID}.${SILVER_RESTRICTED_DATASET}.tra
       JOIN allowed_traces AS alt ON alt.trace_id = s.trace_id
       LEFT JOIN base_spans AS p1 ON p1.trace_id = s.trace_id AND p1.span_id = s.parent_span_id
       LEFT JOIN base_spans AS p2 ON p2.trace_id = s.trace_id AND p2.span_id = p1.parent_span_id
-      LEFT JOIN base_spans AS p3 ON p3.trace_id = s.trace_id AND p3.span_id = p2.parent_span_id
-      LEFT JOIN base_spans AS p4 ON p4.trace_id = s.trace_id AND p4.span_id = p3.parent_span_id
       LEFT JOIN raw_spans AS rs ON rs.trace_id = s.trace_id AND rs.span_id = s.span_id AND rs.rn = 1
       LEFT JOIN raw_spans AS prs ON prs.trace_id = s.trace_id AND prs.span_id = p1.span_id AND prs.rn = 1
       WHERE s.is_model_call IS TRUE AND s.span_kind != 'embedding'
@@ -271,9 +267,8 @@ CREATE OR REPLACE TABLE FUNCTION `${PROJECT_ID}.${SILVER_RESTRICTED_DATASET}.tra
           rc.tool_definitions_ref,
           COALESCE(rc.inline_input_messages, s_in.payload) AS input_messages,
           (rc.input_ref IS NOT NULL AND rc.inline_input_messages IS NULL AND s_in.payload IS NULL) AS input_ref_missing,
-          alt.document_bytes, alt.page_count, alt.attachment_sha256
+          rc.document_bytes, rc.page_count, rc.attachment_sha256
         FROM raw_calls AS rc
-        JOIN allowed_traces AS alt ON alt.trace_id = rc.trace_id
         LEFT JOIN shape3_window AS s_in ON s_in.ref_uri = rc.input_ref
       ) AS ip
       LEFT JOIN UNNEST(JSON_QUERY_ARRAY(ip.input_messages)) AS msg WITH OFFSET AS msg_idx

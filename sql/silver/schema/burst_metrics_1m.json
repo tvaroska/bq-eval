@@ -1,0 +1,17 @@
+[
+  {"name": "minute_utc", "type": "TIMESTAMP", "mode": "REQUIRED", "description": "UTC minute bucket start timestamp written by the request-path gateway."},
+  {"name": "runtime_pool_id", "type": "STRING", "mode": "REQUIRED", "description": "Merged FCFS runtime capacity pool bucket identifier."},
+  {"name": "trace_owner_app_id", "type": "STRING", "mode": "NULLABLE", "description": "Caller/desk application identifier (NULL when unregistered)."},
+  {"name": "risk_tier", "type": "STRING", "mode": "NULLABLE", "description": "Risk tolerance tier (RL-1 through RL-5) resolved at admission."},
+  {"name": "window_sec", "type": "INT64", "mode": "REQUIRED", "description": "Sub-minute enforcement window duration in seconds (1, 10, 30, or 60)."},
+  {"name": "weighted_burndown_units", "type": "FLOAT64", "mode": "REQUIRED", "description": "Observed weighted token burndown units consumed in the window."},
+  {"name": "committed_capacity_units", "type": "FLOAT64", "mode": "REQUIRED", "description": "Provisioned capacity units available in the runtime pool for the window."},
+  {"name": "peak_burst_ratio", "type": "FLOAT64", "mode": "REQUIRED", "description": "Peak sub-minute demand-to-committed ratio observed inside the minute."},
+  {"name": "pt_requests", "type": "INT64", "mode": "REQUIRED", "description": "Upstream attempts served on Provisioned Throughput."},
+  {"name": "priority_spillover_requests", "type": "INT64", "mode": "REQUIRED", "description": "Upstream attempts spilling over to Priority PayGo."},
+  {"name": "standard_spillover_requests", "type": "INT64", "mode": "REQUIRED", "description": "Upstream attempts served on Standard or Flex PayGo."},
+  {"name": "involuntary_spillover_requests", "type": "INT64", "mode": "REQUIRED", "description": "Spillover attempts occurring while caller stayed within funded pool share."},
+  {"name": "http_429_count", "type": "INT64", "mode": "REQUIRED", "description": "HTTP 429 responses observed across upstream legs in the minute."},
+  {"name": "gateway_failover_count", "type": "INT64", "mode": "REQUIRED", "description": "Healthy single-call upstream failover legs (attempt_index > 1) executed by the gateway."},
+  {"name": "caller_retry_count", "type": "INT64", "mode": "REQUIRED", "description": "Caller-side SDK retry storm attempts detected after HTTP 429."}
+]

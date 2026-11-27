@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import itertools
 from collections.abc import Mapping
 from dataclasses import dataclass
 
@@ -380,6 +382,9 @@ def _substitute_params(
     )
 
 
+_REGISTRY_VERSION_SEQ = itertools.count(1)
+
+
 class TableFunctionRegistry:
     """In-memory registry that inlines BigQuery `CREATE TABLE FUNCTION` calls into subqueries."""
 
@@ -387,6 +392,7 @@ class TableFunctionRegistry:
         self._defs: dict[tuple[str | None, str], TableFunctionDef] = {}
         self._views: dict[tuple[str | None, str], TableFunctionDef] = {}
         self._default_dataset = default_dataset
+        self.version_token: int = next(_REGISTRY_VERSION_SEQ)
 
     def register_view_ast(self, stmt: exp.Create) -> str:
         """Register a parsed `CREATE [OR REPLACE] VIEW` statement for staged AST inlining."""
@@ -402,6 +408,7 @@ class TableFunctionRegistry:
             body = body.this
         defn = TableFunctionDef(dataset=dataset, name=name, params=(), body=body.copy())
         self._views[canonical_key(dataset, name)] = defn
+        self.version_token = next(_REGISTRY_VERSION_SEQ)
         return f"{dataset}__{name}" if dataset else name
 
     def resolve_view(self, dataset: str | None, name: str) -> TableFunctionDef | None:
@@ -436,6 +443,7 @@ class TableFunctionRegistry:
             body=body.copy(),
         )
         self._defs[canonical_key(dataset, name)] = defn
+        self.version_token = next(_REGISTRY_VERSION_SEQ)
         return defn
 
     def resolve(self, dataset: str | None, name: str) -> TableFunctionDef | None:
@@ -527,7 +535,10 @@ class TableFunctionRegistry:
                         _active_stack=_active_stack | {key},
                         _hoisted=hoisted,
                     )
-                    hoisted[hoist_key] = (f"_bq_tvf_{len(hoisted)}", nested)
+                    stage_hash = hashlib.sha256(
+                        f"{key[0] or ''}.{key[1]}({args_sig})".encode()
+                    ).hexdigest()[:12]
+                    hoisted[hoist_key] = (f"_bq_tvf_{stage_hash}", nested)
                 return exp.Table(this=exp.to_identifier(hoisted[hoist_key][0]), alias=alias)
             nested = self.inline_ast(
                 _substitute_params(defn.body, param_map),
@@ -587,6 +598,9 @@ def _finalize_sqlite_ast(
     return rewritten.sql(dialect="sqlite")
 
 
+_FINALIZED_STAGE_CACHE: dict[tuple[bool, str | None, str], str] = {}
+
+
 def transpile_bigquery_staged(
     ast_node: exp.Expr,
     *,
@@ -606,12 +620,17 @@ def transpile_bigquery_staged(
     stage_sqls: list[tuple[str, str]] = []
     preserved: set[str] = set()
     for stage_name, stage_ast in raw_stages:
-        sql_text = _finalize_sqlite_ast(
-            stage_ast,
-            qualify_datasets=qualify_datasets,
-            default_dataset=default_dataset,
-            preserved_tables=frozenset(preserved),
-        )
+        stage_key = (qualify_datasets, default_dataset, stage_ast.sql("bigquery"))
+        sql_text = _FINALIZED_STAGE_CACHE.get(stage_key)
+        if sql_text is None:
+            sql_text = _finalize_sqlite_ast(
+                stage_ast,
+                qualify_datasets=qualify_datasets,
+                default_dataset=default_dataset,
+                preserved_tables=frozenset(preserved),
+            )
+            if len(_FINALIZED_STAGE_CACHE) < 2048:
+                _FINALIZED_STAGE_CACHE[stage_key] = sql_text
         stage_sqls.append((stage_name, sql_text))
         preserved.add(stage_name.lower())
     main_sql = _finalize_sqlite_ast(

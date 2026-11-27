@@ -405,7 +405,7 @@ def test_folder_guard_catches_every_forbidden_import(
         ("bq_eval/demo/render/renderer.py", "from .view import PageView"),
         (
             "bq_eval/demo/pipeline.py",
-            "from bq_eval.core.engine.sql_eval import evaluate_traces_in_sqlite",
+            "from bq_eval.runner.engine.eval_adapter import OfflineEvalBackend",
         ),
         ("bq_eval/runner/contract/probe.py", "from pydantic import BaseModel"),
         ("bq_eval/runner/engine/probe.py", "import sqlglot"),

@@ -19,7 +19,10 @@ from bq_eval.core.contract.otel import LONG_CONTEXT_THRESHOLD_TOKENS, OTelGenAIS
 from bq_eval.core.contract.pricing import normalize_model_name
 from bq_eval.core.contract.results import BqQueryCostRow, ConfusionMatrix
 from bq_eval.core.contract.types import NonNegFloat
-from bq_eval.core.engine.calibration import compute_gwet_ac2
+from bq_eval.core.engine.calibration import (
+    compute_binary_cutpoint_agreement,
+    compute_gwet_ac2,
+)
 from bq_eval.core.engine.cost import compute_span_burndown_tokens, compute_span_cost_usd
 
 BYTES_PER_TIB: float = float(1024**4)
@@ -27,8 +30,9 @@ MS_PER_HOUR: float = 3_600_000.0
 BQ_ON_DEMAND_USD_PER_TIB: float = 6.25
 BQ_SLOT_HOUR_USD: float = 0.04
 
-_FORBIDDEN_HUMAN_RATER_RE = re.compile(
-    r"(?:llm|gemini|argon|flash|claude|gpt|synthetic|autorater|judge|bot)",
+HUMAN_RATER_ALLOW_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9_.-]{2,63}$")
+_SYNTHETIC_RATER_TOKEN_RE = re.compile(
+    r"(?:^|[_.-])(?:llm|gemini|argon|flash|claude|gpt|synthetic|autorater|judge|bot|model|ai)(?:$|[_.-]|\d)",
     re.IGNORECASE,
 )
 _REGION_RE = re.compile(r"^[a-z0-9-]{2,32}$")
@@ -71,6 +75,7 @@ class DualHumanCalibrationReport:
     confusion_matrix: ConfusionMatrix
     human_pass_rate: float
     judge_pass_rate: float
+    binary_cutpoint_agreement: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -181,6 +186,22 @@ def build_information_schema_jobs_sync_sql(
     )
 
 
+def validate_human_rater_id(rater_id: str) -> str:
+    """Validate that `rater_id` matches the human identifier format and carries no synthetic tokens (`T-16`)."""
+    cleaned = rater_id.strip()
+    if not HUMAN_RATER_ALLOW_RE.fullmatch(cleaned) or _SYNTHETIC_RATER_TOKEN_RE.search(cleaned):
+        raise ValueError(
+            f"Rater ID {rater_id!r} looks non-human/synthetic or invalid; blind human SME IDs required."
+        )
+    return cleaned
+
+
+def _validate_strict_ordinal_score(value: object, field_name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or not (1 <= value <= 4):
+        raise ValueError(f"{field_name} must be an integer in 1..4 (got {value!r}).")
+    return value
+
+
 def _group_and_validate_blind_rows(
     rows: Sequence[BlindHumanLabelRow],
 ) -> tuple[dict[str, list[BlindHumanLabelRow]], set[str]]:
@@ -191,14 +212,11 @@ def _group_and_validate_blind_rows(
             raise ValueError(
                 f"Trace {row.trace_id!r} rater {row.rater_id!r} was not blind to judge."
             )
-        if _FORBIDDEN_HUMAN_RATER_RE.search(row.rater_id):
-            raise ValueError(
-                f"Rater ID {row.rater_id!r} looks non-human/synthetic; blind human SME IDs required."
-            )
-        if not (1 <= row.human_ordinal_score <= 4) or not (1 <= row.judge_ordinal_score <= 4):
-            raise ValueError("Ordinal scores must be in 1..4.")
+        clean_rater = validate_human_rater_id(row.rater_id)
+        _validate_strict_ordinal_score(row.human_ordinal_score, "human_ordinal_score")
+        _validate_strict_ordinal_score(row.judge_ordinal_score, "judge_ordinal_score")
         by_trace.setdefault(row.trace_id, []).append(row)
-        all_raters.add(row.rater_id)
+        all_raters.add(clean_rater)
     return by_trace, all_raters
 
 
@@ -246,14 +264,21 @@ def validate_blind_dual_human_labels(
         counts[cell] += 1
 
     total = len(by_trace)
+    consensus_scores = [a for a, _ in h_llm_pairs]
+    judge_scores = [b for _, b in h_llm_pairs]
     return DualHumanCalibrationReport(
         trace_count=total,
         distinct_raters=len(all_raters),
         human_vs_human_ac2=compute_gwet_ac2([a for a, _ in h_h_pairs], [b for _, b in h_h_pairs]),
-        human_vs_llm_ac2=compute_gwet_ac2([a for a, _ in h_llm_pairs], [b for _, b in h_llm_pairs]),
+        human_vs_llm_ac2=compute_gwet_ac2(consensus_scores, judge_scores),
         confusion_matrix=ConfusionMatrix(**counts),
         human_pass_rate=(counts["tp"] + counts["fn"]) / total,
         judge_pass_rate=(counts["tp"] + counts["fp"]) / total,
+        binary_cutpoint_agreement=compute_binary_cutpoint_agreement(
+            consensus_scores,
+            judge_scores,
+            passing_score=passing_score,
+        ),
     )
 
 

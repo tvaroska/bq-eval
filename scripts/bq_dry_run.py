@@ -74,16 +74,13 @@ def qualify_project_datasets(  # noqa: PLR0913
         .replace("${READ_MARGIN_MINUTES}", "60")
         .replace("${SETTLE_MINUTES}", "5")
         .replace("${OUTCOME_LOOKBACK_DAYS}", "30")
+        .replace("${GOLD_LOOKBACK_HOURS}", "720")
         .replace("${SHAPE3_PREFIX}", "bq-eval/shape3/")
         .replace("${SHAPE3_FORMAT}", "JSON")
-        .replace("${AWS_OMNI_CONNECTION_ID}", "aws-us-east-1.omni_connection")
-        .replace("${AZURE_OMNI_CONNECTION_ID}", "azure-eastus2.omni_connection")
-        .replace("${AWS_S3_BUCKET}", "enterprise-aws-otel-bucket")
-        .replace("${AZURE_STORAGE_ACCOUNT}", "enterpriseazureotel")
-        .replace("${AZURE_CONTAINER}", "otel-spans")
     )
     for dataset in DATASET_PREFIXES:
         target_ds = dataset_id if dataset == "agent_eval" else dataset
+        qualified = qualified.replace(f"`{dataset}`", f"`{project_id}.{target_ds}`")
         qualified = qualified.replace(f"`{dataset}.", f"`{project_id}.{target_ds}.")
     return qualified
 

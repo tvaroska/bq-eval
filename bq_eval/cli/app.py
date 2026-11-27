@@ -1,9 +1,8 @@
-"""Command-Line Interface (`bq-eval`) for BigQuery Agent Evaluation & FinOps."""
+"""Command-Line Interface (`bq-eval`) for BigQuery Silver + Gold Agent Evaluation & FinOps."""
 
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -16,14 +15,7 @@ from bq_eval.cli.capacity_cmd import (
     run_capacity_export_command,
 )
 from bq_eval.cli.server import create_workbench_server
-from bq_eval.core.contract.otel import BQAAAgentEvent
 from bq_eval.core.contract.pricing import MANAGED_EVALUATE_AGENT_METRICS
-from bq_eval.core.engine.bqaa import (
-    bqaa_events_to_otel_spans,
-    bqaa_events_to_trace_payloads,
-    deduplicate_bqaa_events,
-)
-from bq_eval.core.engine.ports import SQLiteEvalBackend
 from bq_eval.core.engine.sql_eval import (
     build_ai_evaluate_agent_sql,
     build_ai_generate_table_judge_sql,
@@ -46,7 +38,7 @@ from bq_eval.demo.render.renderer import write_html_scorecard
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="bq-eval",
-        description="BQ Eval & FinOps: Dual-Path BigQuery Agent Evaluation, Observability & FinOps CLI.",
+        description="BQ Eval & FinOps: BigQuery Silver Core + Gold Evaluation, Monitoring & Cost CLI.",
     )
     parser.add_argument(
         "--version",
@@ -57,7 +49,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     demo_p = sub.add_parser(
         "demo",
-        help="Replay reconstructed fleet receipts or offline corpora in the SQLite twin and emit scorecards.",
+        help="Replay reconstructed fleet receipts or offline corpora over Silver/Gold SQL and emit scorecards.",
     )
     demo_p.add_argument(
         "--corpus",
@@ -131,18 +123,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--jsonl-out",
         type=Path,
         default=None,
-        help="Optional directory to export time-shifted otel_spans.jsonl and trace_payloads.jsonl.",
+        help="Optional directory to export Bronze-shaped spans, registry, and trace payloads JSONL.",
     )
 
     sql_p = sub.add_parser(
         "judge-sql",
-        help="Generate stratified BigQuery judge SQL (Engine A AI.GENERATE_TABLE or Engine B AI.EVALUATE_AGENT).",
+        help="Generate stratified BigQuery judge SQL (AI.GENERATE_TABLE or Preview AI.EVALUATE_AGENT).",
     )
     sql_p.add_argument(
         "--engine",
         choices=("generate-table", "evaluate-agent"),
         default="generate-table",
-        help="Judge SQL engine: generate-table (all regions, 4-pt rubrics) or evaluate-agent (BQAA AgentData TVF).",
+        help="Judge SQL engine: generate-table (4-pt rubrics) or evaluate-agent (Preview managed metrics).",
     )
     sql_p.add_argument("--project-id", default="enterprise-ai-prod", help="GCP Project ID.")
     sql_p.add_argument("--dataset-id", default="agent_eval", help="BigQuery Dataset ID.")
@@ -159,13 +151,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sql_p.add_argument(
         "--eval-view",
-        default="v_bqaa_eval_turn_filtered",
-        help="BQAA AgentData turn/session view name (for --engine evaluate-agent).",
+        default="v_eval_agent_turns",
+        help="Gold AgentData turn view name over Silver traces/payloads (for --engine evaluate-agent).",
     )
     sql_p.add_argument(
         "--managed-metrics",
         default=None,
-        help="Comma-separated AI.EVALUATE_AGENT managed metric names (for --engine evaluate-agent).",
+        help="Comma-separated Preview AI.EVALUATE_AGENT managed metric names (for --engine evaluate-agent).",
     )
     sql_p.add_argument(
         "--canary-pct",
@@ -184,40 +176,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Include traces failing Rule 0 / Step-1 checks in judge-sql (default: routine mode skips them).",
     )
 
-    bqaa_p = sub.add_parser(
-        "bqaa",
-        help="Ingest Light Capture (BQAA) agent_events JSON/JSONL, convert to OTel spans/payloads, and evaluate.",
-    )
-    bqaa_p.add_argument(
-        "--events-file",
-        type=Path,
-        required=True,
-        help="Path to a JSON array or JSONL file of BQAAAgentEvent records.",
-    )
-    bqaa_p.add_argument(
-        "--rubric-id",
-        default="groundedness_4pt_v1",
-        help="Rubric ID for SQLite twin summary evaluation (default: groundedness_4pt_v1).",
-    )
-    bqaa_p.add_argument(
-        "--format",
-        dest="output_format",
-        choices=("markdown", "json"),
-        default="markdown",
-        help="Stdout output format: markdown or json (default: markdown).",
-    )
-    bqaa_p.add_argument(
-        "--spans-out",
-        type=Path,
-        default=None,
-        help="Optional path to export converted OTelGenAISpanRecord rows as JSONL.",
-    )
-    bqaa_p.add_argument(
-        "--payloads-out",
-        type=Path,
-        default=None,
-        help="Optional path to export aggregated TracePayloadRecord rows as JSONL.",
-    )
     register_bootstrap_subparser(sub)
     register_capacity_export_subparser(sub)
     return parser
@@ -317,85 +275,12 @@ def _run_judge_sql(args: argparse.Namespace) -> int:
     return 0
 
 
-def _load_bqaa_events_file(path: Path) -> list[BQAAAgentEvent]:
-    if not path.is_file():
-        raise ValueError(f"BQAA events file not found: {path}")
-    raw_text = path.read_text(encoding="utf-8").strip()
-    if not raw_text:
-        return []
-    if raw_text.startswith("["):
-        parsed = json.loads(raw_text)
-        if not isinstance(parsed, list):
-            raise ValueError("Expected JSON array of BQAAAgentEvent objects.")
-        return [BQAAAgentEvent.model_validate(item) for item in parsed]
-    return [
-        BQAAAgentEvent.model_validate(json.loads(line))
-        for line in raw_text.splitlines()
-        if line.strip()
-    ]
-
-
-def _run_bqaa(args: argparse.Namespace) -> int:
-    raw_events = _load_bqaa_events_file(args.events_file)
-    deduped = deduplicate_bqaa_events(raw_events)
-    spans = bqaa_events_to_otel_spans(deduped)
-    payloads = bqaa_events_to_trace_payloads(deduped)
-
-    backend = SQLiteEvalBackend()
-    summaries = backend.evaluate_traces(spans, rubric_id=args.rubric_id)
-
-    if args.spans_out is not None:
-        args.spans_out.parent.mkdir(parents=True, exist_ok=True)
-        args.spans_out.write_text(
-            "".join(json.dumps(s.model_dump(mode="json")) + "\n" for s in spans),
-            encoding="utf-8",
-        )
-    if args.payloads_out is not None:
-        args.payloads_out.parent.mkdir(parents=True, exist_ok=True)
-        args.payloads_out.write_text(
-            "".join(json.dumps(p.model_dump(mode="json")) + "\n" for p in payloads),
-            encoding="utf-8",
-        )
-
-    if args.output_format == "json":
-        print(
-            json.dumps(
-                {
-                    "events_raw": len(raw_events),
-                    "events_deduped": len(deduped),
-                    "spans_emitted": len(spans),
-                    "payloads_emitted": len(payloads),
-                    "summaries": {k: v.model_dump(mode="json") for k, v in summaries.items()},
-                },
-                indent=2,
-                sort_keys=True,
-            )
-        )
-        return 0
-
-    rows = "\n".join(
-        f"| `{s.apphub_application_id}` | {s.total_traces} | {s.rule0_pass_rate * 100:.1f}% | "
-        f"`{s.calibration_status}` | ${s.total_spend_usd:.5f} |"
-        for s in summaries.values()
-    )
-    print(
-        f"# BQAA Light Capture Ingestion & Evaluation\n\n"
-        f"- **Events:** `{len(raw_events)}` raw -> `{len(deduped)}` deduplicated\n"
-        f"- **Converted:** `{len(spans)}` spans, `{len(payloads)}` trace payloads\n\n"
-        "| Application ID | Traces | Rule 0 Pass | Calibration | Total Spend |\n"
-        "| :--- | ---: | ---: | :--- | ---: |\n"
-        f"{rows}"
-    )
-    return 0
-
-
 def _run_command(args: argparse.Namespace) -> int:
     handlers = {
         "demo": _run_demo,
         "serve": _run_serve,
         "loadgen": _run_loadgen,
         "judge-sql": _run_judge_sql,
-        "bqaa": _run_bqaa,
         "bootstrap": run_bootstrap_command,
         "capacity-export": run_capacity_export_command,
     }

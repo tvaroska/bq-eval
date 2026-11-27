@@ -1,19 +1,5 @@
--- =============================================================================
--- BQ Eval — Step 3 Day-2 Judge Token Quota Guard & Executable Procedure
---   * Enforces global + per-application daily judge token sub-caps so a single
---     noisy application cannot starve the rest of the fleet.
---   * Accounts for pre-flight `max_output_tokens` + `thinking_level` headroom
---     before invoking `AI.GENERATE_TABLE` (blocking 2x output/thinking overruns).
---   * Uses non-deduped burn accounting over `eval_results` (retaining billed
---     retries) plus atomic reservation rows in `eval_daily_quota_reservations`
---     to prevent concurrent TOCTOU overspend and retry storms.
---   * Partition-prunes `eval_results` dedup joins and supports configurable
---     rubric selection via `CALL agent_eval.run_daily_quota_guarded_judge(...)`.
--- =============================================================================
+-- Gold Step 3 Day-2 Judge Token Quota Guard, Run Audit Log & Executable Procedure (`S-18`, `S-19`, `S-23`, `S-26`).
 
--- -----------------------------------------------------------------------------
--- 1. Global & Per-Application Daily Quota Config (`agent_eval.eval_daily_quota_config`)
--- -----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS `agent_eval.eval_daily_quota_config` (
   quota_name STRING NOT NULL OPTIONS (description = 'Unique daily quota profile name (e.g., default_step2_daily_cap or per-app override).'),
   apphub_application_id STRING NOT NULL OPTIONS (description = 'Target application ID, or * for the global fleet cap.'),
@@ -59,11 +45,6 @@ WHEN NOT MATCHED THEN
     src.updated_at
   );
 
--- -----------------------------------------------------------------------------
--- 2. Atomic Quota Reservation Ledger (`agent_eval.eval_daily_quota_reservations`)
---    * Written inside a BigQuery transaction before calling AI.GENERATE_TABLE
---    * Status lifecycle: RESERVED -> COMMITTED (or FAILED_BILLED on error)
--- -----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS `agent_eval.eval_daily_quota_reservations` (
   reservation_id STRING NOT NULL OPTIONS (description = 'Unique atomic batch reservation ID.'),
   quota_date_utc DATE NOT NULL OPTIONS (description = 'UTC calendar date of the reservation.'),
@@ -80,27 +61,30 @@ OPTIONS (
   description = 'Atomic pre-flight judge token reservation ledger preventing concurrent TOCTOU overspend and retry storms.'
 );
 
--- -----------------------------------------------------------------------------
--- 2B. Per-Day Serialized Quota Counter (`agent_eval.eval_daily_quota_state`)
---     * BigQuery multi-statement transactions only detect concurrency conflicts
---       on mutating DML (UPDATE/MERGE/DELETE), not pure INSERT appends.
---     * Updating this single per-day row inside BEGIN TRANSACTION serializes
---       concurrent CALLs on the same UTC date via optimistic concurrency control.
--- -----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS `agent_eval.eval_daily_quota_state` (
-  quota_date_utc DATE NOT NULL OPTIONS (description = 'UTC calendar date of the serialized quota counter.'),
-  reserved_tokens INT64 NOT NULL OPTIONS (description = 'Cumulative pre-flight tokens reserved on this UTC date.'),
-  updated_at TIMESTAMP NOT NULL OPTIONS (description = 'UTC timestamp of the last serialized reservation.')
+  quota_date_utc DATE NOT NULL OPTIONS (description = 'UTC calendar date of the serialized quota lock row.'),
+  updated_at TIMESTAMP NOT NULL OPTIONS (description = 'UTC timestamp of the last serialized reservation lock.')
 )
 OPTIONS (
-  description = 'Per-day mutable counter row acquiring a BigQuery transaction write lock to serialize concurrent quota reservations.'
+  description = 'Per-day mutable lock row acquiring a BigQuery transaction write lock to serialize concurrent quota reservations (S-26).'
 );
 
--- -----------------------------------------------------------------------------
--- 3. Global Real-Time Daily Quota Status (`agent_eval.v_step2_daily_quota_status`)
---    * Non-deduped burn accounting: retains every billed Engine A & Engine B
---      retry row in `eval_results` plus active/failed-billed reservations.
--- -----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `agent_eval.eval_quota_run_log` (
+  run_log_id STRING NOT NULL OPTIONS (description = 'Unique procedure execution log ID.'),
+  eval_run_id STRING NOT NULL OPTIONS (description = 'Evaluation run ID passed to or derived by the procedure.'),
+  rubric_id STRING NOT NULL OPTIONS (description = 'Target rubric identifier.'),
+  quota_date_utc DATE NOT NULL OPTIONS (description = 'Pinned single UTC quota date used across the run.'),
+  selected_count INT64 NOT NULL OPTIONS (description = 'Number of candidate traces selected before reservation.'),
+  reserved_tokens INT64 NOT NULL OPTIONS (description = 'Total batch tokens requested or reserved.'),
+  exit_reason STRING NOT NULL OPTIONS (description = 'Deterministic exit reason: NO_CANDIDATES, QUOTA_EXCEEDED, RESERVATION_CONFLICT, COMMITTED, or FAILED_BILLED.'),
+  logged_at TIMESTAMP NOT NULL OPTIONS (description = 'UTC audit log timestamp.')
+)
+PARTITION BY quota_date_utc
+CLUSTER BY rubric_id, exit_reason
+OPTIONS (
+  description = 'Auditable exit-reason log for scheduled quota-guarded judge runs (S-23).'
+);
+
 CREATE OR REPLACE VIEW `agent_eval.v_step2_daily_quota_status` AS
 WITH active_config AS (
   SELECT
@@ -145,10 +129,6 @@ FROM active_config AS cfg
 CROSS JOIN today_billed_usage AS usage
 CROSS JOIN today_reservations AS res;
 
--- -----------------------------------------------------------------------------
--- 4. Per-Application Daily Quota Sub-Cap Status (`agent_eval.v_step2_app_daily_quota_status`)
---    * Enforces per-app sub-caps so one noisy application cannot starve others.
--- -----------------------------------------------------------------------------
 CREATE OR REPLACE VIEW `agent_eval.v_step2_app_daily_quota_status` AS
 WITH global_cfg AS (
   SELECT
@@ -215,13 +195,6 @@ LEFT JOIN app_billed_usage AS u
 LEFT JOIN app_reservations AS r
   ON k.apphub_application_id = r.apphub_application_id;
 
--- -----------------------------------------------------------------------------
--- 5. Executable Day-2 Quota-Guarded Judge Procedure (`agent_eval.run_daily_quota_guarded_judge`)
---    * Atomically reserves pre-flight prompt + max_output_tokens + thinking headroom
---      per application inside a transaction before calling AI.GENERATE_TABLE.
---    * Partition-prunes `eval_results` dedup join to the last 7 UTC days.
---    * Marks failed batches `FAILED_BILLED` so retry storms still trip the cap.
--- -----------------------------------------------------------------------------
 CREATE OR REPLACE PROCEDURE `agent_eval.run_daily_quota_guarded_judge`(
   IN p_rubric_id STRING,
   IN p_canary_sample_pct INT64,
@@ -232,10 +205,14 @@ CREATE OR REPLACE PROCEDURE `agent_eval.run_daily_quota_guarded_judge`(
 )
 BEGIN
   DECLARE v_reservation_id STRING DEFAULT GENERATE_UUID();
-  DECLARE v_quota_date_utc DATE DEFAULT CURRENT_DATE('UTC');
+  DECLARE v_now_utc TIMESTAMP DEFAULT CURRENT_TIMESTAMP();
+  DECLARE v_quota_date_utc DATE DEFAULT DATE(v_now_utc);
+  DECLARE v_lookback_hours INT64 DEFAULT LEAST(168, GREATEST(1, COALESCE(p_lookback_hours, 24)));
+  DECLARE v_rubric_model STRING DEFAULT NULL;
+  DECLARE v_remote_model_fqn STRING DEFAULT NULL;
   DECLARE v_eval_run_id STRING DEFAULT COALESCE(
     NULLIF(TRIM(p_eval_run_id), ''),
-    CONCAT('sched_', FORMAT_DATE('%Y%m%d', v_quota_date_utc), '_', p_rubric_id)
+    CONCAT('sched_', FORMAT_DATE('%Y%m%d', v_quota_date_utc), '_', COALESCE(p_rubric_id, 'unknown'))
   );
   DECLARE v_thinking_level STRING DEFAULT (
     CASE UPPER(COALESCE(NULLIF(TRIM(p_thinking_level), ''), 'LOW'))
@@ -265,6 +242,21 @@ BEGIN
   DECLARE v_quota_exceeded BOOL DEFAULT FALSE;
   DECLARE v_attempt INT64 DEFAULT 0;
 
+  SET v_rubric_model = (
+    SELECT judge_model
+    FROM `agent_eval.rubrics`
+    WHERE rubric_id = p_rubric_id
+    LIMIT 1
+  );
+  IF v_rubric_model IS NULL THEN
+    RAISE USING MESSAGE = CONCAT('Unknown p_rubric_id in agent_eval.rubrics: ', COALESCE(p_rubric_id, 'NULL'));
+  END IF;
+  SET v_remote_model_fqn = IF(
+    v_rubric_model = 'gemini-4-argon',
+    '`agent_eval.gemini_4_argon_judge`',
+    '`agent_eval.gemini_3_8_flash_judge`'
+  );
+
   WHILE v_attempt < 3 AND NOT v_reserved DO
     SET v_attempt = v_attempt + 1;
 
@@ -278,7 +270,7 @@ BEGIN
     recent_scored AS (
       SELECT DISTINCT trace_id, rubric_id
       FROM `agent_eval.eval_results`
-      WHERE DATE(evaluated_at) >= DATE_SUB(CURRENT_DATE('UTC'), INTERVAL 7 DAY)
+      WHERE DATE(evaluated_at) >= DATE_SUB(v_quota_date_utc, INTERVAL 7 DAY)
         AND rubric_id = p_rubric_id
     ),
     raw_candidates AS (
@@ -295,7 +287,7 @@ BEGIN
         ON cand.trace_id = existing.trace_id
         AND cand.rubric_id = existing.rubric_id
       WHERE cand.rubric_id = p_rubric_id
-        AND cand.trace_start_time >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL GREATEST(1, COALESCE(p_lookback_hours, 24)) HOUR)
+        AND cand.trace_start_time >= TIMESTAMP_SUB(v_now_utc, INTERVAL v_lookback_hours HOUR)
         AND MOD(ABS(FARM_FINGERPRINT(cand.trace_id)), 100) < LEAST(100, GREATEST(0, COALESCE(p_canary_sample_pct, 10)))
         AND existing.trace_id IS NULL
     ),
@@ -324,6 +316,10 @@ BEGIN
     SET v_selected_count = (SELECT COUNT(*) FROM _quota_selected_candidates);
 
     IF v_selected_count = 0 THEN
+      INSERT INTO `agent_eval.eval_quota_run_log` (
+        run_log_id, eval_run_id, rubric_id, quota_date_utc, selected_count, reserved_tokens, exit_reason, logged_at
+      )
+      VALUES (GENERATE_UUID(), v_eval_run_id, p_rubric_id, v_quota_date_utc, 0, 0, 'NO_CANDIDATES', CURRENT_TIMESTAMP());
       RETURN;
     END IF;
 
@@ -338,21 +334,18 @@ BEGIN
 
     BEGIN
       BEGIN TRANSACTION;
-        -- Mutate the single per-day counter row so concurrent CALLs conflict and serialize
-        -- under BigQuery optimistic concurrency control (zero TEMP table refs in transaction).
         MERGE INTO `agent_eval.eval_daily_quota_state` AS target
         USING (
           SELECT
             v_quota_date_utc AS quota_date_utc,
-            0 AS reserved_tokens,
             CURRENT_TIMESTAMP() AS updated_at
         ) AS src
         ON target.quota_date_utc = src.quota_date_utc
         WHEN MATCHED THEN
           UPDATE SET updated_at = src.updated_at
         WHEN NOT MATCHED THEN
-          INSERT (quota_date_utc, reserved_tokens, updated_at)
-          VALUES (src.quota_date_utc, src.reserved_tokens, src.updated_at);
+          INSERT (quota_date_utc, updated_at)
+          VALUES (src.quota_date_utc, src.updated_at);
 
         SET v_quota_exceeded = (
           WITH global_cfg AS (
@@ -417,9 +410,7 @@ BEGIN
           ROLLBACK TRANSACTION;
         ELSE
           UPDATE `agent_eval.eval_daily_quota_state`
-          SET
-            reserved_tokens = reserved_tokens + v_batch_tokens,
-            updated_at = CURRENT_TIMESTAMP()
+          SET updated_at = CURRENT_TIMESTAMP()
           WHERE quota_date_utc = v_quota_date_utc;
 
           INSERT INTO `agent_eval.eval_daily_quota_reservations` (
@@ -457,6 +448,19 @@ BEGIN
   END WHILE;
 
   IF NOT v_reserved THEN
+    INSERT INTO `agent_eval.eval_quota_run_log` (
+      run_log_id, eval_run_id, rubric_id, quota_date_utc, selected_count, reserved_tokens, exit_reason, logged_at
+    )
+    VALUES (
+      GENERATE_UUID(),
+      v_eval_run_id,
+      p_rubric_id,
+      v_quota_date_utc,
+      v_selected_count,
+      v_batch_tokens,
+      IF(COALESCE(v_quota_exceeded, FALSE), 'QUOTA_EXCEEDED', 'RESERVATION_CONFLICT'),
+      CURRENT_TIMESTAMP()
+    );
     RETURN;
   END IF;
 
@@ -470,12 +474,14 @@ BEGIN
         outcome_id,
         apphub_application_id,
         rubric_id,
+        rubric_version,
         judge_model,
         sampling_stratum,
         rule0_pass,
         reasoning_trace,
         ordinal_score,
         binary_pass,
+        judge_status,
         judge_input_tokens,
         judge_output_tokens,
         judge_thinking_tokens,
@@ -488,19 +494,25 @@ BEGIN
         outcome_id,
         apphub_application_id,
         rubric_id,
-        'gemini-3.8-flash' AS judge_model,
+        rubric_version,
+        @judge_model AS judge_model,
         @sample_stratum AS sampling_stratum,
         step1_pass AS rule0_pass,
-        reasoning_trace,
-        ordinal_score,
-        (ordinal_score >= passing_score) AS binary_pass,
+        IF(
+          COALESCE(status, '') = '' AND ordinal_score BETWEEN 1 AND 4,
+          reasoning_trace,
+          CONCAT('REJECTED: ', COALESCE(NULLIF(status, ''), 'invalid_ordinal_score'))
+        ) AS reasoning_trace,
+        IF(COALESCE(status, '') = '' AND ordinal_score BETWEEN 1 AND 4, ordinal_score, CAST(NULL AS INT64)) AS ordinal_score,
+        IF(COALESCE(status, '') = '' AND ordinal_score BETWEEN 1 AND 4, (ordinal_score >= passing_score), CAST(NULL AS BOOL)) AS binary_pass,
+        IF(COALESCE(status, '') = '' AND ordinal_score BETWEEN 1 AND 4, 'SCORED', 'REJECTED') AS judge_status,
         COALESCE(
           SAFE_CAST(JSON_VALUE(full_response, '$.usageMetadata.promptTokenCount') AS INT64),
           DIV(LENGTH(prompt), 4)
         ) AS judge_input_tokens,
         COALESCE(
           SAFE_CAST(JSON_VALUE(full_response, '$.usageMetadata.candidatesTokenCount') AS INT64),
-          DIV(LENGTH(COALESCE(reasoning_trace, '')), 4) + 12
+          IF(COALESCE(status, '') = '' AND ordinal_score BETWEEN 1 AND 4, DIV(LENGTH(COALESCE(reasoning_trace, '')), 4) + 12, 0)
         ) AS judge_output_tokens,
         COALESCE(
           SAFE_CAST(JSON_VALUE(full_response, '$.usageMetadata.thoughtsTokenCount') AS INT64),
@@ -508,23 +520,24 @@ BEGIN
         ) AS judge_thinking_tokens,
         CURRENT_TIMESTAMP() AS evaluated_at
       FROM AI.GENERATE_TABLE(
-        MODEL `agent_eval.gemini_3_8_flash_judge`,
+        MODEL """,
+      v_remote_model_fqn,
+      """,
         (SELECT * EXCEPT (est_call_tokens) FROM _quota_selected_candidates),
         STRUCT(
           'reasoning_trace STRING NOT NULL, ordinal_score INT64 NOT NULL' AS output_schema,
-          '{"generation_config": {"temperature": 0.0, "max_output_tokens": """,
+          '{"generation_config": {"temperature": 0.0, "seed": 42, "max_output_tokens": """,
       CAST(v_max_out_tokens AS STRING),
       """, "thinking_config": {"thinking_level": \"""",
       v_thinking_level,
       """\"}}}' AS model_params
         )
       )
-      WHERE COALESCE(status, '') = ''
-        AND ordinal_score BETWEEN 1 AND 4
       """
     )
     USING
       v_eval_run_id AS eval_run_id,
+      v_rubric_model AS judge_model,
       v_sample_stratum AS sample_stratum,
       v_thinking_headroom AS thinking_headroom;
 
@@ -532,11 +545,25 @@ BEGIN
     SET status = 'COMMITTED', updated_at = CURRENT_TIMESTAMP()
     WHERE reservation_id = v_reservation_id
       AND quota_date_utc = v_quota_date_utc;
+
+    INSERT INTO `agent_eval.eval_quota_run_log` (
+      run_log_id, eval_run_id, rubric_id, quota_date_utc, selected_count, reserved_tokens, exit_reason, logged_at
+    )
+    VALUES (
+      GENERATE_UUID(), v_eval_run_id, p_rubric_id, v_quota_date_utc, v_selected_count, v_batch_tokens, 'COMMITTED', CURRENT_TIMESTAMP()
+    );
   EXCEPTION WHEN ERROR THEN
     UPDATE `agent_eval.eval_daily_quota_reservations`
     SET status = 'FAILED_BILLED', updated_at = CURRENT_TIMESTAMP()
     WHERE reservation_id = v_reservation_id
       AND quota_date_utc = v_quota_date_utc;
+
+    INSERT INTO `agent_eval.eval_quota_run_log` (
+      run_log_id, eval_run_id, rubric_id, quota_date_utc, selected_count, reserved_tokens, exit_reason, logged_at
+    )
+    VALUES (
+      GENERATE_UUID(), v_eval_run_id, p_rubric_id, v_quota_date_utc, v_selected_count, v_batch_tokens, 'FAILED_BILLED', CURRENT_TIMESTAMP()
+    );
     RAISE;
   END;
 END;

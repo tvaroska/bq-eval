@@ -4,9 +4,17 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from bq_eval.core.contract.types import FiniteFloat, NonNegFloat, UnitFloat
+
+CalibrationStatus = Literal[
+    "CALIBRATED",
+    "UNCALIBRATED",
+    "UNJUDGED",
+    "STALE_CALIBRATION",
+    "MISSING_SESSION_CONTEXT",
+]
 
 
 class ConfusionMatrix(BaseModel):
@@ -58,18 +66,20 @@ class RoganGladenResult(BaseModel):
 
 
 class CalibrationResult(BaseModel):
-    """Combined IRR (Gwet's AC2) + Rogan-Gladen calibration summary."""
+    """Combined IRR (Gwet's AC2 + binary cut-point) + Rogan-Gladen calibration summary."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     gwet_ac2: FiniteFloat
+    sme_vs_sme_ac2: FiniteFloat | None = None
+    binary_cutpoint_agreement: UnitFloat | None = None
     passes_irr_gate: bool
     confusion_matrix: ConfusionMatrix
     rogan_gladen: RoganGladenResult
 
 
 class SQLTraceEvalSummary(BaseModel):
-    """Per-application Tier 1-3 evaluation and 4-bucket FinOps summary."""
+    """Per-application Gold evaluation and 6-bucket FinOps summary."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -83,7 +93,7 @@ class SQLTraceEvalSummary(BaseModel):
     avg_cache_hit_ratio: UnitFloat
     total_weighted_burndown_tokens: NonNegFloat
     judged_samples: int = Field(..., ge=0)
-    calibration_status: Literal["CALIBRATED", "UNCALIBRATED", "UNJUDGED"]
+    calibration_status: CalibrationStatus
     raw_judge_pass_rate: UnitFloat | None
     calibrated_pass_rate: UnitFloat | None
     calibrated_ci_95_lower: UnitFloat | None
@@ -103,6 +113,42 @@ class SQLTraceEvalSummary(BaseModel):
     outcome_verified_count: int = Field(default=0, ge=0)
     outcome_cost_per_verified_ai_usd: NonNegFloat | None = None
     outcome_cost_per_verified_usd: NonNegFloat | None = None
+
+    @model_validator(mode="after")
+    def _validate_status_and_rates(self) -> SQLTraceEvalSummary:
+        if self.calibration_status == "CALIBRATED":
+            if self.judged_samples < 10:
+                raise ValueError("CALIBRATED summary requires judged_samples >= 10.")
+            if (
+                self.raw_judge_pass_rate is None
+                or self.calibrated_pass_rate is None
+                or self.calibrated_ci_95_lower is None
+                or self.calibrated_ci_95_upper is None
+            ):
+                raise ValueError(
+                    "CALIBRATED summary requires non-null raw_judge_pass_rate, calibrated_pass_rate, and 95% CI bounds."
+                )
+            if self.passes_irr_gate is False:
+                raise ValueError(
+                    "CALIBRATED summary cannot have passes_irr_gate=False (ADR-049 fail-closed agreement gate)."
+                )
+        else:
+            if (
+                self.calibrated_pass_rate is not None
+                or self.calibrated_ci_95_lower is not None
+                or self.calibrated_ci_95_upper is not None
+                or self.cost_per_verified_outcome_usd is not None
+            ):
+                raise ValueError(
+                    f"calibration_status={self.calibration_status!r} requires calibrated_pass_rate, CI bounds, and cost_per_verified_outcome_usd to be None."
+                )
+            if self.calibration_status == "UNJUDGED" and (
+                self.judged_samples != 0 or self.raw_judge_pass_rate is not None
+            ):
+                raise ValueError(
+                    "UNJUDGED summary requires judged_samples == 0 and raw_judge_pass_rate is None."
+                )
+        return self
 
 
 class BqQueryCostRow(BaseModel):

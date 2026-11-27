@@ -8,8 +8,72 @@ CREATE OR REPLACE TABLE FUNCTION `${PROJECT_ID}.${SILVER_INTERNAL_DATASET}.outco
   from_time TIMESTAMP,
   to_time TIMESTAMP
 ) AS (
-  WITH trace_agg AS (
-    -- Single scan of `traces_base` over lookback window (carries activity flag + model confidence).
+  WITH per_trace AS (
+    SELECT
+      sp.trace_id,
+      MIN(sp.start_time) AS trace_start_time,
+      MAX(sp.receive_time) AS last_span_arrival_time,
+      ARRAY_AGG(sp.outcome_id IGNORE NULLS ORDER BY sp.start_time ASC, sp.span_id ASC LIMIT 1)[SAFE_OFFSET(0)] AS outcome_id,
+      ARRAY_AGG(sp.outcome_owner IGNORE NULLS ORDER BY sp.start_time ASC, sp.span_id ASC LIMIT 1)[SAFE_OFFSET(0)] AS span_outcome_owner,
+      ARRAY_AGG(CASE WHEN sp.outcome_owner IS NOT NULL THEN sp.start_time END IGNORE NULLS ORDER BY sp.start_time ASC, sp.span_id ASC LIMIT 1)[SAFE_OFFSET(0)] AS owner_st,
+      ARRAY_AGG(CASE WHEN sp.outcome_owner IS NOT NULL THEN sp.span_id END IGNORE NULLS ORDER BY sp.start_time ASC, sp.span_id ASC LIMIT 1)[SAFE_OFFSET(0)] AS owner_sid,
+      ARRAY_AGG(sp.outcome_subject IGNORE NULLS ORDER BY sp.start_time ASC, sp.span_id ASC LIMIT 1)[SAFE_OFFSET(0)] AS span_outcome_subject,
+      ARRAY_AGG(CASE WHEN sp.outcome_subject IS NOT NULL THEN sp.start_time END IGNORE NULLS ORDER BY sp.start_time ASC, sp.span_id ASC LIMIT 1)[SAFE_OFFSET(0)] AS subj_st,
+      ARRAY_AGG(CASE WHEN sp.outcome_subject IS NOT NULL THEN sp.span_id END IGNORE NULLS ORDER BY sp.start_time ASC, sp.span_id ASC LIMIT 1)[SAFE_OFFSET(0)] AS subj_sid,
+      ARRAY_AGG(sp.outcome_parent_id IGNORE NULLS ORDER BY sp.start_time ASC, sp.span_id ASC LIMIT 1)[SAFE_OFFSET(0)] AS span_outcome_parent_id,
+      ARRAY_AGG(CASE WHEN sp.outcome_parent_id IS NOT NULL THEN sp.start_time END IGNORE NULLS ORDER BY sp.start_time ASC, sp.span_id ASC LIMIT 1)[SAFE_OFFSET(0)] AS par_st,
+      ARRAY_AGG(CASE WHEN sp.outcome_parent_id IS NOT NULL THEN sp.span_id END IGNORE NULLS ORDER BY sp.start_time ASC, sp.span_id ASC LIMIT 1)[SAFE_OFFSET(0)] AS par_sid,
+      COUNTIF(sp.source_class IS NOT NULL) > 0 AS has_root_span,
+      MAX(CASE WHEN sp.is_r THEN sp.span_status END) AS root_status,
+      MAX(CASE WHEN sp.app_failed IS TRUE THEN 1 ELSE 0 END) = 1 AS app_failed,
+      COALESCE(
+        ARRAY_AGG(CASE WHEN sp.source_class = 'platform' THEN sp.page_count END IGNORE NULLS ORDER BY sp.start_time ASC, sp.span_id ASC LIMIT 1)[SAFE_OFFSET(0)],
+        MAX(CASE WHEN sp.is_r THEN sp.page_count END),
+        MAX(sp.page_count)
+      ) AS page_count,
+      MIN(CASE WHEN sp.is_model_call IS TRUE THEN sp.model_confidence END) AS min_model_confidence,
+      MAX(CASE WHEN sp.is_c THEN sp.model_confidence END) AS final_model_confidence,
+      MAX(CASE WHEN sp.is_c THEN sp.end_time END) AS final_confidence_end_time,
+      MAX(CASE WHEN sp.is_c THEN sp.span_id END) AS final_confidence_span_id,
+      MAX(CASE WHEN sp.is_model_call IS TRUE AND sp.cascade_tier = 'escalation' THEN 1 ELSE 0 END) = 1 AS model_escalated,
+      MAX(CASE WHEN sp.is_r THEN sp.case_id END) AS case_id,
+      MAX(CASE WHEN sp.is_r THEN sp.eval_run_id END) AS eval_run_id,
+      MAX(CASE WHEN sp.is_r THEN sp.app_id END) AS r_app,
+      MAX(CASE WHEN sp.source_class = 'platform' AND sp.caller_app_id IS NOT NULL THEN 1 ELSE 0 END) = 1 AS has_gw_caller,
+      ARRAY_AGG(CASE WHEN sp.source_class = 'platform' THEN sp.caller_app_id END IGNORE NULLS ORDER BY sp.start_time ASC, sp.span_id ASC LIMIT 1)[SAFE_OFFSET(0)] AS g_capp,
+      ARRAY_AGG(CASE WHEN sp.source_class = 'platform' AND sp.caller_app_id IS NOT NULL THEN sp.start_time END IGNORE NULLS ORDER BY sp.start_time ASC, sp.span_id ASC LIMIT 1)[SAFE_OFFSET(0)] AS g_cst,
+      COALESCE(
+        ARRAY_AGG(CASE WHEN sp.source_class = 'platform' THEN sp.tenant_id END IGNORE NULLS ORDER BY sp.start_time ASC, sp.span_id ASC LIMIT 1)[SAFE_OFFSET(0)],
+        MAX(CASE WHEN sp.is_r THEN sp.tenant_id END),
+        ARRAY_AGG(sp.tenant_id IGNORE NULLS ORDER BY sp.start_time ASC, sp.span_id ASC LIMIT 1)[SAFE_OFFSET(0)]
+      ) AS tenant_id
+    FROM (
+      SELECT
+        s.*,
+        (s.source_class IS NOT NULL AND ROW_NUMBER() OVER (PARTITION BY s.trace_id ORDER BY CASE WHEN s.source_class IS NOT NULL THEN 0 ELSE 1 END, s.start_time ASC, s.span_id ASC) = 1) AS is_r,
+        (s.is_model_call IS TRUE AND s.model_confidence IS NOT NULL AND ROW_NUMBER() OVER (PARTITION BY s.trace_id ORDER BY CASE WHEN s.is_model_call IS TRUE AND s.model_confidence IS NOT NULL THEN 0 ELSE 1 END, s.end_time DESC, s.span_id DESC) = 1) AS is_c
+      FROM `${PROJECT_ID}.${SILVER_INTERNAL_DATASET}.spans`(
+        TIMESTAMP_SUB(from_time, INTERVAL ${OUTCOME_LOOKBACK_DAYS} DAY),
+        TIMESTAMP_ADD(to_time, INTERVAL ${READ_MARGIN_MINUTES} MINUTE)
+      ) AS s
+    ) AS sp
+    GROUP BY sp.trace_id
+  ),
+  per_trace_owned AS (
+    SELECT
+      pt.*,
+      r.business_unit,
+      ROW_NUMBER() OVER (PARTITION BY pt.trace_id ORDER BY gc_r.effective_from DESC, r.effective_from DESC) AS tr_rn
+    FROM per_trace AS pt
+    LEFT JOIN `${PROJECT_ID}.${SILVER_REF_DATASET}.app_registry` AS gc_r
+      ON pt.has_gw_caller AND pt.g_capp IS NOT NULL AND gc_r.app_id = pt.g_capp
+      AND gc_r.effective_from <= pt.g_cst AND (gc_r.effective_to IS NULL OR pt.g_cst < gc_r.effective_to)
+    LEFT JOIN `${PROJECT_ID}.${SILVER_REF_DATASET}.app_registry` AS r
+      ON r.app_id = CASE WHEN pt.has_gw_caller THEN gc_r.app_id ELSE pt.r_app END
+      AND r.effective_from <= pt.trace_start_time AND (r.effective_to IS NULL OR pt.trace_start_time < r.effective_to)
+    WHERE pt.outcome_id IS NOT NULL
+  ),
+  trace_agg AS (
     SELECT
       t.outcome_id,
       MAX(CASE WHEN t.trace_start_time >= from_time AND t.trace_start_time < to_time THEN 1 ELSE 0 END) AS has_active_trace,
@@ -23,12 +87,15 @@ CREATE OR REPLACE TABLE FUNCTION `${PROJECT_ID}.${SILVER_INTERNAL_DATASET}.outco
       MAX(t.page_count) AS page_count,
       MIN(t.min_model_confidence) AS min_model_confidence,
       MAX(CASE WHEN t.conf_rn = 1 AND t.final_model_confidence IS NOT NULL THEN t.final_model_confidence END) AS final_model_confidence,
-      MAX(CASE WHEN t.escalated IS TRUE THEN 1 ELSE 0 END) = 1 AS trace_escalated,
+      MAX(CASE WHEN t.model_escalated IS TRUE THEN 1 ELSE 0 END) = 1 AS trace_escalated,
       MAX(CASE WHEN t.trace_start_time < from_time OR t.trace_start_time >= to_time THEN 1 ELSE 0 END) = 1 AS trace_outside,
       ARRAY_AGG(t.case_id IGNORE NULLS ORDER BY t.trace_start_time ASC, t.trace_id ASC LIMIT 1)[SAFE_OFFSET(0)] AS case_id,
       ARRAY_AGG(t.eval_run_id IGNORE NULLS ORDER BY t.trace_start_time ASC, t.trace_id ASC LIMIT 1)[SAFE_OFFSET(0)] AS eval_run_id,
       ARRAY_AGG(t.business_unit IGNORE NULLS ORDER BY t.trace_start_time ASC, t.trace_id ASC LIMIT 1)[SAFE_OFFSET(0)] AS earliest_trace_bu,
-      ARRAY_AGG(t.tenant_id IGNORE NULLS ORDER BY t.trace_start_time ASC, t.trace_id ASC LIMIT 1)[SAFE_OFFSET(0)] AS earliest_trace_tenant_id
+      ARRAY_AGG(t.tenant_id IGNORE NULLS ORDER BY t.trace_start_time ASC, t.trace_id ASC LIMIT 1)[SAFE_OFFSET(0)] AS earliest_trace_tenant_id,
+      ARRAY_AGG(t.span_outcome_owner IGNORE NULLS ORDER BY t.owner_st ASC, t.owner_sid ASC LIMIT 1)[SAFE_OFFSET(0)] AS span_outcome_owner,
+      ARRAY_AGG(t.span_outcome_subject IGNORE NULLS ORDER BY t.subj_st ASC, t.subj_sid ASC LIMIT 1)[SAFE_OFFSET(0)] AS span_outcome_subject,
+      ARRAY_AGG(t.span_outcome_parent_id IGNORE NULLS ORDER BY t.par_st ASC, t.par_sid ASC LIMIT 1)[SAFE_OFFSET(0)] AS span_outcome_parent_id
     FROM (
       SELECT
         tb.*,
@@ -39,11 +106,8 @@ CREATE OR REPLACE TABLE FUNCTION `${PROJECT_ID}.${SILVER_INTERNAL_DATASET}.outco
             tb.final_confidence_end_time DESC,
             tb.final_confidence_span_id DESC
         ) AS conf_rn
-      FROM `${PROJECT_ID}.${SILVER_INTERNAL_DATASET}.traces_base`(
-        TIMESTAMP_SUB(from_time, INTERVAL ${OUTCOME_LOOKBACK_DAYS} DAY),
-        TIMESTAMP_ADD(to_time, INTERVAL ${READ_MARGIN_MINUTES} MINUTE)
-      ) AS tb
-      WHERE tb.outcome_id IS NOT NULL
+      FROM per_trace_owned AS tb
+      WHERE tb.tr_rn = 1
     ) AS t
     GROUP BY t.outcome_id
   ),
@@ -87,19 +151,6 @@ CREATE OR REPLACE TABLE FUNCTION `${PROJECT_ID}.${SILVER_INTERNAL_DATASET}.outco
     ) AS e
     GROUP BY e.outcome_id
   ),
-  span_meta AS (
-    SELECT
-      s.outcome_id,
-      ARRAY_AGG(s.outcome_owner IGNORE NULLS ORDER BY s.start_time ASC, s.span_id ASC LIMIT 1)[SAFE_OFFSET(0)] AS span_outcome_owner,
-      ARRAY_AGG(s.outcome_subject IGNORE NULLS ORDER BY s.start_time ASC, s.span_id ASC LIMIT 1)[SAFE_OFFSET(0)] AS span_outcome_subject,
-      ARRAY_AGG(s.outcome_parent_id IGNORE NULLS ORDER BY s.start_time ASC, s.span_id ASC LIMIT 1)[SAFE_OFFSET(0)] AS span_outcome_parent_id
-    FROM `${PROJECT_ID}.${SILVER_INTERNAL_DATASET}.spans`(
-      TIMESTAMP_SUB(from_time, INTERVAL ${OUTCOME_LOOKBACK_DAYS} DAY),
-      TIMESTAMP_ADD(to_time, INTERVAL ${READ_MARGIN_MINUTES} MINUTE)
-    ) AS s
-    WHERE s.outcome_id IS NOT NULL
-    GROUP BY s.outcome_id
-  ),
   assembled AS (
     SELECT
       COALESCE(ta.outcome_id, ea.outcome_id) AS outcome_id,
@@ -107,9 +158,9 @@ CREATE OR REPLACE TABLE FUNCTION `${PROJECT_ID}.${SILVER_INTERNAL_DATASET}.outco
       ea.open_time,
       ea.close_time,
       ea.outcome_status,
-      COALESCE(sm.span_outcome_subject, ea.event_outcome_subject) AS outcome_subject,
-      COALESCE(sm.span_outcome_owner, ea.event_outcome_owner) AS outcome_owner,
-      COALESCE(sm.span_outcome_parent_id, ea.event_outcome_parent_id) AS outcome_parent_id,
+      COALESCE(ta.span_outcome_subject, ea.event_outcome_subject) AS outcome_subject,
+      COALESCE(ta.span_outcome_owner, ea.event_outcome_owner) AS outcome_owner,
+      COALESCE(ta.span_outcome_parent_id, ea.event_outcome_parent_id) AS outcome_parent_id,
       ta.case_id,
       ta.eval_run_id,
       ta.page_count,
@@ -133,7 +184,6 @@ CREATE OR REPLACE TABLE FUNCTION `${PROJECT_ID}.${SILVER_INTERNAL_DATASET}.outco
       (COALESCE(ta.trace_outside, FALSE) OR COALESCE(ea.event_outside, FALSE)) AS extends_outside_window
     FROM trace_agg AS ta
     FULL OUTER JOIN event_agg AS ea ON ea.outcome_id = ta.outcome_id
-    LEFT JOIN span_meta AS sm ON sm.outcome_id = COALESCE(ta.outcome_id, ea.outcome_id)
     WHERE COALESCE(ta.has_active_trace, 0) = 1
       OR COALESCE(ea.has_active_event, 0) = 1
   ),

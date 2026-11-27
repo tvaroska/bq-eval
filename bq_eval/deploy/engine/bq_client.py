@@ -7,7 +7,7 @@ import re
 import shutil
 import subprocess
 import tempfile
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
 from bq_eval.core.engine.ports import QueryRunner
@@ -22,6 +22,9 @@ _BENIGN_NON_JSON_PREFIXES: tuple[str, ...] = (
     "waiting on bqjob",
     "current status:",
 )
+
+SubprocessRunner = Callable[..., subprocess.CompletedProcess[str]]
+WhichFn = Callable[[str], str | None]
 
 
 def format_bq_job_labels(extra_labels: Mapping[str, str] | None = None) -> tuple[str, ...]:
@@ -41,16 +44,18 @@ def bq_cli_query_runner(
     project_id: str,
     *,
     labels: Mapping[str, str] | None = None,
+    which_fn: WhichFn = shutil.which,
+    run_cmd: SubprocessRunner = subprocess.run,
 ) -> QueryRunner:
     """Return a `QueryRunner` that executes GoogleSQL via `bq` with `workload:bq-eval` job labels."""
     valid_project = _validate_sql_identifier(project_id, "project_id", allow_hyphen=True)
     label_flags = format_bq_job_labels(labels)
 
     def _run(sql: str) -> Sequence[Mapping[str, object]]:
-        bq_bin = shutil.which("bq")
+        bq_bin = which_fn("bq")
         if bq_bin is None:
             raise OSError("`bq` CLI not found on PATH; install Google Cloud SDK or pass a runner.")
-        proc = subprocess.run(  # noqa: S603
+        proc = run_cmd(
             [
                 bq_bin,
                 "query",
@@ -82,15 +87,21 @@ def bq_cli_query_runner(
     return _run
 
 
-def ensure_observability_traces_link(project_id: str, *, location: str = "us") -> list[str]:
+def ensure_observability_traces_link(
+    project_id: str,
+    *,
+    location: str = "us",
+    which_fn: WhichFn = shutil.which,
+    run_cmd: SubprocessRunner = subprocess.run,
+) -> list[str]:
     """Idempotently configure `_Trace` storage location and `obs_traces` linked BigQuery dataset."""
     valid_project = _validate_sql_identifier(project_id, "project_id", allow_hyphen=True)
     valid_loc = _validate_sql_identifier(location.lower(), "location", allow_hyphen=True)
-    gcloud_bin = shutil.which("gcloud")
+    gcloud_bin = which_fn("gcloud")
     if gcloud_bin is None:
         return ["`gcloud` CLI not found on PATH; cannot ensure `obs_traces` observability link."]
 
-    settings_proc = subprocess.run(  # noqa: S603
+    settings_proc = run_cmd(
         [
             gcloud_bin,
             "observability",
@@ -109,7 +120,7 @@ def ensure_observability_traces_link(project_id: str, *, location: str = "us") -
         detail = (settings_proc.stderr or settings_proc.stdout).strip()
         return [f"observability settings update failed: {detail[:240]}"]
 
-    desc = subprocess.run(  # noqa: S603
+    desc = run_cmd(
         [
             gcloud_bin,
             "observability",
@@ -130,7 +141,7 @@ def ensure_observability_traces_link(project_id: str, *, location: str = "us") -
     if desc.returncode == 0:
         return []
 
-    created = subprocess.run(  # noqa: S603
+    created = run_cmd(
         [
             gcloud_bin,
             "observability",
@@ -158,10 +169,13 @@ def ensure_observability_traces_link(project_id: str, *, location: str = "us") -
 def apply_dataset_routine_authorizations(
     project_id: str,
     authorizations: Mapping[str, Sequence[tuple[str, str, str]]],
+    *,
+    which_fn: WhichFn = shutil.which,
+    run_cmd: SubprocessRunner = subprocess.run,
 ) -> list[str]:
     """Re-apply BigQuery dataset routine authorizations after `CREATE OR REPLACE TABLE FUNCTION` (`S-21`)."""
     valid_project = _validate_sql_identifier(project_id, "project_id", allow_hyphen=True)
-    bq_bin = shutil.which("bq")
+    bq_bin = which_fn("bq")
     if bq_bin is None:
         return ["`bq` CLI not found on PATH; cannot apply dataset routine authorizations."]
 
@@ -177,7 +191,7 @@ def apply_dataset_routine_authorizations(
             )
             for rp, rd, rn in routines
         )
-        show = subprocess.run(  # noqa: S603
+        show = run_cmd(
             [bq_bin, "show", "--format=prettyjson", f"{valid_project}:{valid_target}"],
             capture_output=True,
             text=True,
@@ -188,7 +202,6 @@ def apply_dataset_routine_authorizations(
             return [f"routine-auth show {valid_target} failed: {detail[:240]}"]
         meta = json.loads(show.stdout)
         access: list[dict[str, object]] = list(meta.get("access", []))
-        # Strip stale routine entries for routines we are re-applying so BigQuery re-evaluates auth.
         desired_keys = set(validated_routines)
         filtered: list[dict[str, object]] = []
         for entry in access:
@@ -208,10 +221,10 @@ def apply_dataset_routine_authorizations(
         with tempfile.NamedTemporaryFile(
             mode="w", suffix=".json", encoding="utf-8", delete=False
         ) as tmp:
-            json.dump(meta, tmp)
+            json.dump({"access": filtered}, tmp)
             tmp_path = Path(tmp.name)
         try:
-            upd = subprocess.run(  # noqa: S603
+            upd = run_cmd(
                 [bq_bin, "update", f"--source={tmp_path}", f"{valid_project}:{valid_target}"],
                 capture_output=True,
                 text=True,
@@ -225,11 +238,41 @@ def apply_dataset_routine_authorizations(
     return []
 
 
+def _apply_empty_shape3_standin(
+    bq_cmd_base: Sequence[str],
+    project_id: str,
+    silver_restricted_dataset: str,
+    run_cmd: SubprocessRunner,
+) -> list[str]:
+    """Create a Day-0 native `shape3_payloads` stand-in when the GCS prefix has zero objects."""
+    valid_restricted = _validate_sql_identifier(
+        silver_restricted_dataset, "silver_restricted_dataset"
+    )
+    standin_ddl = (
+        f"CREATE TABLE IF NOT EXISTS `{project_id}.{valid_restricted}.shape3_payloads` ("
+        "ref_uri STRING, payload JSON, dt DATE, hr STRING"
+        ") PARTITION BY dt CLUSTER BY hr "
+        "OPTIONS (description = 'Day-0 stand-in table when Shape-3 GCS prefix has zero files.')"
+    )
+    fallback = run_cmd(
+        list(bq_cmd_base),
+        input=standin_ddl,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if fallback.returncode != 0:
+        detail = (fallback.stdout + "\n" + fallback.stderr).strip()
+        return [f"silver/shape3.sql#1 (stand-in): bq apply failed: {detail[:240]}"]
+    return []
+
+
 def apply_bootstrap_statements(  # noqa: PLR0913
     project_id: str,
     stmts: Sequence[tuple[str, str]],
     *,
-    mode: BootstrapMode = "full",
+    mode: BootstrapMode = "gold",
+    dataset_id: str = "agent_eval",
     location: str = "us",
     ensure_traces_link: bool = False,
     apply_silver_routine_auth: bool = True,
@@ -241,31 +284,39 @@ def apply_bootstrap_statements(  # noqa: PLR0913
     platform_traces_dataset_id: str = "silver_internal",
     logs_dataset_id: str = "obs_logs",
     labels: Mapping[str, str] | None = None,
+    which_fn: WhichFn = shutil.which,
+    run_cmd: SubprocessRunner = subprocess.run,
 ) -> list[str]:
     """Execute rendered bootstrap DDL, functions, and views sequentially, stopping on first failure (`S-21`)."""
     valid_project = _validate_sql_identifier(project_id, "project_id", allow_hyphen=True)
+    valid_dataset = _validate_sql_identifier(dataset_id, "dataset_id")
     valid_loc = _validate_sql_identifier(location, "location", allow_hyphen=True)
-    bq_bin = shutil.which("bq")
+    bq_bin = which_fn("bq")
     if bq_bin is None:
         raise ValueError("`bq` CLI not found on PATH; install Google Cloud SDK to use --apply.")
 
-    if ensure_traces_link and mode in ("full", "hybrid", "silver"):
-        link_errors = ensure_observability_traces_link(valid_project, location=valid_loc)
+    if ensure_traces_link and mode in ("silver", "gold"):
+        link_errors = ensure_observability_traces_link(
+            valid_project,
+            location=valid_loc,
+            which_fn=which_fn,
+            run_cmd=run_cmd,
+        )
         if link_errors:
             return link_errors
 
-    label_flags = format_bq_job_labels(labels)
+    bq_cmd_base = [
+        bq_bin,
+        "query",
+        f"--project_id={valid_project}",
+        f"--location={valid_loc}",
+        "--use_legacy_sql=false",
+        "--format=none",
+        *format_bq_job_labels(labels),
+    ]
     for label, stmt in stmts:
-        proc = subprocess.run(  # noqa: S603
-            [
-                bq_bin,
-                "query",
-                f"--project_id={valid_project}",
-                f"--location={valid_loc}",
-                "--use_legacy_sql=false",
-                "--format=none",
-                *label_flags,
-            ],
+        proc = run_cmd(
+            bq_cmd_base,
             input=stmt,
             text=True,
             capture_output=True,
@@ -273,9 +324,20 @@ def apply_bootstrap_statements(  # noqa: PLR0913
         )
         if proc.returncode != 0:
             detail = (proc.stdout + "\n" + proc.stderr).strip()
+            lower_detail = detail.lower()
+            if label.startswith("silver/shape3.sql#") and (
+                "without any associated files" in lower_detail
+                or "not an external table" in lower_detail
+            ):
+                standin_errs = _apply_empty_shape3_standin(
+                    bq_cmd_base, valid_project, silver_restricted_dataset, run_cmd
+                )
+                if standin_errs:
+                    return standin_errs
+                continue
             return [f"{label}: bq apply failed: {detail[:240]}"]
 
-    if mode == "silver" and apply_silver_routine_auth:
+    if mode in ("silver", "gold") and apply_silver_routine_auth:
         auth_map = build_silver_routine_authorizations(
             project_id=valid_project,
             silver_internal_dataset=silver_internal_dataset,
@@ -285,6 +347,12 @@ def apply_bootstrap_statements(  # noqa: PLR0913
             traces_dataset_id=traces_dataset_id,
             platform_traces_dataset_id=platform_traces_dataset_id,
             logs_dataset_id=logs_dataset_id,
+            gold_dataset_id=valid_dataset if mode == "gold" else None,
         )
-        return apply_dataset_routine_authorizations(valid_project, auth_map)
+        return apply_dataset_routine_authorizations(
+            valid_project,
+            auth_map,
+            which_fn=which_fn,
+            run_cmd=run_cmd,
+        )
     return []

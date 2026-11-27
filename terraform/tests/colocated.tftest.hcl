@@ -11,6 +11,7 @@ run "colocated_showcase_adopts_existing_resources" {
     region                                  = "us-central1"
     manage_apis                             = false
     create_shared_bucket                    = false
+    create_worm_archive_bucket              = false
     create_eval_dataset                     = false
     create_vertex_connection                = false
     create_shared_bucket_lister_role        = false
@@ -46,7 +47,7 @@ run "colocated_showcase_adopts_existing_resources" {
   }
 
   assert {
-    condition     = google_bigquery_data_transfer_config.daily_quota_guarded_judge[0].disabled == true
-    error_message = "Co-located hibernate mode must keep scheduled judge queries paused at rest."
+    condition     = google_bigquery_data_transfer_config.daily_quota_guarded_judge[0].disabled == true && length(google_storage_bucket.gold_worm_archive) == 0
+    error_message = "Co-located hibernate mode must keep scheduled judge queries paused at rest and skip optional WORM bucket creation."
   }
 }

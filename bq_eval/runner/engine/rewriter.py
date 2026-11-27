@@ -101,7 +101,12 @@ def _rewrite_table_node(
         return node
     dataset, obj = parts
     if dataset is None and not node.catalog:
-        if default_dataset and qualify_datasets and obj.lower() not in active_ctes:
+        if (
+            default_dataset
+            and qualify_datasets
+            and obj.lower() not in active_ctes
+            and not obj.lower().startswith("_bq_tvf_")
+        ):
             flat_name = f"{default_dataset}__{obj}"
             flat_to_original[flat_name] = (default_dataset, obj)
             rebuilt = exp.Table(this=exp.to_identifier(flat_name, quoted=False))

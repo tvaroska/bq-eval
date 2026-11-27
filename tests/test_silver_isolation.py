@@ -196,7 +196,7 @@ def test_open_sql_reads_no_restricted_source() -> None:
     open_objects_checked: list[str] = []
     forbidden_re = re.compile(r"\bsilver_restricted\b|\bshape3_payloads\b", re.IGNORECASE)
 
-    for sql_file in sorted(SILVER_SQL_DIR.glob("*.sql")):
+    for sql_file in sorted(SILVER_SQL_DIR.rglob("*.sql")):
         rendered = render_silver_sql(sql_file.read_text(encoding="utf-8"))
         for stmt in sqlglot.parse(rendered, read="bigquery"):
             if not isinstance(stmt, exp.Create):
@@ -213,7 +213,7 @@ def test_open_sql_reads_no_restricted_source() -> None:
     # Also verify `silver_internal` base TVFs called by `silver_open` never touch `silver_restricted` or `shape3_payloads`.
     internal_bases = ("spans", "tool_calls_base", "events_base", "traces_base", "outcomes_base")
     checked_bases: set[str] = set()
-    for sql_file in sorted(SILVER_SQL_DIR.glob("*.sql")):
+    for sql_file in sorted(SILVER_SQL_DIR.rglob("*.sql")):
         rendered = render_silver_sql(sql_file.read_text(encoding="utf-8"))
         for stmt in sqlglot.parse(rendered, read="bigquery"):
             if not isinstance(stmt, exp.Create) or stmt.this is None:
@@ -227,5 +227,5 @@ def test_open_sql_reads_no_restricted_source() -> None:
                         f"Internal base {target_sql} referenced by silver_open touches restricted source!"
                     )
 
-    assert len(open_objects_checked) == 12  # 6 silver_open TVFs + 6 silver_open wrapper views
+    assert len(open_objects_checked) == 15  # 7 silver_open TVFs + 1 rollup table + 7 wrapper views
     assert checked_bases == set(internal_bases)

@@ -46,6 +46,8 @@ class WorkbenchHTTPServer(ThreadingHTTPServer):
         self._cache_lock = threading.Lock()
         self._corpus_cache: dict[CorpusChoice, ShowcaseRunArtifacts] = {}
         self._scenario_cache: tuple[int, ShowcaseRunArtifacts] | None = None
+        if scenario_file is None and default_corpus in _VALID_CORPORA:
+            self._corpus_cache[default_corpus] = run_showcase_pipeline(corpus=default_corpus)
         super().__init__(server_address, _WorkbenchRequestHandler)
 
     def get_artifacts(self, corpus: CorpusChoice) -> ShowcaseRunArtifacts:

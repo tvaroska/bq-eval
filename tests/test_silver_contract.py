@@ -23,6 +23,7 @@ EXPECTED_SCHEMA_OBJECTS: tuple[str, ...] = (
     "outcomes",
     "outcomes_open",
     "outcome_links",
+    "requests",
 )
 
 OPEN_OBJECTS: frozenset[str] = frozenset(
@@ -33,6 +34,7 @@ OPEN_OBJECTS: frozenset[str] = frozenset(
         "traces_open",
         "outcomes_open",
         "outcome_links",
+        "requests",
     }
 )
 
@@ -49,6 +51,10 @@ EXPECTED_TABLE_SCHEMAS: tuple[str, ...] = (
     "skill_registry",
     "unit_entitlements",
     "workflow_events",
+    "burst_metrics_1m",
+    "capacity_pools",
+    "capacity_allocations",
+    "allowed_models",
 )
 
 ALLOWED_BQ_SCALAR_OR_JSON_TYPES: frozenset[str] = frozenset(

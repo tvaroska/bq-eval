@@ -90,7 +90,7 @@ def diagnose_prefix_cache_dilution(  # noqa: PLR0913
         )
     app_id = app_ids[0]
 
-    total_input = sum(s.input_tokens for s in spans)
+    total_input = sum(s.prompt_context_tokens for s in spans)
     total_cached = sum(s.cached_input_tokens for s in spans)
     observed_ratio = (total_cached / total_input) if total_input > 0 else 0.0
     ceiling = 1.0 / float(distinct_prompt_variants)
@@ -112,12 +112,11 @@ def diagnose_prefix_cache_dilution(  # noqa: PLR0913
     recoverable_usd = 0.0
     if observed_ratio < target_cache_hit_ratio:
         for span in spans:
-            shortfall = max(
-                0.0, target_cache_hit_ratio * span.input_tokens - span.cached_input_tokens
-            )
+            ctx_tokens = span.prompt_context_tokens
+            shortfall = max(0.0, target_cache_hit_ratio * ctx_tokens - span.cached_input_tokens)
             if shortfall <= 0.0:
                 continue
-            if span.input_tokens > long_context_threshold_tokens:
+            if ctx_tokens > long_context_threshold_tokens:
                 recoverable_burndown += shortfall * _LONG_CACHE_BURNDOWN_DELTA
                 recoverable_usd += (shortfall / 1e6) * long_rate_delta
             else:

@@ -1,11 +1,11 @@
-"""OpenTelemetry GenAI span, payload, and BQAA event contracts with serving-physics burndown."""
+"""OpenTelemetry GenAI span and payload contracts with serving-physics burndown."""
 
 from __future__ import annotations
 
 from collections.abc import Mapping
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -22,6 +22,8 @@ LONG_CONTEXT_UNCACHED_BURNDOWN_WEIGHT: float = 2.0
 LONG_CONTEXT_CACHED_BURNDOWN_WEIGHT: float = 0.2
 LONG_CONTEXT_OUTPUT_BURNDOWN_WEIGHT: float = 7.5
 
+TokenSemantics = Literal["inclusive", "otel"]
+
 
 class GenAISpanKind(StrEnum):
     """Canonical OpenTelemetry GenAI operation kinds."""
@@ -34,7 +36,7 @@ class GenAISpanKind(StrEnum):
 
 
 class FinOpsTrafficType(StrEnum):
-    """5-Bucket FinOps cost attribution taxonomy (`prod`, `eval`, `optimize`) plus unclassified."""
+    """6-Bucket FinOps cost attribution taxonomy (`prod`, `eval`, `optimize`, `unclassified`)."""
 
     PRODUCTION_INFERENCE = "production_inference"
     CONFLICT_ESCALATION = "conflict_escalation"
@@ -86,14 +88,7 @@ def resolve_application_id(
     gcp_apphub_application_id: str | None = None,
     attributes: Mapping[str, Any] | None = None,
 ) -> str:
-    """Resolve portable application ID matching SQL COALESCE precedence.
-
-    Order of precedence:
-    1. Explicit `gcp_apphub_application_id` column
-    2. `attributes["gcp.apphub.application.id"]`
-    3. `attributes["apphub.application.id"]`
-    4. `'unregistered_app'`
-    """
+    """Resolve portable application ID matching SQL COALESCE precedence."""
     if gcp_apphub_application_id and gcp_apphub_application_id.strip():
         return gcp_apphub_application_id.strip()
     attrs = attributes or {}
@@ -104,6 +99,10 @@ def resolve_application_id(
     return "unregistered_app"
 
 
+def _as_utc(dt: datetime) -> datetime:
+    return dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt.astimezone(UTC)
+
+
 def compute_weighted_burndown_tokens(  # noqa: PLR0913
     input_tokens: int,
     cached_input_tokens: int,
@@ -111,6 +110,7 @@ def compute_weighted_burndown_tokens(  # noqa: PLR0913
     thinking_tokens: int = 0,
     long_context_threshold: int | None = LONG_CONTEXT_THRESHOLD_TOKENS,
     *,
+    token_semantics: TokenSemantics = "inclusive",  # noqa: S107
     cache_write_5m_tokens: int = 0,
     cache_write_1h_tokens: int = 0,
     uncached_weight: float = UNCACHED_INPUT_BURNDOWN_WEIGHT,
@@ -122,12 +122,7 @@ def compute_weighted_burndown_tokens(  # noqa: PLR0913
     long_cached_weight: float = LONG_CONTEXT_CACHED_BURNDOWN_WEIGHT,
     long_output_weight: float = LONG_CONTEXT_OUTPUT_BURNDOWN_WEIGHT,
 ) -> float:
-    """Compute span-level weighted burndown tokens with 1P `>200K` cliff and 3P cache-write weights.
-
-    * Standard 1P (`<= 200,000` input): `1.0x` uncached + `0.1x` cached + `1.0x` writes + `4.0x` output
-    * Long-context 1P (`> 200,000` input): `2.0x` uncached + `0.2x` cached + `7.5x` output
-    * 3P multi-provider (e.g. Claude): `1.0x` uncached + `0.1x` cached + `1.25x` 5m write + `2.0x` 1h write + `5.0x` output
-    """
+    """Compute span-level weighted burndown tokens with `>200K` total-context cliff."""
     if (
         input_tokens < 0
         or cached_input_tokens < 0
@@ -137,15 +132,20 @@ def compute_weighted_burndown_tokens(  # noqa: PLR0913
         or thinking_tokens < 0
     ):
         raise ValueError("Token counts must be non-negative.")
-    if cached_input_tokens + cache_write_5m_tokens + cache_write_1h_tokens > input_tokens:
-        raise ValueError(
-            "cached_input_tokens + cache_write_5m_tokens + cache_write_1h_tokens cannot exceed input_tokens."
-        )
 
-    uncached_input = max(
-        0, input_tokens - cached_input_tokens - cache_write_5m_tokens - cache_write_1h_tokens
-    )
-    if long_context_threshold is not None and input_tokens > long_context_threshold:
+    cache_total = cached_input_tokens + cache_write_5m_tokens + cache_write_1h_tokens
+    if token_semantics == "otel":  # noqa: S105
+        uncached_input = input_tokens
+        prompt_context = input_tokens + cache_total
+    else:
+        if cache_total > input_tokens:
+            raise ValueError(
+                "cached_input_tokens + cache_write_5m_tokens + cache_write_1h_tokens cannot exceed input_tokens."
+            )
+        uncached_input = input_tokens - cache_total
+        prompt_context = input_tokens
+
+    if long_context_threshold is not None and prompt_context > long_context_threshold:
         cliff_scale = long_uncached_weight / uncached_weight if uncached_weight > 0 else 1.0
         return (
             long_uncached_weight * uncached_input
@@ -164,12 +164,12 @@ def compute_weighted_burndown_tokens(  # noqa: PLR0913
 
 
 class OTelGenAISpanRecord(BaseModel):
-    """Pydantic v2 contract for `agent_eval.otel_spans` rows (39-column dual-path & multi-cloud schema)."""
+    """In-memory OpenTelemetry GenAI span record bridged onto Bronze/Silver telemetry."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    trace_id: str = Field(..., min_length=8)
-    span_id: str = Field(..., min_length=4)
+    trace_id: str = Field(..., min_length=1)
+    span_id: str = Field(..., min_length=1)
     parent_span_id: str | None = None
     span_name: str = Field(default="invoke_agent")
     start_time: datetime
@@ -189,6 +189,7 @@ class OTelGenAISpanRecord(BaseModel):
     cached_input_tokens: int = Field(default=0, ge=0)
     output_tokens: int = Field(default=0, ge=0)
     thinking_tokens: int = Field(default=0, ge=0)
+    token_semantics: TokenSemantics = Field(default="inclusive")
     tool_name: str | None = None
     tool_call_status: str | None = "SUCCESS"
     rule0_pass: bool = True
@@ -209,9 +210,12 @@ class OTelGenAISpanRecord(BaseModel):
     attributes: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
-    def _validate_tokens(self) -> OTelGenAISpanRecord:
+    def _validate_tokens_and_times(self) -> OTelGenAISpanRecord:
+        if _as_utc(self.end_time) < _as_utc(self.start_time):
+            raise ValueError("end_time must be >= start_time.")
         if (
-            self.cached_input_tokens + self.cache_write_5m_tokens + self.cache_write_1h_tokens
+            self.token_semantics == "inclusive"  # noqa: S105
+            and self.cached_input_tokens + self.cache_write_5m_tokens + self.cache_write_1h_tokens
             > self.input_tokens
         ):
             raise ValueError(
@@ -229,6 +233,8 @@ class OTelGenAISpanRecord(BaseModel):
 
     @property
     def uncached_input_tokens(self) -> int:
+        if self.token_semantics == "otel":  # noqa: S105
+            return self.input_tokens
         return max(
             0,
             self.input_tokens
@@ -237,13 +243,23 @@ class OTelGenAISpanRecord(BaseModel):
             - self.cache_write_1h_tokens,
         )
 
+    @property
+    def prompt_context_tokens(self) -> int:
+        """Total prompt context window (`uncached + cache_read + cache_write`) driving `>200K` cliffs."""
+        return (
+            self.uncached_input_tokens
+            + self.cached_input_tokens
+            + self.cache_write_5m_tokens
+            + self.cache_write_1h_tokens
+        )
+
 
 class TracePayloadRecord(BaseModel):
-    """Prompt, retrieved context, and final response payload row (`agent_eval.trace_payloads`)."""
+    """Prompt, retrieved context, and final response payload row bridged onto Silver payloads."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    trace_id: str = Field(..., min_length=4)
+    trace_id: str = Field(..., min_length=1)
     apphub_application_id: str
     ingested_at: datetime
     user_prompt: str
@@ -251,24 +267,3 @@ class TracePayloadRecord(BaseModel):
     final_response: str
     semantic_rubric_id: str = "groundedness_4pt_v1"
     expected_ordinal_score: int = Field(default=4, ge=1, le=4)
-
-
-class BQAAAgentEvent(BaseModel):
-    """Pydantic v2 contract for BigQuery Agent Analytics (`BQAA`) `agent_events` rows."""
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    event_id: str = Field(..., min_length=4)
-    timestamp: datetime
-    event_type: str = Field(..., min_length=2)
-    agent: str | None = None
-    session_id: str | None = None
-    invocation_id: str = Field(..., min_length=4)
-    trace_id: str | None = None
-    span_id: str | None = None
-    parent_span_id: str | None = None
-    status: str | None = "OK"
-    error_message: str | None = None
-    latency_ms: dict[str, Any] = Field(default_factory=dict)
-    content: dict[str, Any] = Field(default_factory=dict)
-    attributes: dict[str, Any] = Field(default_factory=dict)

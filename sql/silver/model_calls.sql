@@ -9,31 +9,15 @@ CREATE OR REPLACE TABLE FUNCTION `${PROJECT_ID}.${SILVER_OPEN_DATASET}.model_cal
     SELECT *
     FROM `${PROJECT_ID}.${SILVER_INTERNAL_DATASET}.spans`(from_time, to_time)
   ),
-  root_spans AS (
-    SELECT
-      trace_id,
-      span_id AS root_span_id,
-      start_time AS root_start_time,
-      app_id AS root_app_id,
-      runtime_lane AS root_runtime_lane,
-      state_mode AS root_state_mode,
-      traffic_type AS root_traffic_type,
-      source_class AS root_source_class
-    FROM (
-      SELECT
-        s.*,
-        ROW_NUMBER() OVER (
-          PARTITION BY s.trace_id
-          ORDER BY s.start_time ASC, s.span_id ASC
-        ) AS rn
-      FROM base_spans AS s
-      WHERE s.source_class IS NOT NULL
-    )
-    WHERE rn = 1
-  ),
-  gateway_owner AS (
+  trace_ctx AS (
     SELECT
       g.trace_id,
+      g.root_app_id,
+      g.root_runtime_lane,
+      g.root_state_mode,
+      g.root_traffic_type,
+      g.root_source_class,
+      g.trace_outcome_id,
       g.has_gw_caller,
       r.app_id AS resolved_caller_app_id,
       g.gw_runtime_lane,
@@ -43,14 +27,27 @@ CREATE OR REPLACE TABLE FUNCTION `${PROJECT_ID}.${SILVER_OPEN_DATASET}.model_cal
     FROM (
       SELECT
         s.trace_id,
-        MAX(CASE WHEN s.caller_app_id IS NOT NULL THEN 1 ELSE 0 END) = 1 AS has_gw_caller,
-        ARRAY_AGG(s.caller_app_id IGNORE NULLS ORDER BY s.start_time ASC, s.span_id ASC LIMIT 1)[SAFE_OFFSET(0)] AS gw_caller_app_id,
-        ARRAY_AGG(CASE WHEN s.caller_app_id IS NOT NULL THEN s.start_time END IGNORE NULLS ORDER BY s.start_time ASC, s.span_id ASC LIMIT 1)[SAFE_OFFSET(0)] AS gw_caller_time,
-        ARRAY_AGG(s.runtime_lane IGNORE NULLS ORDER BY s.start_time ASC, s.span_id ASC LIMIT 1)[SAFE_OFFSET(0)] AS gw_runtime_lane,
-        ARRAY_AGG(s.state_mode IGNORE NULLS ORDER BY s.start_time ASC, s.span_id ASC LIMIT 1)[SAFE_OFFSET(0)] AS gw_state_mode,
-        ARRAY_AGG(s.traffic_type IGNORE NULLS ORDER BY s.start_time ASC, s.span_id ASC LIMIT 1)[SAFE_OFFSET(0)] AS gw_traffic_type
-      FROM base_spans AS s
-      WHERE s.source_class = 'platform'
+        MAX(CASE WHEN s.r_rn = 1 AND s.source_class IS NOT NULL THEN s.app_id END) AS root_app_id,
+        MAX(CASE WHEN s.r_rn = 1 AND s.source_class IS NOT NULL THEN s.runtime_lane END) AS root_runtime_lane,
+        MAX(CASE WHEN s.r_rn = 1 AND s.source_class IS NOT NULL THEN s.state_mode END) AS root_state_mode,
+        MAX(CASE WHEN s.r_rn = 1 AND s.source_class IS NOT NULL THEN s.traffic_type END) AS root_traffic_type,
+        MAX(CASE WHEN s.r_rn = 1 AND s.source_class IS NOT NULL THEN s.source_class END) AS root_source_class,
+        ARRAY_AGG(s.outcome_id IGNORE NULLS ORDER BY s.start_time ASC, s.span_id ASC LIMIT 1)[SAFE_OFFSET(0)] AS trace_outcome_id,
+        MAX(CASE WHEN s.source_class = 'platform' AND s.caller_app_id IS NOT NULL THEN 1 ELSE 0 END) = 1 AS has_gw_caller,
+        ARRAY_AGG(CASE WHEN s.source_class = 'platform' THEN s.caller_app_id END IGNORE NULLS ORDER BY s.start_time ASC, s.span_id ASC LIMIT 1)[SAFE_OFFSET(0)] AS gw_caller_app_id,
+        ARRAY_AGG(CASE WHEN s.source_class = 'platform' AND s.caller_app_id IS NOT NULL THEN s.start_time END IGNORE NULLS ORDER BY s.start_time ASC, s.span_id ASC LIMIT 1)[SAFE_OFFSET(0)] AS gw_caller_time,
+        ARRAY_AGG(CASE WHEN s.source_class = 'platform' THEN s.runtime_lane END IGNORE NULLS ORDER BY s.start_time ASC, s.span_id ASC LIMIT 1)[SAFE_OFFSET(0)] AS gw_runtime_lane,
+        ARRAY_AGG(CASE WHEN s.source_class = 'platform' THEN s.state_mode END IGNORE NULLS ORDER BY s.start_time ASC, s.span_id ASC LIMIT 1)[SAFE_OFFSET(0)] AS gw_state_mode,
+        ARRAY_AGG(CASE WHEN s.source_class = 'platform' THEN s.traffic_type END IGNORE NULLS ORDER BY s.start_time ASC, s.span_id ASC LIMIT 1)[SAFE_OFFSET(0)] AS gw_traffic_type
+      FROM (
+        SELECT
+          sp.*,
+          ROW_NUMBER() OVER (
+            PARTITION BY sp.trace_id
+            ORDER BY CASE WHEN sp.source_class IS NOT NULL THEN 0 ELSE 1 END, sp.start_time ASC, sp.span_id ASC
+          ) AS r_rn
+        FROM base_spans AS sp
+      ) AS s
       GROUP BY s.trace_id
     ) AS g
     LEFT JOIN `${PROJECT_ID}.${SILVER_REF_DATASET}.app_registry` AS r
@@ -58,23 +55,6 @@ CREATE OR REPLACE TABLE FUNCTION `${PROJECT_ID}.${SILVER_OPEN_DATASET}.model_cal
       AND r.app_id = g.gw_caller_app_id
       AND r.effective_from <= g.gw_caller_time
       AND (r.effective_to IS NULL OR g.gw_caller_time < r.effective_to)
-  ),
-  trace_outcomes AS (
-    SELECT
-      trace_id,
-      outcome_id AS trace_outcome_id
-    FROM (
-      SELECT
-        trace_id,
-        outcome_id,
-        ROW_NUMBER() OVER (
-          PARTITION BY trace_id
-          ORDER BY start_time ASC, span_id ASC
-        ) AS rn
-      FROM base_spans
-      WHERE outcome_id IS NOT NULL
-    )
-    WHERE rn = 1
   ),
   enriched_calls AS (
     SELECT
@@ -87,10 +67,10 @@ CREATE OR REPLACE TABLE FUNCTION `${PROJECT_ID}.${SILVER_OPEN_DATASET}.model_cal
       END AS parent_span_id,
       s.client_request_id,
       s.response_id,
-      COALESCE(s.outcome_id, to_out.trace_outcome_id) AS outcome_id,
+      COALESCE(s.outcome_id, tc.trace_outcome_id) AS outcome_id,
       CASE
-        WHEN COALESCE(gw.has_gw_caller, FALSE) THEN gw.resolved_caller_app_id
-        ELSE rt.root_app_id
+        WHEN COALESCE(tc.has_gw_caller, FALSE) THEN tc.resolved_caller_app_id
+        ELSE tc.root_app_id
       END AS trace_owner_app_id,
       s.operation_name,
       s.start_time,
@@ -99,54 +79,43 @@ CREATE OR REPLACE TABLE FUNCTION `${PROJECT_ID}.${SILVER_OPEN_DATASET}.model_cal
         s.agent_id,
         CASE WHEN p1.span_kind = 'agent' THEN p1.agent_id END,
         CASE WHEN p2.span_kind = 'agent' THEN p2.agent_id END,
-        CASE WHEN p3.span_kind = 'agent' THEN p3.agent_id END,
-        CASE WHEN p4.span_kind = 'agent' THEN p4.agent_id END,
-        CASE WHEN p5.span_kind = 'agent' THEN p5.agent_id END,
-        CASE WHEN p6.span_kind = 'agent' THEN p6.agent_id END,
-        p1.agent_id, p2.agent_id, p3.agent_id, p4.agent_id, p5.agent_id, p6.agent_id
+        p1.agent_id, p2.agent_id
       ) AS agent_id,
       COALESCE(
         s.agent_name,
         CASE WHEN p1.span_kind = 'agent' THEN p1.agent_name END,
         CASE WHEN p2.span_kind = 'agent' THEN p2.agent_name END,
-        CASE WHEN p3.span_kind = 'agent' THEN p3.agent_name END,
-        CASE WHEN p4.span_kind = 'agent' THEN p4.agent_name END,
-        CASE WHEN p5.span_kind = 'agent' THEN p5.agent_name END,
-        CASE WHEN p6.span_kind = 'agent' THEN p6.agent_name END,
-        p1.agent_name, p2.agent_name, p3.agent_name, p4.agent_name, p5.agent_name, p6.agent_name
+        p1.agent_name, p2.agent_name
       ) AS agent_name,
       COALESCE(
         s.skill_name,
         CASE WHEN p1.span_kind = 'agent' THEN p1.skill_name END,
         CASE WHEN p2.span_kind = 'agent' THEN p2.skill_name END,
-        CASE WHEN p3.span_kind = 'agent' THEN p3.skill_name END,
-        p1.skill_name, p2.skill_name, p3.skill_name
+        p1.skill_name, p2.skill_name
       ) AS skill_name,
       COALESCE(
         s.skill_version,
         CASE WHEN p1.span_kind = 'agent' THEN p1.skill_version END,
         CASE WHEN p2.span_kind = 'agent' THEN p2.skill_version END,
-        CASE WHEN p3.span_kind = 'agent' THEN p3.skill_version END,
-        p1.skill_version, p2.skill_version, p3.skill_version
+        p1.skill_version, p2.skill_version
       ) AS skill_version,
       COALESCE(
         s.skill_sha256,
         CASE WHEN p1.span_kind = 'agent' THEN p1.skill_sha256 END,
         CASE WHEN p2.span_kind = 'agent' THEN p2.skill_sha256 END,
-        CASE WHEN p3.span_kind = 'agent' THEN p3.skill_sha256 END,
-        p1.skill_sha256, p2.skill_sha256, p3.skill_sha256
+        p1.skill_sha256, p2.skill_sha256
       ) AS skill_sha256,
       s.request_model,
       s.response_model,
       s.provider,
       s.upstream_endpoint_location,
-      COALESCE(gw.gw_runtime_lane, rt.root_runtime_lane, s.runtime_lane) AS runtime_lane,
-      COALESCE(gw.gw_state_mode, rt.root_state_mode, s.state_mode) AS state_mode,
+      COALESCE(tc.gw_runtime_lane, tc.root_runtime_lane, s.runtime_lane) AS runtime_lane,
+      COALESCE(tc.gw_state_mode, tc.root_state_mode, s.state_mode) AS state_mode,
       s.serving_tier,
-      COALESCE(gw.gw_traffic_type, rt.root_traffic_type, s.traffic_type) AS traffic_type,
+      COALESCE(tc.gw_traffic_type, tc.root_traffic_type, s.traffic_type) AS traffic_type,
       CASE
-        WHEN gw.gw_traffic_type IS NOT NULL THEN TRUE
-        WHEN rt.root_traffic_type IS NOT NULL THEN (rt.root_source_class = 'platform')
+        WHEN tc.gw_traffic_type IS NOT NULL THEN TRUE
+        WHEN tc.root_traffic_type IS NOT NULL THEN (tc.root_source_class = 'platform')
         WHEN s.traffic_type IS NOT NULL THEN (s.source_class = 'platform')
         ELSE CAST(NULL AS BOOL)
       END AS traffic_type_attested,
@@ -184,15 +153,9 @@ CREATE OR REPLACE TABLE FUNCTION `${PROJECT_ID}.${SILVER_OPEN_DATASET}.model_cal
         )
       ) AS open_labels
     FROM base_spans AS s
-    LEFT JOIN root_spans AS rt ON rt.trace_id = s.trace_id
-    LEFT JOIN gateway_owner AS gw ON gw.trace_id = s.trace_id AND gw.reg_rn = 1
-    LEFT JOIN trace_outcomes AS to_out ON to_out.trace_id = s.trace_id
+    LEFT JOIN trace_ctx AS tc ON tc.trace_id = s.trace_id AND tc.reg_rn = 1
     LEFT JOIN base_spans AS p1 ON p1.trace_id = s.trace_id AND p1.span_id = s.parent_span_id
     LEFT JOIN base_spans AS p2 ON p2.trace_id = s.trace_id AND p2.span_id = p1.parent_span_id
-    LEFT JOIN base_spans AS p3 ON p3.trace_id = s.trace_id AND p3.span_id = p2.parent_span_id
-    LEFT JOIN base_spans AS p4 ON p4.trace_id = s.trace_id AND p4.span_id = p3.parent_span_id
-    LEFT JOIN base_spans AS p5 ON p5.trace_id = s.trace_id AND p5.span_id = p4.parent_span_id
-    LEFT JOIN base_spans AS p6 ON p6.trace_id = s.trace_id AND p6.span_id = p5.parent_span_id
     WHERE s.is_model_call IS TRUE
   ),
   sequenced AS (

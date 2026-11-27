@@ -10,7 +10,7 @@ tags: [bq-eval, silver, capacity, extension]
 
 ## Custom Proxy Bronze Contract, `requests` view & `1:N` failover reconciliation
 
-`requests` is a SQL view (or bounded incremental partitioned table in `enterprise` mode) over central LLM gateway or model-server request logs (`_AllLogs` `inference_request` on GCP, S3 Parquet/Iceberg proxy logs on AWS), emitting one row per upstream attempt keyed by **`(x-client-request-id, span_id, attempt_index)`**:
+`requests` is an open-safe SQL table function (`silver_open.requests(from_time, to_time)` with thin `v_requests_24h` wrapper and zero `*_open` twin, `ADR-049`, or bounded incremental partitioned table in `enterprise` mode) over central LLM gateway or model-server request logs (`_AllLogs` `inference_request` on GCP, S3 Parquet/Iceberg proxy logs on AWS), emitting one row per upstream attempt keyed by **`(x-client-request-id, span_id, attempt_index)`**:
 
 - **Mandatory correlation & caller ownership:** Because frameworks omit `gen_ai.response.id` and failed `429` legs have none, the gateway propagates `x-client-request-id` + `traceparent` (`trace_id`, `span_id`) across every attempt and stamps caller/desk `trace_owner_app_id` (taking precedence over the proxy's own root service name).
 - **Option A / Option B neutrality (`state_mode`):** Carries `state_mode` (`stateless_chat | stateful_cmek_platform | stateful_cmek_gateway | zdr_stateless`) so thin stateless proxies (Option A) and dual-lane stateful `/interactions` proxies (Option B) emit identical Silver/Gold and `FOCUS 1.2` chargeback records.
@@ -19,7 +19,7 @@ tags: [bq-eval, silver, capacity, extension]
 
 ## Scoped SCD-2 governance & 3-pool `FOCUS 1.2` reconciliation
 
-`capacity_pools`, `capacity_allocations`, and `allowed_models` enforce mandatory SCD-2 `(effective_from, effective_to)` windows joined at `call.start_time`:
+`capacity_pools`, `capacity_allocations`, and `allowed_models` live in `silver_ref` (`ADR-049`, alongside `burst_metrics_1m` in `silver_open`) and enforce mandatory SCD-2 `(effective_from, effective_to)` windows joined at `call.start_time`:
 
 - **`capacity_pools` & merged FCFS `order_id` attribution:** Maps individual commercial `order_id`s (`renewal_type = FIXED_TERM | AUTO_RENEW`, `expiry_date`, `committed_units`, `unit_rate`, `min_cache_tokens`, `supports_priority_paygo`, `emits_traffic_type`) to their shared FCFS `runtime_pool_id`. Gold attributes merged-pool usage **pro-rata by `committed_units`** (or explicit priority policy) so expiring fixed-term renewal exposure stays isolated from auto-renew orders.
 - **3-pool spillover & Cloud Billing invoice reconciliation:** Splits spend explicitly across (1) **Base PT** (active-hours funded share, off-peak backfill credit, unallocated idle pool), (2) **`1.8x` Priority PayGo spillover**, and (3) **Standard/Flex PayGo**, and reconciles modeled Gold totals against Cloud Billing `FOCUS 1.2` invoice/net-realized exports (capturing unmapped `workload_id = NULL` subscription rows and reporting reconciliation delta %).

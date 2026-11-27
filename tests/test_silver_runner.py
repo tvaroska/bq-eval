@@ -313,7 +313,7 @@ def test_runner_loads_trace_store_records_lists_and_manifest() -> None:
     """Loader handles nested records, repeated lists, integer coercions, and multi-file targets."""
     with OfflineSqlRunner(RunnerConfig(current_date_utc="2026-11-26")) as runner:
         loaded = runner.load_manifest(MANIFEST_PATH)
-        assert len(loaded) == 12
+        assert len(loaded) == 17
 
         span_check = runner.query(
             """
@@ -532,6 +532,6 @@ def test_runner_fails_when_query_returns_no_rows_for_non_empty_expected(tmp_path
 def test_runner_full_offline_fixture_run_under_five_seconds() -> None:
     """Full manifest load + nested TVF execution finishes well under the 5-second ceiling."""
     summary = smoke_silver_fixtures(MANIFEST_PATH, max_seconds=5.0)
-    assert summary["fixture_tables"] == 12
+    assert summary["fixture_tables"] == 17
     assert summary["span_count"] == 100
     assert float(str(summary["elapsed_sec"])) < 5.0

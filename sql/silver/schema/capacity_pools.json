@@ -1,0 +1,18 @@
+[
+  {"name": "order_id", "type": "STRING", "mode": "REQUIRED", "description": "Commercial commitment order identifier (FIXED_TERM or AUTO_RENEW)."},
+  {"name": "pool_id", "type": "STRING", "mode": "REQUIRED", "description": "Logical capacity pool identifier."},
+  {"name": "runtime_pool_id", "type": "STRING", "mode": "REQUIRED", "description": "Merged FCFS runtime bucket shared across commercial orders."},
+  {"name": "cloud_provider", "type": "STRING", "mode": "REQUIRED", "description": "Cloud or hosting platform (gcp, aws, azure, self_hosted)."},
+  {"name": "scope_key", "type": "STRING", "mode": "REQUIRED", "description": "Platform scope key (GCP project/Shared-PT pool, Azure PTU deployment, or AWS PT ARN)."},
+  {"name": "model", "type": "STRING", "mode": "REQUIRED", "description": "Canonical model identifier covered by this capacity order."},
+  {"name": "region", "type": "STRING", "mode": "REQUIRED", "description": "Serving region or multi-region of the capacity pool."},
+  {"name": "committed_units", "type": "FLOAT64", "mode": "REQUIRED", "description": "Committed capacity units (GSUs, PTUs, or model units) in this order."},
+  {"name": "unit_rate", "type": "FLOAT64", "mode": "REQUIRED", "description": "Hourly USD rate per committed capacity unit."},
+  {"name": "renewal_type", "type": "STRING", "mode": "REQUIRED", "description": "Commercial renewal policy (AUTO_RENEW or FIXED_TERM)."},
+  {"name": "expiry_date", "type": "DATE", "mode": "NULLABLE", "description": "Commitment term expiration date (NULL for open-ended monthly auto-renew)."},
+  {"name": "min_cache_tokens", "type": "INT64", "mode": "NULLABLE", "description": "Minimum prefix-cache token floor required by this model/pool."},
+  {"name": "supports_priority_paygo", "type": "BOOL", "mode": "REQUIRED", "description": "TRUE when the endpoint supports Priority PayGo spillover."},
+  {"name": "emits_traffic_type", "type": "BOOL", "mode": "REQUIRED", "description": "TRUE when the upstream model server attests TrafficType per response."},
+  {"name": "effective_from", "type": "TIMESTAMP", "mode": "REQUIRED", "description": "SCD-2 inclusive UTC start timestamp for this order version."},
+  {"name": "effective_to", "type": "TIMESTAMP", "mode": "NULLABLE", "description": "SCD-2 exclusive UTC end timestamp (NULL while active)."}
+]

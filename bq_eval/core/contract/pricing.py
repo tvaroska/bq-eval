@@ -25,7 +25,7 @@ FLEX_PAYGO_MULTIPLIER: float = 0.5
 
 
 class ModelPricingSKU(BaseModel):
-    """Effective-dated 1P/3P model pricing, PayGo multipliers, and GSU burndown weights."""
+    """Effective-dated 1P/3P model pricing, PayGo multipliers, cache floors, and GSU burndown weights."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -53,6 +53,7 @@ class ModelPricingSKU(BaseModel):
     burndown_long_output_weight: PosFloat = 7.5
     priority_paygo_multiplier: PosFloat = Field(default=PRIORITY_PAYGO_MULTIPLIER)
     flex_paygo_multiplier: PosFloat = Field(default=FLEX_PAYGO_MULTIPLIER)
+    min_cache_tokens: int = Field(default=0, ge=0)
 
     @property
     def effective_cache_write_5m_usd_per_1m(self) -> float:
@@ -87,6 +88,7 @@ DEFAULT_MODEL_SKUS: dict[str, ModelPricingSKU] = {
         long_context_input_usd_per_1m=0.15,
         long_context_cached_usd_per_1m=0.015,
         long_context_output_usd_per_1m=1.125,
+        min_cache_tokens=1024,
     ),
     "gemini-3.8-flash": ModelPricingSKU(
         model_name="gemini-3.8-flash",
@@ -103,6 +105,7 @@ DEFAULT_MODEL_SKUS: dict[str, ModelPricingSKU] = {
         long_context_input_usd_per_1m=0.30,
         long_context_cached_usd_per_1m=0.030,
         long_context_output_usd_per_1m=2.25,
+        min_cache_tokens=1024,
     ),
     "gemini-4-argon": ModelPricingSKU(
         model_name="gemini-4-argon",
@@ -119,6 +122,7 @@ DEFAULT_MODEL_SKUS: dict[str, ModelPricingSKU] = {
         long_context_input_usd_per_1m=2.50,
         long_context_cached_usd_per_1m=0.250,
         long_context_output_usd_per_1m=18.75,
+        min_cache_tokens=4096,
     ),
     "gemini-4-carbon": ModelPricingSKU(
         model_name="gemini-4-carbon",
@@ -135,6 +139,32 @@ DEFAULT_MODEL_SKUS: dict[str, ModelPricingSKU] = {
         long_context_input_usd_per_1m=2.50,
         long_context_cached_usd_per_1m=0.250,
         long_context_output_usd_per_1m=18.75,
+        min_cache_tokens=4096,
+    ),
+    "text-embedding-005": ModelPricingSKU(
+        model_name="text-embedding-005",
+        provider="google",
+        lifecycle_track="long_term_ga",
+        effective_start=CATALOG_EFFECTIVE_START,
+        effective_end=CATALOG_EFFECTIVE_END,
+        input_usd_per_1m=0.025,
+        cached_input_usd_per_1m=0.0,
+        cache_write_5m_usd_per_1m=0.0,
+        cache_write_1h_usd_per_1m=0.0,
+        output_usd_per_1m=0.0,
+        long_context_threshold_tokens=None,
+        long_context_input_usd_per_1m=0.025,
+        long_context_cached_usd_per_1m=0.0,
+        long_context_output_usd_per_1m=0.0,
+        burndown_uncached_weight=1.0,
+        burndown_cached_weight=0.0,
+        burndown_cache_write_5m_weight=1.0,
+        burndown_cache_write_1h_weight=1.0,
+        burndown_output_weight=1.0,
+        burndown_long_uncached_weight=1.0,
+        burndown_long_cached_weight=0.0,
+        burndown_long_output_weight=1.0,
+        min_cache_tokens=0,
     ),
     "ai_evaluate_agent_managed": ModelPricingSKU(
         model_name="ai_evaluate_agent_managed",
@@ -151,6 +181,7 @@ DEFAULT_MODEL_SKUS: dict[str, ModelPricingSKU] = {
         long_context_input_usd_per_1m=0.30,
         long_context_cached_usd_per_1m=0.030,
         long_context_output_usd_per_1m=2.25,
+        min_cache_tokens=0,
     ),
     "claude-sonnet-4-6": ModelPricingSKU(
         model_name="claude-sonnet-4-6",
@@ -177,6 +208,7 @@ DEFAULT_MODEL_SKUS: dict[str, ModelPricingSKU] = {
         burndown_long_output_weight=5.0,
         priority_paygo_multiplier=PRIORITY_PAYGO_MULTIPLIER,
         flex_paygo_multiplier=FLEX_PAYGO_MULTIPLIER,
+        min_cache_tokens=1024,
     ),
     "claude-opus-4-6": ModelPricingSKU(
         model_name="claude-opus-4-6",
@@ -203,6 +235,7 @@ DEFAULT_MODEL_SKUS: dict[str, ModelPricingSKU] = {
         burndown_long_output_weight=5.0,
         priority_paygo_multiplier=PRIORITY_PAYGO_MULTIPLIER,
         flex_paygo_multiplier=FLEX_PAYGO_MULTIPLIER,
+        min_cache_tokens=2048,
     ),
     "claude-sonnet-5-5": ModelPricingSKU(
         model_name="claude-sonnet-5-5",
@@ -229,6 +262,7 @@ DEFAULT_MODEL_SKUS: dict[str, ModelPricingSKU] = {
         burndown_long_output_weight=5.0,
         priority_paygo_multiplier=PRIORITY_PAYGO_MULTIPLIER,
         flex_paygo_multiplier=FLEX_PAYGO_MULTIPLIER,
+        min_cache_tokens=1024,
     ),
 }
 
@@ -255,4 +289,6 @@ def normalize_model_name(model_name: str) -> str:
         cleaned = cleaned.split("@", 1)[0]
     if "/" in cleaned:
         cleaned = cleaned.rsplit("/", 1)[-1]
+    if cleaned in DEFAULT_MODEL_SKUS:
+        return cleaned
     return _MODEL_VERSION_SUFFIX_RE.sub("", cleaned)

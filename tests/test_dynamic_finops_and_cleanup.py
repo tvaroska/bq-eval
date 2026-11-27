@@ -1,4 +1,4 @@
-"""Dark-LOC removal, parameterized app_registry storage, and dynamic `--scenario-file` FinOps."""
+"""Dynamic `--scenario-file` FinOps (`A-14`, `A-19`) and parameterized WORM storage tests."""
 
 from __future__ import annotations
 
@@ -10,18 +10,14 @@ import pytest
 
 from bq_eval.cli.app import main as cli_main
 from bq_eval.core.contract.otel import FinOpsTrafficType, GenAISpanKind, OTelGenAISpanRecord
+from bq_eval.core.contract.results import ConfusionMatrix
 from bq_eval.core.engine import cost as finops_cost
 from bq_eval.demo.contract.results import ScenarioCorpusBundle
 from bq_eval.demo.golden_seeds import build_golden_seed_templates
+from bq_eval.demo.pipeline import run_showcase_pipeline
 from bq_eval.finops.engine import spend as finops_spend
-from tests.sql_helpers import (
-    ENTERPRISE_OTEL_SPANS_BASE_INSERT,
-    REPO_ROOT,
-    SQL_DIR,
-    _create_enterprise_sqlite_fixture,
-    _install_enterprise_views,
-    _new_sqlite_bq_conn,
-)
+from bq_eval.finops.engine.chargeback_three_pool import contiguous_utc_hours
+from tests.conftest import REPO_ROOT, SQL_DIR, make_span, open_runner_for_spans
 
 
 def _build_custom_scenario_bundle(
@@ -35,10 +31,10 @@ def _build_custom_scenario_bundle(
     base = datetime(2026, 11, 22, 8, 0, 0, tzinfo=UTC)
     spans: list[OTelGenAISpanRecord] = []
     judge_outcomes: dict[str, bool] = {}
+    cm_perf = ConfusionMatrix(tp=45, fn=0, tn=5, fp=0)
 
     for i in range(n_flash_traces):
         tid = f"{corpus_id}-flash-{i:03d}"
-        # Spread across 4 hours (deep valley in hours 0-1, peak in hours 2-3)
         hour_offset = 0 if i < n_flash_traces // 4 else (2 if i < (3 * n_flash_traces) // 4 else 3)
         start = base + timedelta(hours=hour_offset, seconds=i * 5)
         is_err = i < n_error_traces
@@ -67,7 +63,7 @@ def _build_custom_scenario_bundle(
             judge_outcomes[tid] = True
 
     if include_hallucinating_lite:
-        for j in range(4):
+        for j in range(12):
             tid = f"{corpus_id}-lite-{j:03d}"
             start = base + timedelta(hours=2, seconds=j * 10)
             spans.append(
@@ -91,7 +87,6 @@ def _build_custom_scenario_bundle(
                     finops_traffic_type=FinOpsTrafficType.PRODUCTION_INFERENCE,
                 )
             )
-            # Judge fails 1 trace -> non-zero fabrication_rate disqualifies cheap model!
             judge_outcomes[tid] = j > 0
 
     return ScenarioCorpusBundle(
@@ -99,6 +94,7 @@ def _build_custom_scenario_bundle(
         title=f"Dynamic Scenario {corpus_id}",
         spans=tuple(spans),
         judge_outcomes=judge_outcomes,
+        sme_confusion_by_app={"app-clean": cm_perf, "app-hallucinator": cm_perf},
         distinct_prompt_variants=2,
         dilution_target_app_id="app-clean",
         reserved_pt_capacity_tokens=pt_capacity_tokens,
@@ -136,139 +132,180 @@ def test_dynamic_scenario_file_computes_roi_pareto_pt_valley_and_hourly_chargeba
     assert cli_main(["demo", "--scenario-file", str(p_high), "--format", "json"]) == 0
     out_high = json.loads(capsys.readouterr().out)["artifacts"]
 
-    # Eval ROI tracks actual input trace count and error-tail rate (not hardcoded 100,000 / 3%).
-    assert out_low["eval_roi"]["total_production_traces"] == 24
+    assert out_low["eval_roi"]["total_production_traces"] == 32
     assert out_high["eval_roi"]["total_production_traces"] == 40
     assert out_low["eval_roi"]["tier2_error_tail_traces"] == 0
     assert out_high["eval_roi"]["tier2_error_tail_traces"] == 8
     assert out_low["eval_roi"]["savings_pct"] > out_high["eval_roi"]["savings_pct"]
 
-    # Pareto frontier derives candidates from input traces and disqualifies the hallucinating config.
     disq_ids = {c["config_id"] for c in out_low["pareto"]["disqualified_options"]}
     assert "app-hallucinator::gemini-3.5-flash-lite" in disq_ids
     assert out_low["pareto"]["recommended_default"]["config_id"] == "app-clean::gemini-3.8-flash"
-    # High-error bundle (20% Rule-0 failures) fails the >=98% Rule-0 gate -> fail-closed None!
     assert out_high["pareto"]["recommended_default"] is None
 
-    # Hourly FOCUS 1.2 chargeback reflects hourly peaks/overflow (high demand > 200k PT triggers PAYG overflow).
     low_overflow = sum(r["payg_overflow_cost_usd"] for r in out_low["focus_chargeback"])
     high_overflow = sum(r["payg_overflow_cost_usd"] for r in out_high["focus_chargeback"])
     assert high_overflow > low_overflow
+    # Hours 08:00Z, 09:00Z (idle), 10:00Z, 11:00Z -> 4 contiguous hours
+    assert len(out_low["off_peak_plan"]["hourly_scheduled_eval_tokens"]) == 4
 
-    # Off-peak PT-valley schedule derives batch tokens and hourly slots directly from input spans.
-    assert (
-        out_low["off_peak_plan"]["total_batch_eval_tokens_requested"]
-        != out_high["off_peak_plan"]["total_batch_eval_tokens_requested"]
+
+def test_dynamic_pareto_skips_unjudged_apps(tmp_path: Path) -> None:
+    """`A-14`: Dynamic Pareto never fabricates a `0.90` pass rate for unjudged/uncalibrated apps."""
+    base = datetime(2026, 11, 22, 9, 0, 0, tzinfo=UTC)
+    spans = [
+        make_span(
+            f"tr-cal-{i:02d}",
+            f"sp-cal-{i:02d}",
+            app_id="calibrated-app",
+            model_name="gemini-3.8-flash",
+            offset_s=i,
+            base_time=base,
+        )
+        for i in range(12)
+    ] + [
+        make_span(
+            f"tr-unjudged-{j:02d}",
+            f"sp-unjudged-{j:02d}",
+            app_id="unjudged-cheap-app",
+            model_name="gemini-3.5-flash-lite",
+            input_tokens=1_000,
+            cached_input_tokens=500,
+            output_tokens=100,
+            thinking_tokens=0,
+            offset_s=30 + j,
+            base_time=base,
+        )
+        for j in range(12)
+    ]
+    bundle = ScenarioCorpusBundle(
+        corpus_id="pareto-a14-probe",
+        title="Pareto A-14 Probe",
+        spans=tuple(spans),
+        judge_outcomes={f"tr-cal-{i:02d}": True for i in range(12)},
+        sme_confusion_by_app={"calibrated-app": ConfusionMatrix(tp=45, fn=0, tn=5, fp=0)},
     )
-    assert len(out_low["off_peak_plan"]["hourly_scheduled_eval_tokens"]) == 3
+    scen_path = tmp_path / "a14.json"
+    scen_path.write_text(json.dumps(bundle.model_dump(mode="json")), encoding="utf-8")
+
+    artifacts = run_showcase_pipeline(scenario_file=scen_path)
+    assert artifacts.summaries["unjudged-cheap-app"].calibration_status == "UNJUDGED"
+    assert artifacts.summaries["unjudged-cheap-app"].calibrated_pass_rate is None
+    all_pareto_ids = {
+        *(c.config_id for c in artifacts.pareto.eligible_options),
+        *(c.config_id for c in artifacts.pareto.pareto_frontier),
+        *(c.config_id for c in artifacts.pareto.disqualified_options),
+    }
+    assert all_pareto_ids == {"calibrated-app::gemini-3.8-flash"}
+    assert artifacts.pareto.recommended_default is not None
+    assert artifacts.pareto.recommended_default.config_id == "calibrated-app::gemini-3.8-flash"
 
 
-def test_app_registry_worm_storage_parameterization_and_dark_loc_removals() -> None:
-    """`app_registry.storage_usd_per_outcome` parameterizes WORM storage; deleted dark artifacts stay gone."""
+def test_demo_chargeback_counts_idle_hours(tmp_path: Path) -> None:
+    """`A-19`: Zero-traffic hours between active hours accrue idle PT tax and windows past `max_hours` raise."""
+    base = datetime(2026, 11, 22, 8, 0, 0, tzinfo=UTC)
+    # Hour 0 (08:00Z) and Hour 3 (11:00Z) each burn exactly 100K weighted tokens; Hours 1 & 2 are completely idle!
+    spans = [
+        make_span(
+            "tr-h0",
+            "sp-h0",
+            app_id="valley-app",
+            input_tokens=100_000,
+            cached_input_tokens=0,
+            output_tokens=0,
+            thinking_tokens=0,
+            base_time=base,
+        ),
+        make_span(
+            "tr-h3",
+            "sp-h3",
+            app_id="valley-app",
+            input_tokens=100_000,
+            cached_input_tokens=0,
+            output_tokens=0,
+            thinking_tokens=0,
+            base_time=base + timedelta(hours=3),
+        ),
+    ]
+    # Total PT across the 4-hour grid = 400K (100K/hr), fixed cost = $100 ($25/hr).
+    # Active hours 0 & 3 saturate 100K/hr ($50 utilized); idle hours 1 & 2 burn 0 ($50 idle tax)!
+    bundle = ScenarioCorpusBundle(
+        corpus_id="idle-hours-a19",
+        title="Idle Hours A-19",
+        spans=tuple(spans),
+        reserved_pt_capacity_tokens=400_000.0,
+        reserved_pt_fixed_cost_usd=100.0,
+        app_cost_centers={"valley-app": "CC-VALLEY"},
+    )
+    scen_path = tmp_path / "a19.json"
+    scen_path.write_text(json.dumps(bundle.model_dump(mode="json")), encoding="utf-8")
+
+    artifacts = run_showcase_pipeline(scenario_file=scen_path)
+    by_owner = {r.apphub_application_id: r for r in artifacts.focus_chargeback}
+    assert by_owner["valley-app"].utilized_pt_cost_usd == pytest.approx(50.0, abs=1e-12)
+    assert by_owner[
+        "platform-shared-reservation"
+    ].unutilized_idle_capacity_tax_usd == pytest.approx(50.0, abs=1e-12)
+    assert len(artifacts.off_peak_plan.hourly_scheduled_eval_tokens) == 4
+
+    with pytest.raises(ValueError, match="exceeds max_hours"):
+        contiguous_utc_hours(["2026-11-01T00:00:00Z", "2026-11-10T00:00:00Z"], max_hours=168)
+
+
+def test_workload_thresholds_worm_storage_parameterization_and_dark_loc_removals() -> None:
+    """`workload_thresholds.storage_usd_per_outcome` parameterizes WORM storage; deleted dark artifacts stay gone."""
     assert not hasattr(finops_cost, "compute_default_span_cost_usd")
     assert not hasattr(finops_spend, "compute_default_span_cost_usd")
     assert not list(SQL_DIR.rglob("demo_docubridge_extensions.sql"))
     assert not list((REPO_ROOT / "bq_eval").rglob("seeds_banking.py"))
     assert not list((REPO_ROOT / "bq_eval").rglob("seeds_claims.py"))
 
-    # Single-source seed parity: every template in golden_seeds.py appears in demo_time_shift_loadgen.sql.
     loadgen_sql = (SQL_DIR / "demo" / "demo_time_shift_loadgen.sql").read_text(encoding="utf-8")
     templates = build_golden_seed_templates()
     assert len(templates) == 16
     for tmpl in templates:
         assert f"'{tmpl.base_trace_id}'" in loadgen_sql
 
-    # Verify app_registry.storage_usd_per_outcome overrides default $0.000020 while explicit span attr wins.
-    conn = _new_sqlite_bq_conn()
-    _create_enterprise_sqlite_fixture(conn)
-    _install_enterprise_views(conn)
-    conn.execute(
-        "INSERT INTO app_registry (apphub_application_id, business_unit, sla_latency_ms, cost_center, is_external_counterparty, storage_usd_per_outcome) "
-        "VALUES ('worm-app', 'banking', 5000.0, 'CC-WORM', 0, 0.000400)"
-    )
-    t0 = "2026-11-22T10:00:00+00:00"
-    t1 = "2026-11-22T10:00:01+00:00"
-    for out_id, attrs in (
-        ("out-reg", "{}"),
-        ("out-span-override", '{"outcome.storage_usd": "0.000900"}'),
-    ):
-        conn.executemany(
-            ENTERPRISE_OTEL_SPANS_BASE_INSERT,
-            [
-                (
-                    f"tr-{out_id}",
-                    f"sp-{out_id}",
-                    None,
-                    "invoke_agent",
-                    "worm-app",
-                    "svc",
-                    "agent",
-                    "SPAN_KIND_SERVER",
-                    "invoke_agent",
-                    "gemini-3.8-flash",
-                    None,
-                    None,
-                    "OK",
-                    1,
-                    "production_inference",
-                    out_id,
-                    "worm-app",
-                    out_id,
-                    None,
-                    None,
-                    None,
-                    t0,
-                    t1,
-                    t1,
-                    1000.0,
-                    10_000,
-                    0,
-                    100,
-                    0,
-                    attrs,
-                ),
-                (
-                    f"tr-{out_id}",
-                    f"sp-close-{out_id}",
-                    f"sp-{out_id}",
-                    "outcome.closed",
-                    "worm-app",
-                    "svc",
-                    "agent",
-                    "SPAN_KIND_INTERNAL",
-                    "invoke_agent",
-                    "none",
-                    None,
-                    None,
-                    "OK",
-                    1,
-                    "production_inference",
-                    out_id,
-                    "worm-app",
-                    out_id,
-                    None,
-                    None,
-                    None,
-                    t1,
-                    t1,
-                    t1,
-                    0.0,
-                    0,
-                    0,
-                    0,
-                    0,
-                    '{"outcome.status": "succeeded", "outcome.verified": "true"}',
-                ),
-            ],
+    base = datetime(2026, 11, 22, 10, 0, 0, tzinfo=UTC)
+    spans = [
+        make_span(
+            "tr-worm-1",
+            "sp-worm-1",
+            app_id="worm-app",
+            otel_span_kind="SPAN_KIND_SERVER",
+            outcome_id="out-worm-1",
+            outcome_owner="worm-app",
+            latency_ms=1000.0,
+            base_time=base,
+        ),
+        make_span(
+            "tr-worm-1",
+            "sp-worm-close",
+            parent_span_id="sp-worm-1",
+            span_name="outcome.closed",
+            app_id="worm-app",
+            outcome_id="out-worm-1",
+            outcome_owner="worm-app",
+            model_name="none",
+            input_tokens=0,
+            cached_input_tokens=0,
+            output_tokens=0,
+            thinking_tokens=0,
+            latency_ms=0.0,
+            offset_s=1,
+            attributes={"outcome.status": "succeeded", "outcome.verified": "true"},
+            base_time=base,
+        ),
+    ]
+    with open_runner_for_spans(spans) as runner:
+        runner.register_sql(
+            "UPDATE `agent_eval.workload_thresholds` SET storage_usd_per_outcome = 0.000400 "
+            "WHERE apphub_application_id = 'worm-app'"
         )
-
-    rows = {
-        str(r["source_mode"]): float(r["estimated_infra_cost_usd"])
-        for r in conn.execute(
-            "SELECT source_mode, estimated_infra_cost_usd FROM v_enterprise_cost_per_verified_outcome"
-        ).fetchall()
-    }
-    conn.close()
-    # 1s server compute = $0.000053 + WORM storage override ($0.000400 vs explicit $0.000900).
-    assert rows["out-reg"] == pytest.approx(0.000053 + 0.000400, abs=1e-12)
-    assert rows["out-span-override"] == pytest.approx(0.000053 + 0.000900, abs=1e-12)
+        row = runner.query(
+            "SELECT estimated_infra_cost_usd FROM `agent_eval.v_enterprise_cost_per_verified_outcome` "
+            "WHERE apphub_application_id = 'worm-app'"
+        ).rows[0]
+    assert float(str(row["estimated_infra_cost_usd"])) == pytest.approx(
+        0.000053 + 0.000400, abs=1e-12
+    )

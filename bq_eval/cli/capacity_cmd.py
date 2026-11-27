@@ -1,13 +1,13 @@
-"""CLI handler for `bq-eval capacity-export` (3-pool FOCUS chargeback & residual schedule)."""
+"""CLI handler for `bq-eval capacity-export` (versioned 3-pool FOCUS, governance & lifecycle export)."""
 
 from __future__ import annotations
 
 import argparse
 import json
+from datetime import UTC, timedelta
 from pathlib import Path
 from typing import cast
 
-from bq_eval.core.engine.ports import SQLiteEvalBackend
 from bq_eval.demo.contract.results import ScenarioCorpusBundle
 from bq_eval.demo.pipeline import (
     CorpusChoice,
@@ -25,6 +25,12 @@ from bq_eval.finops.engine.chargeback_three_pool import (
     parse_utc_hour,
     traffic_lane_for_finops_type,
 )
+from bq_eval.runner.contract.spec import RunnerConfig
+from bq_eval.runner.engine.eval_adapter import (
+    OfflineEvalBackend,
+    open_silver_gold_runner,
+    populate_runner_from_spans,
+)
 
 
 def register_capacity_export_subparser(
@@ -33,7 +39,7 @@ def register_capacity_export_subparser(
     """Attach the `capacity-export` subcommand to the root `bq-eval` CLI parser."""
     cap_p = sub.add_parser(
         "capacity-export",
-        help="Emit 3-pool FOCUS 1.2 hourly chargeback and a `capacity` residual schedule payload as JSON.",
+        help="Emit versioned 3-pool FOCUS 1.2 chargeback, governance, lifecycle, and schedule JSON.",
     )
     cap_p.add_argument(
         "--corpus",
@@ -68,7 +74,13 @@ def register_capacity_export_subparser(
         "--safety-headroom",
         type=float,
         default=0.85,
-        help="Maximum utilization ratio for off-peak scavenging (0.1 < r <= 0.85, default: 0.85).",
+        help="Maximum utilization ratio for off-peak scavenging (0.1 < r <= 1.0, default: 0.85).",
+    )
+    cap_p.add_argument(
+        "--max-hours",
+        type=int,
+        default=168,
+        help="Maximum contiguous UTC hours permitted in one export window (default: 168).",
     )
 
 
@@ -86,14 +98,51 @@ def _load_corpus_bundle(corpus: CorpusChoice, scenario_file: Path | None) -> Sce
     )
 
 
+def _query_governance_and_lifecycle(
+    bundle: ScenarioCorpusBundle,
+) -> tuple[list[dict[str, object]], list[dict[str, object]], list[dict[str, object]]]:
+    max_end = max(s.end_time.astimezone(UTC) for s in bundle.spans)
+    now_dt = max_end + timedelta(minutes=10)
+    cfg = RunnerConfig(
+        current_date_utc=now_dt.strftime("%Y-%m-%d"),
+        current_timestamp_utc=now_dt.isoformat(),
+        default_dataset="agent_eval",
+    )
+    with open_silver_gold_runner(cfg) as runner:
+        populate_runner_from_spans(runner, bundle.spans)
+        burst = [
+            dict(r)
+            for r in runner.query(
+                "SELECT * FROM `silver_open.burst_metrics_1m` ORDER BY minute_utc, runtime_pool_id"
+            ).rows
+        ]
+        gov = [
+            dict(r)
+            for r in runner.query(
+                "SELECT * FROM `agent_eval.v_app_risk_governance` ORDER BY apphub_application_id"
+            ).rows
+        ]
+        lob = [
+            dict(r)
+            for r in runner.query(
+                "SELECT * FROM `agent_eval.v_lob_model_lifecycle_export` "
+                "ORDER BY business_unit, apphub_application_id, model_name"
+            ).rows
+        ]
+    return burst, gov, lob
+
+
 def run_capacity_export_command(args: argparse.Namespace) -> int:
-    """Run `bq-eval capacity-export` and print deterministic JSON."""
+    """Run `bq-eval capacity-export` and print deterministic schema v1.1 JSON."""
     bundle = _load_corpus_bundle(cast(CorpusChoice, args.corpus), args.scenario_file)
-    hourly_rows = hourly_burndown_rows(SQLiteEvalBackend(), bundle.spans)
+    hourly_rows = hourly_burndown_rows(OfflineEvalBackend(), bundle.spans)
     if not hourly_rows:
         raise ValueError("Selected corpus produced no hourly burndown rows.")
 
-    grid = contiguous_utc_hours([r.timestamp or r.usage_hour for r in hourly_rows], max_hours=168)
+    grid = contiguous_utc_hours(
+        [r.timestamp or r.usage_hour for r in hourly_rows],
+        max_hours=int(args.max_hours),
+    )
     hour_index = {h: idx for idx, h in enumerate(grid)}
 
     demand_by_app_lane: dict[tuple[str, TrafficLane], list[float]] = {}
@@ -140,13 +189,19 @@ def run_capacity_export_command(args: argparse.Namespace) -> int:
         model=selected_model,
         provisioned_gsus=args.provisioned_gsus,
         safety_headroom_ratio=args.safety_headroom,
+        max_hours=int(args.max_hours),
     )
+    burst_rows, gov_rows, lob_rows = _query_governance_and_lifecycle(bundle)
     payload = {
+        "schema_version": "1.1",
         "corpus_id": bundle.corpus_id,
         "model": selected_model,
         "hours": [h.strftime("%Y-%m-%dT%H:%M:%SZ") for h in grid],
         "three_pool_chargeback": chargeback.model_dump(mode="json"),
         "residual_schedule_request": schedule_req.model_dump(mode="json"),
+        "burst_metrics_1m": burst_rows,
+        "app_risk_governance": gov_rows,
+        "lob_model_lifecycle": lob_rows,
     }
     print(json.dumps(payload, indent=2, sort_keys=True))
     return 0

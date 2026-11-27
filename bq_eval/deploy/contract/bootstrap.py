@@ -1,4 +1,4 @@
-"""Bootstrap mode and offline validation report."""
+"""Bootstrap mode (`silver` | `gold`) and offline validation report."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-BootstrapMode = Literal["light", "full", "hybrid", "silver"]
+BootstrapMode = Literal["silver", "gold"]
 
 
 class BootstrapValidationReport(BaseModel):

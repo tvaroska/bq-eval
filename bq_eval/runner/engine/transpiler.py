@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import math
 import re
 import sqlite3
+import uuid
 from datetime import UTC, datetime, timedelta
 
 import sqlglot
@@ -19,13 +21,8 @@ SqliteValue = str | int | float | bytes | None
 _TZ_SUFFIX_RE = re.compile(r"\s+UTC$", re.IGNORECASE)
 
 
-def _normalize_bq_timestamp(value: object) -> str | None:
-    """Normalize BigQuery timestamp strings to UTC ISO-8601 (`+00:00`) for exact string order."""
-    if value is None:
-        return None
-    raw = str(value).strip()
-    if not raw:
-        return None
+@functools.lru_cache(maxsize=4096)
+def _normalize_bq_timestamp_str(raw: str) -> str | None:
     cleaned = _TZ_SUFFIX_RE.sub("+00:00", raw)
     if cleaned.endswith(("Z", "z")):
         cleaned = f"{cleaned[:-1]}+00:00"
@@ -33,6 +30,14 @@ def _normalize_bq_timestamp(value: object) -> str | None:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=UTC)
     return dt.astimezone(UTC).isoformat()
+
+
+def _normalize_bq_timestamp(value: object) -> str | None:
+    """Normalize BigQuery timestamp strings to UTC ISO-8601 (`+00:00`) for exact string order."""
+    if value is None:
+        return None
+    raw = str(value).strip()
+    return _normalize_bq_timestamp_str(raw) if raw else None
 
 
 def _sqlite_safe_cast_timestamp(value: object) -> str | None:
@@ -89,9 +94,8 @@ def _walk_json_tokens(data: object, tokens: list[str | int]) -> tuple[bool, obje
     return True, cur
 
 
-def _sqlite_json_value(raw_json: str | None, path: str) -> str | None:
-    if not raw_json:
-        return None
+@functools.lru_cache(maxsize=8192)
+def _cached_json_value(raw_json: str, path: str) -> str | None:
     try:
         data = json.loads(raw_json)
     except json.JSONDecodeError:
@@ -103,7 +107,6 @@ def _sqlite_json_value(raw_json: str | None, path: str) -> str | None:
         matched, cur = _walk_json_tokens(data, tokens)
         if matched:
             return _json_scalar_to_str(cur)
-    # Fallback for unquoted dotted OTel attribute keys like `$.gen_ai.usage.input_tokens`.
     flat_key = (
         ".".join(str(tok) for tok in tokens)
         if tokens and all(isinstance(tok, str) for tok in tokens)
@@ -112,6 +115,12 @@ def _sqlite_json_value(raw_json: str | None, path: str) -> str | None:
     if isinstance(data, dict) and flat_key in data:
         return _json_scalar_to_str(data[flat_key])
     return None
+
+
+def _sqlite_json_value(raw_json: str | None, path: str) -> str | None:
+    if not raw_json or not isinstance(raw_json, str) or not isinstance(path, str):
+        return None
+    return _cached_json_value(raw_json, path)
 
 
 def _sqlite_struct_field(raw_json: object, dotted_path: str) -> SqliteValue:
@@ -152,10 +161,20 @@ def _sqlite_array_length(raw_json: object) -> int | None:
     return len(parsed) if isinstance(parsed, list) else None
 
 
+@functools.lru_cache(maxsize=512)
+def _compiled_regex(pattern: str) -> re.Pattern[str]:
+    return re.compile(pattern)
+
+
+@functools.lru_cache(maxsize=4096)
+def _cached_regexp_replace(value: str, pattern: str, replacement: str) -> str:
+    return _compiled_regex(pattern).sub(replacement, value)
+
+
 def _sqlite_regexp_replace(value: str | None, pattern: str, replacement: str) -> str | None:
     if value is None:
         return None
-    return re.sub(pattern, replacement, value)
+    return _cached_regexp_replace(str(value), str(pattern), str(replacement))
 
 
 def _parse_utc_dt(ts: str) -> datetime:
@@ -288,13 +307,13 @@ def _sqlite_int_div(num: int | float | None, den: int | float | None) -> int | N
 def _sqlite_regexp_contains(value: str | None, pattern: str | None) -> int:
     if value is None or pattern is None:
         return 0
-    return 1 if re.search(pattern, value) is not None else 0
+    return 1 if _compiled_regex(str(pattern)).search(str(value)) is not None else 0
 
 
 def _sqlite_regexp_extract(value: str | None, pattern: str | None) -> str | None:
     if value is None or pattern is None:
         return None
-    m = re.search(pattern, value)
+    m = _compiled_regex(str(pattern)).search(str(value))
     if m is None:
         return None
     return m.group(1) if m.lastindex else m.group(0)
@@ -373,6 +392,20 @@ def _sqlite_date_sub_days(date_str: str | None, days: int | float | None) -> str
         return None
     dt = datetime.fromisoformat(str(date_str)[:10])
     return (dt - timedelta(days=int(days or 0))).strftime("%Y-%m-%d")
+
+
+def _sqlite_date_add_days(date_str: str | None, days: int | float | None) -> str | None:
+    if date_str is None:
+        return None
+    dt = datetime.fromisoformat(str(date_str)[:10])
+    return (dt + timedelta(days=int(days or 0))).strftime("%Y-%m-%d")
+
+
+def _sqlite_format_date(fmt: str, date_str: str | None) -> str | None:
+    if date_str is None:
+        return None
+    dt = datetime.fromisoformat(str(date_str)[:10])
+    return dt.strftime(fmt)
 
 
 def _sqlite_json_set(raw_doc: str | None, *args: object) -> str:
@@ -477,7 +510,7 @@ def _new_sqlite_bq_conn(
     current_timestamp_utc: str | None = None,
     session_user: str = "runner@example.invalid",
 ) -> sqlite3.Connection:
-    conn = sqlite3.connect(":memory:")
+    conn = sqlite3.connect(":memory:", check_same_thread=False)
     conn.row_factory = sqlite3.Row
     ts_now = _normalize_bq_timestamp(current_timestamp_utc or f"{current_date_utc}T12:00:00+00:00")
     conn.create_function("JSON_VALUE", 2, _sqlite_json_value)
@@ -497,6 +530,10 @@ def _new_sqlite_bq_conn(
     conn.create_function("BQ_FARM_FINGERPRINT", 1, _sqlite_farm_fingerprint)
     conn.create_function("BQ_MOD", 2, _sqlite_mod)
     conn.create_function("BQ_DATE_SUB_DAYS", 2, _sqlite_date_sub_days)
+    conn.create_function("BQ_DATE_ADD_DAYS", 2, _sqlite_date_add_days)
+    conn.create_function("BQ_FORMAT_DATE", 2, _sqlite_format_date)
+    conn.create_function("BQ_GENERATE_UUID", 0, lambda: str(uuid.uuid4()))
+    conn.create_function("GENERATE_UUID", 0, lambda: str(uuid.uuid4()))
     conn.create_function("SQRT", 1, math.sqrt)
     conn.create_function("POW", 2, math.pow)
     conn.create_function("CEIL", 1, math.ceil)
@@ -656,6 +693,11 @@ _ANONYMOUS_SQLITE_FN_MAP: dict[str, str] = {
     "FARM_FINGERPRINT": "BQ_FARM_FINGERPRINT",
     "TIMESTAMP": "BQ_TIMESTAMP",
     "ARRAY_LENGTH": "BQ_ARRAY_LENGTH",
+    "CHAR_LENGTH": "LENGTH",
+    "CHARACTER_LENGTH": "LENGTH",
+    "STRPOS": "INSTR",
+    "FORMAT_DATE": "BQ_FORMAT_DATE",
+    "GENERATE_UUID": "BQ_GENERATE_UUID",
 }
 
 _TEMPORAL_SINGLE_ARG_MAP: tuple[tuple[type[exp.Expr], str], ...] = (
@@ -703,6 +745,7 @@ def _rewrite_bq_timestamp_delta(
 
 _TEMPORAL_TWO_ARG_MAP: tuple[tuple[type[exp.Expr], str], ...] = (
     (exp.DateSub, "BQ_DATE_SUB_DAYS"),
+    (exp.DateAdd, "BQ_DATE_ADD_DAYS"),
     (exp.IntDiv, "BQ_INT_DIV"),
 )
 
@@ -742,10 +785,17 @@ def _rewrite_bq_temporal(node: exp.Expr) -> exp.Expr | None:
         fn = "BQ_CURRENT_DATE" if isinstance(node, exp.CurrentDate) else "BQ_CURRENT_TIMESTAMP"
         rewritten = exp.Anonymous(this=fn, expressions=[])
     elif isinstance(node, exp.TimeToStr):
+        fn_out = (
+            "BQ_FORMAT_DATE"
+            if isinstance(node.this, (exp.Date, exp.CurrentDate))
+            else "FORMAT_TIMESTAMP"
+        )
         rewritten = exp.Anonymous(
-            this="FORMAT_TIMESTAMP",
+            this=fn_out,
             expressions=[node.args["format"].copy(), node.this.copy()],
         )
+    elif isinstance(node, exp.Uuid):
+        rewritten = exp.Anonymous(this="BQ_GENERATE_UUID", expressions=[])
     return rewritten
 
 
@@ -766,6 +816,7 @@ _TWO_ARG_STRING_MAP: tuple[tuple[type[exp.Expr], str], ...] = (
     (exp.RegexpLike, "BQ_REGEXP_CONTAINS"),
     (exp.RegexpExtract, "BQ_REGEXP_EXTRACT"),
     (exp.StartsWith, "BQ_STARTS_WITH"),
+    (exp.StrPosition, "INSTR"),
 )
 
 
@@ -786,9 +837,9 @@ def _rewrite_bq_string_and_agg(node: exp.Expr) -> exp.Expr | None:
     rewritten: exp.Expr | None = None
     two_arg = dict(_TWO_ARG_STRING_MAP).get(type(node))
     if two_arg is not None:
-        rewritten = exp.Anonymous(
-            this=two_arg, expressions=[node.this.copy(), node.expression.copy()]
-        )
+        rhs = node.expression if node.expression is not None else node.args.get("substr")
+        if isinstance(rhs, exp.Expr):
+            rewritten = exp.Anonymous(this=two_arg, expressions=[node.this.copy(), rhs.copy()])
     elif isinstance(node, exp.JSONExtractScalar) and node.expression is not None:
         rewritten = exp.Anonymous(
             this="BQ_JSON_VALUE",

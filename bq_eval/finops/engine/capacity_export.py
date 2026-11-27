@@ -1,4 +1,4 @@
-"""Hourly capacity burndown rows from either local or warehouse evaluation ports."""
+"""Hourly capacity burndown rows from either offline or warehouse evaluation ports."""
 
 from __future__ import annotations
 
@@ -12,7 +12,6 @@ from bq_eval.core.engine.ports import (
     parse_required_int,
 )
 from bq_eval.finops.contract.results import HourlyBurndownExportRow
-from bq_eval.finops.engine.sqlite_capacity import evaluate_hourly_burndown_in_sqlite
 
 
 def _mapping_to_hourly_row(row: Mapping[str, object]) -> HourlyBurndownExportRow:
@@ -53,11 +52,11 @@ def hourly_burndown_rows(
     backend: EvalBackend | WarehouseEvalBackend,
     spans: Sequence[OTelGenAISpanRecord] = (),
 ) -> list[HourlyBurndownExportRow]:
-    """Return `v_capacity_hourly_burndown_export` rows via warehouse port or local SQLite."""
+    """Return `v_capacity_hourly_burndown_export` rows via warehouse or offline evaluation port."""
     if isinstance(backend, WarehouseEvalBackend):
         sql = (
             f"SELECT * FROM `{backend.project_id}.{backend.dataset_id}.v_capacity_hourly_burndown_export` "  # noqa: S608
             "ORDER BY timestamp, tenant, model, finops_traffic_type, serving_traffic_type"
         )
         return [_mapping_to_hourly_row(r) for r in backend.run_query(sql)]
-    return evaluate_hourly_burndown_in_sqlite(spans)
+    return [_mapping_to_hourly_row(r) for r in backend.evaluate_hourly_burndown_dicts(spans)]

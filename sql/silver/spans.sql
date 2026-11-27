@@ -43,28 +43,16 @@ CREATE OR REPLACE TABLE FUNCTION `${PROJECT_ID}.${SILVER_INTERNAL_DATASET}.spans
     WHERE s.start_time >= TIMESTAMP_SUB(from_time, INTERVAL ${READ_MARGIN_MINUTES} MINUTE)
       AND s.start_time < TIMESTAMP_ADD(to_time, INTERVAL ${READ_MARGIN_MINUTES} MINUTE)
   ),
-  deduped_per_place AS (
-    SELECT
-      r.*,
-      COUNT(*) OVER (PARTITION BY r.landing_place, r.trace_id, r.span_id) - 1 AS place_dup_count,
-      ROW_NUMBER() OVER (
-        PARTITION BY r.landing_place, r.trace_id, r.span_id
-        ORDER BY r.receive_time DESC, r.end_time DESC, r.span_id ASC
-      ) AS place_rn
-    FROM raw_union AS r
-  ),
   deduped_across_places AS (
     SELECT
-      d.*,
-      SUM(d.place_dup_count) OVER (PARTITION BY d.trace_id, d.span_id)
-        + (COUNT(*) OVER (PARTITION BY d.trace_id, d.span_id) - 1) AS duplicate_count,
+      r.*,
+      COUNT(*) OVER (PARTITION BY r.trace_id, r.span_id) - 1 AS duplicate_count,
       ROW_NUMBER() OVER (
-        PARTITION BY d.trace_id, d.span_id
-        ORDER BY CASE WHEN d.source_class = 'platform' THEN 0 WHEN d.source_class = 'application' THEN 1 ELSE 2 END,
-          d.receive_time DESC, d.end_time DESC
+        PARTITION BY r.trace_id, r.span_id
+        ORDER BY CASE WHEN r.source_class = 'platform' THEN 0 WHEN r.source_class = 'application' THEN 1 ELSE 2 END,
+          r.receive_time DESC, r.end_time DESC, r.span_id ASC
       ) AS cross_rn
-    FROM deduped_per_place AS d
-    WHERE d.place_rn = 1
+    FROM raw_union AS r
   ),
   in_window AS (
     SELECT *
@@ -75,7 +63,7 @@ CREATE OR REPLACE TABLE FUNCTION `${PROJECT_ID}.${SILVER_INTERNAL_DATASET}.spans
     )
     WHERE trace_first_start_time >= from_time AND trace_first_start_time < to_time
   ),
-  -- Narrow 6-column tree for 6-hop innermost token-span ancestor detection (matches model_calls depth).
+  -- Narrow tree for innermost token-span ancestor detection without deep self-join fan-out.
   span_tree AS (
     SELECT
       trace_id, span_id, parent_span_id, span_name,
@@ -96,20 +84,12 @@ CREATE OR REPLACE TABLE FUNCTION `${PROJECT_ID}.${SILVER_INTERNAL_DATASET}.spans
       SELECT
         t.trace_id,
         CASE WHEN t.has_tok OR (p1.span_name = 'call_llm' AND t.op_name = 'generate_content') THEN t.parent_span_id END AS a1,
-        CASE WHEN t.has_tok THEN p1.parent_span_id END AS a2,
-        CASE WHEN t.has_tok THEN p2.parent_span_id END AS a3,
-        CASE WHEN t.has_tok THEN p3.parent_span_id END AS a4,
-        CASE WHEN t.has_tok THEN p4.parent_span_id END AS a5,
-        CASE WHEN t.has_tok THEN p5.parent_span_id END AS a6
+        CASE WHEN t.has_tok THEN p1.parent_span_id END AS a2
       FROM span_tree AS t
       LEFT JOIN span_tree AS p1 ON p1.trace_id = t.trace_id AND p1.span_id = t.parent_span_id
-      LEFT JOIN span_tree AS p2 ON p2.trace_id = t.trace_id AND p2.span_id = p1.parent_span_id
-      LEFT JOIN span_tree AS p3 ON p3.trace_id = t.trace_id AND p3.span_id = p2.parent_span_id
-      LEFT JOIN span_tree AS p4 ON p4.trace_id = t.trace_id AND p4.span_id = p3.parent_span_id
-      LEFT JOIN span_tree AS p5 ON p5.trace_id = t.trace_id AND p5.span_id = p4.parent_span_id
       WHERE t.has_tok OR t.op_name = 'generate_content'
     ) AS anc
-    CROSS JOIN UNNEST(JSON_VALUE_ARRAY(JSON_ARRAY(anc.a1, anc.a2, anc.a3, anc.a4, anc.a5, anc.a6))) AS ancestor_span_id
+    CROSS JOIN UNNEST(JSON_VALUE_ARRAY(JSON_ARRAY(anc.a1, anc.a2))) AS ancestor_span_id
     WHERE ancestor_span_id IS NOT NULL AND ancestor_span_id != ''
   ),
   adk_parents AS (
@@ -211,7 +191,7 @@ CREATE OR REPLACE TABLE FUNCTION `${PROJECT_ID}.${SILVER_INTERNAL_DATASET}.spans
       JSON_VALUE(w.attributes, '$."outcome.parent_id"') AS outcome_parent_id,
       JSON_VALUE(w.attributes, '$."bq_eval.client_request_id"') AS client_request_id,
       JSON_VALUE(w.attributes, '$."gen_ai.response.id"') AS response_id,
-      JSON_VALUE(w.attributes, '$."bq_eval.previous_interaction_id"') AS previous_interaction_id,
+      COALESCE(JSON_VALUE(w.attributes, '$."bq_eval.previous_interaction_id"'), JSON_VALUE(w.attributes, '$."gen_ai.request.previous_interaction_id"')) AS previous_interaction_id,
       JSON_VALUE(w.attributes, '$."bq_eval.workspace_session_id"') AS workspace_session_id,
       JSON_VALUE(w.attributes, '$."bq_eval.shadow_of_trace_id"') AS shadow_of_trace_id,
       JSON_VALUE(w.attributes, '$."bq_eval.experiment_id"') AS experiment_id,

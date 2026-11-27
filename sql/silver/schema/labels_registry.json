@@ -13,21 +13,22 @@
     "traces_open": {"dataset": "silver_open", "grain": "trace_id", "window_parameters": ["from_time", "to_time"], "open_twin": null},
     "outcomes": {"dataset": "silver_restricted", "grain": "outcome_id", "window_parameters": ["from_time", "to_time"], "open_twin": "outcomes_open"},
     "outcomes_open": {"dataset": "silver_open", "grain": "outcome_id", "window_parameters": ["from_time", "to_time"], "open_twin": null},
-    "outcome_links": {"dataset": "silver_open", "grain": "(primary_outcome_id, linked_outcome_id)", "window_parameters": ["from_time", "to_time"], "open_twin": null}
+    "outcome_links": {"dataset": "silver_open", "grain": "(primary_outcome_id, linked_outcome_id)", "window_parameters": ["from_time", "to_time"], "open_twin": null},
+    "requests": {"dataset": "silver_open", "grain": "(client_request_id, span_id, attempt_index)", "window_parameters": ["from_time", "to_time"], "open_twin": null}
   },
   "registered_label_keys": [
     {"key": "apphub_service_id", "source_attribute": "apphub.service.id", "value_type": "STRING", "open_safe": true, "objects": ["spans", "model_calls", "traces", "traces_open", "trace_payloads"]},
     {"key": "apphub_workload_id", "source_attribute": "apphub.workload.id", "value_type": "STRING", "open_safe": true, "objects": ["spans", "model_calls", "traces", "traces_open", "trace_payloads"]},
-    {"key": "service_name", "source_attribute": "service.name", "value_type": "STRING", "open_safe": true, "objects": ["spans", "model_calls", "tool_calls", "tool_calls_open", "traces", "traces_open", "trace_payloads"]},
-    {"key": "telemetry_environment", "source_attribute": "deployment.environment.name", "value_type": "STRING", "open_safe": true, "objects": ["spans", "model_calls", "traces", "traces_open", "trace_payloads"]},
-    {"key": "cloud_provider", "source_attribute": "cloud.provider", "value_type": "STRING", "open_safe": true, "objects": ["spans", "model_calls", "traces", "traces_open", "trace_payloads"]},
-    {"key": "cloud_region", "source_attribute": "cloud.region", "value_type": "STRING", "open_safe": true, "objects": ["spans", "model_calls", "traces", "traces_open", "trace_payloads"]},
+    {"key": "service_name", "source_attribute": "service.name", "value_type": "STRING", "open_safe": true, "objects": ["spans", "model_calls", "tool_calls", "tool_calls_open", "traces", "traces_open", "trace_payloads", "requests"]},
+    {"key": "telemetry_environment", "source_attribute": "deployment.environment.name", "value_type": "STRING", "open_safe": true, "objects": ["spans", "model_calls", "traces", "traces_open", "trace_payloads", "requests"]},
+    {"key": "cloud_provider", "source_attribute": "cloud.provider", "value_type": "STRING", "open_safe": true, "objects": ["spans", "model_calls", "traces", "traces_open", "trace_payloads", "requests"]},
+    {"key": "cloud_region", "source_attribute": "cloud.region", "value_type": "STRING", "open_safe": true, "objects": ["spans", "model_calls", "traces", "traces_open", "trace_payloads", "requests"]},
     {"key": "cloud_account_id", "source_attribute": "cloud.account.id", "value_type": "STRING", "open_safe": false, "objects": ["spans", "traces", "trace_payloads"]},
     {"key": "agent_version", "source_attribute": "gen_ai.agent.version", "value_type": "STRING", "open_safe": true, "objects": ["spans", "model_calls", "tool_calls", "tool_calls_open", "traces", "traces_open", "trace_payloads"]},
     {"key": "agent_description", "source_attribute": "gen_ai.agent.description", "value_type": "STRING", "open_safe": true, "objects": ["spans", "traces", "traces_open", "trace_payloads"]},
     {"key": "workflow_name", "source_attribute": "gen_ai.workflow.name", "value_type": "STRING", "open_safe": true, "objects": ["spans", "traces", "traces_open", "trace_payloads"]},
-    {"key": "prompt_name", "source_attribute": "gen_ai.prompt.name", "value_type": "STRING", "open_safe": true, "objects": ["spans", "model_calls", "tool_calls", "tool_calls_open", "traces", "traces_open", "trace_payloads"]},
-    {"key": "prompt_version", "source_attribute": "gen_ai.prompt.version", "value_type": "STRING", "open_safe": true, "objects": ["spans", "model_calls", "tool_calls", "tool_calls_open", "traces", "traces_open", "trace_payloads"]},
+    {"key": "prompt_name", "source_attribute": "gen_ai.prompt.name", "value_type": "STRING", "open_safe": true, "objects": ["spans", "model_calls", "tool_calls", "tool_calls_open", "traces", "traces_open", "trace_payloads", "requests"]},
+    {"key": "prompt_version", "source_attribute": "gen_ai.prompt.version", "value_type": "STRING", "open_safe": true, "objects": ["spans", "model_calls", "tool_calls", "tool_calls_open", "traces", "traces_open", "trace_payloads", "requests"]},
     {"key": "finish_reasons_all", "source_attribute": "gen_ai.response.finish_reasons", "value_type": "JSON", "open_safe": true, "objects": ["spans", "model_calls"]},
     {"key": "tool_type", "source_attribute": "gen_ai.tool.type", "value_type": "STRING", "open_safe": true, "objects": ["spans", "tool_calls", "tool_calls_open"]},
     {"key": "tool_description", "source_attribute": "gen_ai.tool.description", "value_type": "STRING", "open_safe": false, "objects": ["spans", "tool_calls"]},
@@ -45,6 +46,7 @@
     {"key": "adk_invocation_id", "source_attribute": "gcp.vertex.agent.invocation_id", "value_type": "STRING", "open_safe": true, "objects": ["spans", "traces", "traces_open", "trace_payloads"]},
     {"key": "adk_event_id", "source_attribute": "gcp.vertex.agent.event_id", "value_type": "STRING", "open_safe": true, "objects": ["spans", "model_calls", "tool_calls", "tool_calls_open"]},
     {"key": "telemetry_sdk_name", "source_attribute": "telemetry.sdk.name", "value_type": "STRING", "open_safe": true, "objects": ["spans", "traces", "traces_open", "trace_payloads"]},
-    {"key": "telemetry_sdk_version", "source_attribute": "telemetry.sdk.version", "value_type": "STRING", "open_safe": true, "objects": ["spans", "traces", "traces_open", "trace_payloads"]}
+    {"key": "telemetry_sdk_version", "source_attribute": "telemetry.sdk.version", "value_type": "STRING", "open_safe": true, "objects": ["spans", "traces", "traces_open", "trace_payloads"]},
+    {"key": "request_type_header", "source_attribute": "request_type_header", "value_type": "STRING", "open_safe": true, "objects": ["requests"]}
   ]
 }

@@ -1,4 +1,4 @@
-"""Pure-SQLite statistical calibration parity, boundary-safe CIs, and Step-1 outcome guards."""
+"""Gold-on-Silver statistical calibration parity, boundary-safe CIs, ADR-049 agreement gates & outcome guards."""
 
 from __future__ import annotations
 
@@ -16,6 +16,7 @@ from bq_eval.core.contract.results import ConfusionMatrix
 from bq_eval.core.engine.calibration import (
     build_calibration_result,
     compute_gwet_ac2,
+    evaluate_calibration_agreement_gate,
     rogan_gladen_calibrate,
     rogan_gladen_wilson_ci,
     stratified_rogan_gladen_calibrate,
@@ -23,7 +24,6 @@ from bq_eval.core.engine.calibration import (
 from bq_eval.core.engine.sql_eval import (
     build_ai_evaluate_agent_sql,
     build_ai_generate_table_judge_sql,
-    evaluate_traces_in_sqlite,
 )
 from bq_eval.demo.golden_seeds import build_golden_seed_templates
 from bq_eval.demo.loadgen import evaluate_time_shifted_corpus, generate_time_shifted_corpus
@@ -32,11 +32,11 @@ from bq_eval.finops.engine.spend import (
     allocate_focus_two_pool_chargeback,
     compute_pareto_frontier,
 )
-from tests.conftest import make_span
+from tests.conftest import eval_traces, make_span, open_runner_for_spans, seed_sme_confusion
 
 
-def test_pure_sqlite_rogan_gladen_and_gwet_ac2_exact_parity() -> None:
-    """Pure SQLite views must match Python Rogan-Gladen + 95% CI + Gwet's AC2 within 1e-12."""
+def test_silver_gold_rogan_gladen_and_gwet_ac2_exact_parity() -> None:
+    """Silver + Gold SQL views match Python Rogan-Gladen + 95% CI + Gwet's AC2 within 1e-12."""
     spans = [make_span(f"trace-cal-{i:03d}", f"span-cal-{i:03d}", offset_s=i) for i in range(25)]
     judge_outcomes = {f"trace-cal-{i:03d}": (i < 22) for i in range(25)}
     sme_pairs: list[tuple[int, int]] = [
@@ -64,12 +64,11 @@ def test_pure_sqlite_rogan_gladen_and_gwet_ac2_exact_parity() -> None:
     human_scores = [h for h, _ in sme_pairs]
     judge_scores = [j for _, j in sme_pairs]
 
-    summaries = evaluate_traces_in_sqlite(
+    summary = eval_traces(
         spans=spans,
         judge_outcomes=judge_outcomes,
         sme_ordinal_pairs=sme_pairs,
-    )
-    summary = summaries["critical-app"]
+    )["critical-app"]
 
     py_cal = build_calibration_result(
         human_ordinal_scores=human_scores,
@@ -95,15 +94,15 @@ def test_pure_sqlite_rogan_gladen_and_gwet_ac2_exact_parity() -> None:
     )
 
 
-def test_uncalibrated_youden_j_guard_in_python_and_sqlite() -> None:
-    """When Youden's J <= 1e-6, Python raises ValueError and SQLite fails closed to UNCALIBRATED."""
+def test_uncalibrated_youden_j_guard_in_python_and_sql() -> None:
+    """When Youden's J <= 1e-6, Python raises ValueError and Gold SQL fails closed to UNCALIBRATED."""
     uncalibrated_cm = ConfusionMatrix(tp=5, fn=5, tn=5, fp=5)
     with pytest.raises(ValueError, match="uncalibrated"):
         rogan_gladen_calibrate(observed_pass_rate=0.80, sample_size=20, confusion=uncalibrated_cm)
 
-    spans = [make_span(f"tr-unc-{i}", f"sp-unc-{i}", offset_s=i) for i in range(5)]
-    outcomes = {f"tr-unc-{i}": True for i in range(5)}
-    summary = evaluate_traces_in_sqlite(
+    spans = [make_span(f"tr-unc-{i}", f"sp-unc-{i}", offset_s=i) for i in range(12)]
+    outcomes = {f"tr-unc-{i}": True for i in range(12)}
+    summary = eval_traces(
         spans=spans,
         judge_outcomes=outcomes,
         sme_confusion=uncalibrated_cm,
@@ -115,7 +114,7 @@ def test_uncalibrated_youden_j_guard_in_python_and_sqlite() -> None:
     assert summary.cost_per_verified_outcome_usd is None
 
 
-def test_sqlite_rule0_tool_loop_and_template16_real_9_tool_spans() -> None:
+def test_rule0_tool_loop_and_template16_real_9_tool_spans() -> None:
     """Template 16 emits 9 OK execute_tool spans and fails Step 1 strictly via tool_call_count <= 8."""
     templates = build_golden_seed_templates()
     t16 = next(t for t in templates if t.base_trace_id == "seed-audit-004")
@@ -132,7 +131,7 @@ def test_sqlite_rule0_tool_loop_and_template16_real_9_tool_spans() -> None:
     )
     assert len(spans) == 33 * 2
     t16_spans = [s for s in spans if s.trace_id.startswith("seed-audit-004-r001")]
-    summary = evaluate_traces_in_sqlite(spans=t16_spans)["unregistered_app"]
+    summary = eval_traces(spans=t16_spans)["unregistered_app"]
     assert summary.rule0_pass_rate == 0.0
     assert summary.tool_success_rate == 1.0
 
@@ -142,7 +141,7 @@ def test_sqlite_rule0_tool_loop_and_template16_real_9_tool_spans() -> None:
 
 
 def test_numeric_gates_fail_closed_on_nan_negative_and_out_of_range() -> None:
-    """Numeric gates reject NaN/Inf/negative inputs and out-of-category AC2 scores."""
+    """Numeric gates reject NaN/Inf/negative inputs, out-of-category AC2 scores, and propagate StratPPI variance."""
     with pytest.raises(ValidationError):
         ModelOption(
             config_id="nan-opt",
@@ -166,7 +165,7 @@ def test_numeric_gates_fail_closed_on_nan_negative_and_out_of_range() -> None:
     with pytest.raises(ValueError, match="min_rule0_pass_rate"):
         compute_pareto_frontier([], min_rule0_pass_rate=float("nan"))
 
-    with pytest.raises(ValueError, match="outside allowed categories"):
+    with pytest.raises(ValueError, match="outside allowed integer categories"):
         compute_gwet_ac2([5, 5, 0, 7], [5, 5, 0, 7])
 
     with pytest.raises(ValueError, match="finite and non-negative"):
@@ -177,9 +176,6 @@ def test_numeric_gates_fail_closed_on_nan_negative_and_out_of_range() -> None:
             reserved_pt_fixed_cost_usd=100.0,
         )
 
-
-def test_stratified_wilson_plugin_propagates_stratified_variance() -> None:
-    """20:1 tail-sampling StratPPI variance must propagate into `wilson_plugin` CIs."""
     cm = ConfusionMatrix(tp=87, fn=2, tn=7, fp=4)
     strata_unequal = [(950, 50, 48), (50, 50, 10)]
     res_wilson = stratified_rogan_gladen_calibrate(strata_unequal, cm, ci_method="wilson_plugin")
@@ -193,74 +189,11 @@ def test_stratified_wilson_plugin_propagates_stratified_variance() -> None:
         rogan_gladen_wilson_ci(0.8, 100, cm, stratified_var_p_obs=-0.01)
 
 
-def _run_transpiled_summary_for_app(
-    spans: list[OTelGenAISpanRecord],
-    eval_rows: list[tuple[str, str, bool]],
-    cm: ConfusionMatrix,
-    *,
-    app_id: str,
-    rubric_id: str = "groundedness_4pt_v1",
-) -> dict[str, str | int | float | None]:
-    from tests.sql_helpers import (
-        ENTERPRISE_EVAL_RESULTS_BASE_INSERT,
-        _create_enterprise_sqlite_fixture,
-        _install_enterprise_views,
-        _new_sqlite_bq_conn,
-        insert_enterprise_sqlite_span,
-    )
-
-    conn = _new_sqlite_bq_conn()
-    _create_enterprise_sqlite_fixture(conn)
-    _install_enterprise_views(conn)
-    for sp in spans:
-        insert_enterprise_sqlite_span(conn, sp)
-    ts = datetime(2026, 11, 21, 13, 0, 0, tzinfo=UTC)
-    conn.executemany(
-        ENTERPRISE_EVAL_RESULTS_BASE_INSERT,
-        [
-            (
-                f"ev-{idx}",
-                "run-test",
-                tid,
-                None,
-                app_id,
-                rubric_id,
-                "gemini-3.8-flash",
-                stratum,
-                1,
-                "rationale",
-                4 if passed else 2,
-                1 if passed else 0,
-                1000,
-                100,
-                0,
-                (ts + timedelta(seconds=idx)).isoformat(),
-            )
-            for idx, (tid, stratum, passed) in enumerate(eval_rows)
-        ],
-    )
-    sme_rows = (
-        [(app_id, rubric_id, 1, 4, 1, 4, 1)] * cm.tp
-        + [(app_id, rubric_id, 1, 4, 1, 2, 0)] * cm.fn
-        + [(app_id, rubric_id, 1, 1, 0, 1, 0)] * cm.tn
-        + [(app_id, rubric_id, 1, 1, 0, 4, 1)] * cm.fp
-    )
-    conn.executemany("INSERT INTO sme_labels VALUES (?,?,?,?,?,?,?)", sme_rows)
-    row = conn.execute(
-        "SELECT * FROM v_agent_eval_and_finops_summary WHERE apphub_application_id = ?",
-        (app_id,),
-    ).fetchone()
-    conn.close()
-    assert row is not None
-    return dict(row)
-
-
 def test_unjudged_stratum_fails_closed() -> None:
-    """Any unjudged or mismatched sampling stratum fails closed to NULL / UNCALIBRATED (A-1)."""
+    """Any unjudged population stratum fails closed to NULL / UNCALIBRATED (`A-1`, `A-15`)."""
     base = datetime(2026, 11, 21, 12, 0, 0, tzinfo=UTC)
     cm = ConfusionMatrix(tp=87, fn=2, tn=7, fp=4)
 
-    # 20 healthy traces (unjudged) + 12 slow traces (all judged failing) -> MUST NOT report 0% CALIBRATED
     spans = [
         make_span(
             f"tr-healthy-{i:02d}",
@@ -282,67 +215,19 @@ def test_unjudged_stratum_fails_closed() -> None:
         )
         for i in range(12)
     ]
-    judge_outcomes = {f"tr-slow-{i:02d}": False for i in range(12)}
-    sampling_strata = {f"tr-slow-{i:02d}": "ERROR_OR_SLA_TAIL" for i in range(12)}
-
-    sqlite_res = evaluate_traces_in_sqlite(
+    res = eval_traces(
         spans=spans,
-        judge_outcomes=judge_outcomes,
+        judge_outcomes={f"tr-slow-{i:02d}": False for i in range(12)},
         sme_confusion=cm,
-        sampling_strata=sampling_strata,
+        sampling_strata={f"tr-slow-{i:02d}": "ERROR_OR_SLA_TAIL" for i in range(12)},
         sla_latency_ms=5000.0,
     )["unjudged-stratum-app"]
-    bq_res = _run_transpiled_summary_for_app(
-        spans,
-        [(f"tr-slow-{i:02d}", "ERROR_OR_SLA_TAIL", False) for i in range(12)],
-        cm,
-        app_id="unjudged-stratum-app",
-    )
 
-    assert sqlite_res.judged_samples == 12
-    assert sqlite_res.raw_judge_pass_rate is None
-    assert sqlite_res.calibration_status == "UNCALIBRATED"
-    assert sqlite_res.calibrated_pass_rate is None
-    assert sqlite_res.calibrated_ci_95_lower is None
-    assert sqlite_res.calibrated_ci_95_upper is None
-    assert sqlite_res.cost_per_verified_outcome_usd is None
-
-    assert bq_res["judged_samples"] == 12
-    assert bq_res["raw_judge_pass_rate"] is None
-    assert bq_res["calibration_status"] == "UNCALIBRATED"
-    assert bq_res["calibrated_pass_rate"] is None
-    assert bq_res["calibrated_ci_95_lower"] is None
-    assert bq_res["calibrated_ci_95_upper"] is None
-    assert bq_res["cost_per_verified_outcome_usd"] is None
-
-    # Mismatched stored stratum (population is all HEALTHY_POPULATION, eval_results says ERROR_OR_SLA_TAIL)
-    healthy_only = [
-        make_span(
-            f"tr-mismatch-{i:02d}",
-            f"sp-mismatch-{i:02d}",
-            app_id="mismatch-app",
-            latency_ms=500.0,
-            offset_s=i,
-            base_time=base,
-        )
-        for i in range(12)
-    ]
-    mismatch_sqlite = evaluate_traces_in_sqlite(
-        spans=healthy_only,
-        judge_outcomes={f"tr-mismatch-{i:02d}": True for i in range(12)},
-        sme_confusion=cm,
-        sampling_strata={f"tr-mismatch-{i:02d}": "ERROR_OR_SLA_TAIL" for i in range(12)},
-    )["mismatch-app"]
-    mismatch_bq = _run_transpiled_summary_for_app(
-        healthy_only,
-        [(f"tr-mismatch-{i:02d}", "ERROR_OR_SLA_TAIL", True) for i in range(12)],
-        cm,
-        app_id="mismatch-app",
-    )
-    assert mismatch_sqlite.calibration_status == "UNCALIBRATED"
-    assert mismatch_sqlite.raw_judge_pass_rate is None
-    assert mismatch_bq["calibration_status"] == "UNCALIBRATED"
-    assert mismatch_bq["raw_judge_pass_rate"] is None
+    assert res.judged_samples == 12
+    assert res.raw_judge_pass_rate is None
+    assert res.calibration_status == "UNCALIBRATED"
+    assert res.calibrated_pass_rate is None
+    assert res.cost_per_verified_outcome_usd is None
 
     with pytest.raises(ValueError, match="Unjudged population stratum"):
         stratified_rogan_gladen_calibrate([(20, 0, 0), (12, 12, 0)], cm)
@@ -352,11 +237,171 @@ def test_unjudged_stratum_fails_closed() -> None:
         build_ai_evaluate_agent_sql(project_id="demo-proj", canary_sample_pct=0)
 
 
-def test_boundary_interval_not_degenerate() -> None:
-    """Lang & Reiczigel (2014) CI never collapses at 100%/0% boundaries and enforces min-n (A-2)."""
+def test_judged_exceeding_population_fails_closed() -> None:
+    """`A-15`: Orphan `eval_results` trace IDs or `judged_n > pop_n` fail closed to UNCALIBRATED / NULL."""
     base = datetime(2026, 11, 21, 12, 0, 0, tzinfo=UTC)
+    cm = ConfusionMatrix(tp=87, fn=2, tn=7, fp=4)
+    with pytest.raises(ValueError, match="cannot exceed population_count"):
+        stratified_rogan_gladen_calibrate([(10, 11, 10)], cm)
 
-    # 15/15 passing with 87/2/7/4 SME matrix (matches golden-4app underwriting boundary)
+    spans = [
+        make_span(
+            f"tr-pop-{i:02d}", f"sp-pop-{i:02d}", app_id="orphan-app", offset_s=i, base_time=base
+        )
+        for i in range(10)
+    ]
+    with open_runner_for_spans(spans) as runner:
+        eval_rows = [
+            {
+                "eval_id": f"ev-pop-{i:02d}",
+                "eval_run_id": "run-orphan",
+                "trace_id": f"tr-pop-{i:02d}",
+                "apphub_application_id": "orphan-app",
+                "rubric_id": "groundedness_4pt_v1",
+                "judge_model": "gemini-3.8-flash",
+                "sampling_stratum": "CANARY_5PCT",
+                "rule0_pass": True,
+                "ordinal_score": 4,
+                "binary_pass": True,
+                "judge_status": "SCORED",
+                "judge_input_tokens": 500,
+                "judge_output_tokens": 50,
+                "judge_thinking_tokens": 0,
+                "evaluated_at": "2026-11-21T12:05:00+00:00",
+            }
+            for i in range(10)
+        ]
+        eval_rows.append(
+            {
+                **eval_rows[0],
+                "eval_id": "ev-orphan-extra",
+                "trace_id": "tr-nonexistent-999",
+            }
+        )
+        runner.load_rows("agent_eval.eval_results", eval_rows, append=True)
+        seed_sme_confusion(runner, "orphan-app", cm)
+        row = runner.query(
+            "SELECT calibration_status, raw_judge_pass_rate, calibrated_pass_rate "
+            "FROM `agent_eval.v_agent_eval_and_finops_summary` "
+            "WHERE apphub_application_id = 'orphan-app'"
+        ).rows[0]
+    assert row["calibration_status"] == "UNCALIBRATED"
+    assert row["raw_judge_pass_rate"] is None
+    assert row["calibrated_pass_rate"] is None
+
+
+def test_agreement_gate_minimum_pairs_and_status() -> None:
+    """`A-13` / `A-18`: `passes_irr_gate = FALSE` blocks `CALIBRATED`, enforces `RL-1 >= 100`, and flags `STALE_CALIBRATION`."""
+    base = datetime(2026, 11, 21, 12, 0, 0, tzinfo=UTC)
+    spans = [
+        make_span(
+            f"tr-irr-{i:02d}", f"sp-irr-{i:02d}", app_id="irr-app", offset_s=i, base_time=base
+        )
+        for i in range(15)
+    ]
+    # Binary TPR=TNR=1.0 via confusion matrix, but only 6 ordinal pairs (< 10 minimum) -> fails closed!
+    short_pairs_res = eval_traces(
+        spans=spans,
+        judge_outcomes={f"tr-irr-{i:02d}": True for i in range(15)},
+        sme_confusion=ConfusionMatrix(tp=10, fn=0, tn=10, fp=0),
+        sme_ordinal_pairs=[(4, 4), (4, 4), (4, 4), (1, 1), (1, 1), (1, 1)],
+    )["irr-app"]
+    assert short_pairs_res.passes_irr_gate is False
+    assert short_pairs_res.calibration_status == "UNCALIBRATED"
+    assert short_pairs_res.calibrated_pass_rate is None
+
+    # Dual-SME disagreement (`sme_vs_sme_ac2 < 0.80`), dual-SME floor `< min_pairs`, & `STALE_CALIBRATION`
+    gate_dual_fail = evaluate_calibration_agreement_gate(
+        [4] * 10 + [1] * 10,
+        [4] * 10 + [1] * 10,
+        rater_a_ordinal_scores=[4, 1] * 10,
+        rater_b_ordinal_scores=[1, 4] * 10,
+    )
+    assert gate_dual_fail.passes_irr_gate is False
+    gate_dual_short = evaluate_calibration_agreement_gate(
+        [4] * 10 + [1] * 10,
+        [4] * 10 + [1] * 10,
+        rater_a_ordinal_scores=[4] * 4 + [1] * 4,
+        rater_b_ordinal_scores=[4] * 4 + [1] * 4,
+    )
+    assert gate_dual_short.passes_irr_gate is False
+
+    with open_runner_for_spans(spans) as runner:
+        runner.load_rows(
+            "agent_eval.eval_results",
+            [
+                {
+                    "eval_id": f"ev-st-{i:02d}",
+                    "eval_run_id": "run-st",
+                    "trace_id": f"tr-irr-{i:02d}",
+                    "apphub_application_id": "irr-app",
+                    "rubric_id": "groundedness_4pt_v1",
+                    "judge_model": "gemini-3.8-flash",
+                    "judge_model_snapshot_id": "gemini-3.8-flash@2026-12",
+                    "sampling_stratum": "CANARY_5PCT",
+                    "rule0_pass": True,
+                    "ordinal_score": 4,
+                    "binary_pass": True,
+                    "judge_status": "SCORED",
+                    "judge_input_tokens": 500,
+                    "judge_output_tokens": 50,
+                    "judge_thinking_tokens": 0,
+                    "evaluated_at": "2026-11-21T12:05:00+00:00",
+                }
+                for i in range(15)
+            ],
+            append=True,
+        )
+        runner.load_rows(
+            "agent_eval.sme_labels",
+            [
+                {
+                    "label_id": f"sme-st-{i}",
+                    "trace_id": f"sme-tr-{i}",
+                    "apphub_application_id": "irr-app",
+                    "rubric_id": "groundedness_4pt_v1",
+                    "rater_id": "abbott_sme",
+                    "rule0_pass": True,
+                    "human_ordinal_score": 4 if i < 10 else 1,
+                    "human_pass": i < 10,
+                    "judge_ordinal_score": 4 if i < 10 else 1,
+                    "judge_pass": i < 10,
+                    "judge_model_snapshot_id": "gemini-3.8-flash@2026-10",
+                    "labeled_at": "2026-11-21T12:00:00+00:00",
+                }
+                for i in range(20)
+            ],
+            append=True,
+        )
+        stale_row = runner.query(
+            "SELECT calibration_status, calibrated_pass_rate "
+            "FROM `agent_eval.v_agent_eval_and_finops_summary` "
+            "WHERE apphub_application_id = 'irr-app'"
+        ).rows[0]
+    assert stale_row["calibration_status"] == "STALE_CALIBRATION"
+    assert stale_row["calibrated_pass_rate"] is None
+
+
+def test_python_calibration_enforces_minimum_samples() -> None:
+    """`A-16`: `rogan_gladen_calibrate` enforces `MIN_CALIBRATED_*` and `RL-1 >= 100` sample floors."""
+    cm_valid = ConfusionMatrix(tp=87, fn=2, tn=7, fp=4)
+    with pytest.raises(ValueError, match="sample_size"):
+        rogan_gladen_calibrate(0.9, 9, cm_valid)
+    with pytest.raises(ValueError, match="positive and 5 negative"):
+        rogan_gladen_calibrate(0.9, 15, ConfusionMatrix(tp=4, fn=0, tn=10, fp=0))
+    with pytest.raises(ValueError, match="positive and 5 negative"):
+        rogan_gladen_calibrate(0.9, 15, ConfusionMatrix(tp=10, fn=0, tn=4, fp=0))
+    with pytest.raises(ValueError, match=">= 100"):
+        rogan_gladen_calibrate(0.9, 50, cm_valid, risk_tier="RL-1")
+    with pytest.raises(ValueError, match=">= 100 paired labels"):
+        rogan_gladen_calibrate(
+            0.9, 120, ConfusionMatrix(tp=40, fn=0, tn=40, fp=0), risk_tier="RL-1"
+        )
+
+
+def test_boundary_interval_not_degenerate() -> None:
+    """Lang & Reiczigel (2014) CI never collapses at 100%/0% boundaries and enforces min-n (`A-2`)."""
+    base = datetime(2026, 11, 21, 12, 0, 0, tzinfo=UTC)
     cm_std = ConfusionMatrix(tp=87, fn=2, tn=7, fp=4)
     spans_15 = [
         make_span(
@@ -364,26 +409,16 @@ def test_boundary_interval_not_degenerate() -> None:
         )
         for i in range(15)
     ]
-    sq_15 = evaluate_traces_in_sqlite(
+    sq_15 = eval_traces(
         spans=spans_15,
         judge_outcomes={f"tr-b15-{i:02d}": True for i in range(15)},
         sme_confusion=cm_std,
     )["b15-app"]
-    bq_15 = _run_transpiled_summary_for_app(
-        spans_15,
-        [(f"tr-b15-{i:02d}", "CANARY_5PCT", True) for i in range(15)],
-        cm_std,
-        app_id="b15-app",
-    )
     py_15 = rogan_gladen_calibrate(1.0, 15, cm_std)
     assert sq_15.calibration_status == "CALIBRATED"
-    assert sq_15.calibrated_ci_95_lower is not None
-    assert bq_15["calibrated_ci_95_lower"] is not None
     assert sq_15.calibrated_ci_95_lower == pytest.approx(py_15.ci_95_lower, abs=1e-12)
-    assert float(bq_15["calibrated_ci_95_lower"]) == pytest.approx(py_15.ci_95_lower, abs=1e-12)
-    assert sq_15.calibrated_ci_95_lower < 0.70  # Lang & Reiczigel ~0.6204, never delta 0.9498
+    assert sq_15.calibrated_ci_95_lower is not None and sq_15.calibrated_ci_95_lower < 0.70
 
-    # 236/236 passing with 30/30 perfect reference agreement (tp=25, fn=0, tn=5, fp=0)
     cm_perf = ConfusionMatrix(tp=25, fn=0, tn=5, fp=0)
     spans_236 = [
         make_span(
@@ -391,71 +426,29 @@ def test_boundary_interval_not_degenerate() -> None:
         )
         for i in range(236)
     ]
-    sq_236 = evaluate_traces_in_sqlite(
+    sq_236 = eval_traces(
         spans=spans_236,
         judge_outcomes={f"tr-b236-{i:03d}": True for i in range(236)},
         sme_confusion=cm_perf,
     )["b236-app"]
-    bq_236 = _run_transpiled_summary_for_app(
-        spans_236,
-        [(f"tr-b236-{i:03d}", "CANARY_5PCT", True) for i in range(236)],
-        cm_perf,
-        app_id="b236-app",
-    )
     py_236 = rogan_gladen_calibrate(1.0, 236, cm_perf)
-    assert sq_236.calibrated_ci_95_lower is not None
-    assert bq_236["calibrated_ci_95_lower"] is not None
     assert sq_236.calibrated_ci_95_lower == pytest.approx(py_236.ci_95_lower, abs=1e-12)
-    assert float(bq_236["calibrated_ci_95_lower"]) == pytest.approx(py_236.ci_95_lower, abs=1e-12)
-    assert 0.80 < sq_236.calibrated_ci_95_lower < 0.98
     assert sq_236.calibrated_ci_95_upper == pytest.approx(1.0, abs=1e-12)
 
-    # 0/20 passing with perfect reference -> non-degenerate upper bound > 0
     spans_20 = [
         make_span(
             f"tr-z20-{i:02d}", f"sp-z20-{i:02d}", app_id="z20-app", offset_s=i, base_time=base
         )
         for i in range(20)
     ]
-    sq_0 = evaluate_traces_in_sqlite(
+    sq_0 = eval_traces(
         spans=spans_20,
         judge_outcomes={f"tr-z20-{i:02d}": False for i in range(20)},
         sme_confusion=cm_perf,
     )["z20-app"]
-    bq_0 = _run_transpiled_summary_for_app(
-        spans_20,
-        [(f"tr-z20-{i:02d}", "CANARY_5PCT", False) for i in range(20)],
-        cm_perf,
-        app_id="z20-app",
-    )
     py_0 = rogan_gladen_calibrate(0.0, 20, cm_perf)
-    assert sq_0.calibrated_ci_95_upper is not None
-    assert bq_0["calibrated_ci_95_upper"] is not None
     assert sq_0.calibrated_ci_95_upper == pytest.approx(py_0.ci_95_upper, abs=1e-12)
-    assert float(bq_0["calibrated_ci_95_upper"]) == pytest.approx(py_0.ci_95_upper, abs=1e-12)
-    assert 0.05 < sq_0.calibrated_ci_95_upper < 0.50
-
-    # Minimum-n guard (3 judged + 2 ref, 9 judged + 100 ref, and 10 judged + 4 neg ref)
-    spans_3 = [
-        make_span(f"trace-s3-{i}", f"span-s3-{i}", app_id="small-app", offset_s=i, base_time=base)
-        for i in range(3)
-    ]
-    cm_tiny = ConfusionMatrix(tp=1, fn=0, tn=1, fp=0)
-    sq_small = evaluate_traces_in_sqlite(
-        spans=spans_3,
-        judge_outcomes={f"trace-s3-{i}": True for i in range(3)},
-        sme_confusion=cm_tiny,
-    )["small-app"]
-    bq_small = _run_transpiled_summary_for_app(
-        spans_3,
-        [(f"trace-s3-{i}", "CANARY_5PCT", True) for i in range(3)],
-        cm_tiny,
-        app_id="small-app",
-    )
-    assert sq_small.calibration_status == "UNCALIBRATED"
-    assert sq_small.calibrated_pass_rate is None
-    assert bq_small["calibration_status"] == "UNCALIBRATED"
-    assert bq_small["calibrated_pass_rate"] is None
+    assert sq_0.calibrated_ci_95_upper is not None and 0.05 < sq_0.calibrated_ci_95_upper < 0.50
 
     spans_10 = [
         make_span(
@@ -463,24 +456,28 @@ def test_boundary_interval_not_degenerate() -> None:
         )
         for i in range(10)
     ]
-    sq_9 = evaluate_traces_in_sqlite(
-        spans=spans_10[:9],
-        judge_outcomes={f"tr-s10-{i:02d}": True for i in range(9)},
-        sme_confusion=cm_std,
-    )["s10-app"]
-    assert sq_9.calibration_status == "UNCALIBRATED"
-    sq_low_neg = evaluate_traces_in_sqlite(
-        spans=spans_10,
-        judge_outcomes={f"tr-s10-{i:02d}": True for i in range(10)},
-        sme_confusion=ConfusionMatrix(tp=5, fn=0, tn=4, fp=0),
-    )["s10-app"]
-    assert sq_low_neg.calibration_status == "UNCALIBRATED"
+    assert (
+        eval_traces(
+            spans=spans_10[:9],
+            judge_outcomes={f"tr-s10-{i:02d}": True for i in range(9)},
+            sme_confusion=cm_std,
+        )["s10-app"].calibration_status
+        == "UNCALIBRATED"
+    )
+    assert (
+        eval_traces(
+            spans=spans_10,
+            judge_outcomes={f"tr-s10-{i:02d}": True for i in range(10)},
+            sme_confusion=ConfusionMatrix(tp=6, fn=0, tn=4, fp=0),
+        )["s10-app"].calibration_status
+        == "UNCALIBRATED"
+    )
 
 
 def test_negative_youden_j_stays_null() -> None:
-    """Negative Youden's J fails closed to NULL in SQLite/SQL, plus AC2 boundary & app-id guards (T-5)."""
+    """Negative Youden's J fails closed to NULL in SQL/Python, plus app-id fallback (`T-5`)."""
     base = datetime(2026, 11, 21, 12, 0, 0, tzinfo=UTC)
-    cm_neg = ConfusionMatrix(tp=4, fn=6, tn=4, fp=6)  # TPR=0.4, TNR=0.4, J=-0.2
+    cm_neg = ConfusionMatrix(tp=4, fn=6, tn=4, fp=6)
     spans = [
         make_span(
             f"tr-negj-{i:02d}", f"sp-negj-{i:02d}", app_id="negj-app", offset_s=i, base_time=base
@@ -488,79 +485,33 @@ def test_negative_youden_j_stays_null() -> None:
         for i in range(12)
     ]
     outcomes = {f"tr-negj-{i:02d}": (i < 9) for i in range(12)}
-    ordinal_pairs = [(4, 4), (4, 3), (3, 3), (2, 2), (1, 1)]
-    exact_ac2 = compute_gwet_ac2(
-        [h for h, _ in ordinal_pairs],
-        [j for _, j in ordinal_pairs],
-    )
+    ordinal_pairs = [(4, 4), (4, 3), (3, 3), (2, 2), (1, 1)] * 2
 
-    sq_neg = evaluate_traces_in_sqlite(
+    sq_neg = eval_traces(
         spans=spans,
         judge_outcomes=outcomes,
         sme_confusion=cm_neg,
         sme_ordinal_pairs=ordinal_pairs,
-        irr_threshold=exact_ac2,
     )["negj-app"]
-    bq_neg = _run_transpiled_summary_for_app(
-        spans,
-        [(f"tr-negj-{i:02d}", "CANARY_5PCT", i < 9) for i in range(12)],
-        cm_neg,
-        app_id="negj-app",
-    )
-
     assert sq_neg.calibration_status == "UNCALIBRATED"
     assert sq_neg.calibrated_pass_rate is None
-    assert sq_neg.calibrated_ci_95_lower is None
-    assert sq_neg.calibrated_ci_95_upper is None
     assert sq_neg.cost_per_verified_outcome_usd is None
     assert sq_neg.passes_irr_gate is True
 
-    sq_below_gate = evaluate_traces_in_sqlite(
-        spans=spans,
-        judge_outcomes=outcomes,
-        sme_confusion=cm_neg,
-        sme_ordinal_pairs=ordinal_pairs,
-        irr_threshold=exact_ac2 + 0.01,
-    )["negj-app"]
-    assert sq_below_gate.passes_irr_gate is False
-
-    assert bq_neg["calibration_status"] == "UNCALIBRATED"
-    assert bq_neg["calibrated_pass_rate"] is None
-    assert bq_neg["calibrated_ci_95_lower"] is None
-    assert bq_neg["calibrated_ci_95_upper"] is None
-
-    # Imbalanced negative J (-0.05) with positive Wilson-adjusted J (+0.052): kills raw-J guard removal
     cm_neg_imb = ConfusionMatrix(tp=0, fn=5, tn=19, fp=1)
-    sq_neg_imb = evaluate_traces_in_sqlite(
-        spans=spans, judge_outcomes=outcomes, sme_confusion=cm_neg_imb
-    )["negj-app"]
-    bq_neg_imb = _run_transpiled_summary_for_app(
-        spans,
-        [(f"tr-negj-{i:02d}", "CANARY_5PCT", i < 9) for i in range(12)],
-        cm_neg_imb,
-        app_id="negj-app",
-    )
+    sq_neg_imb = eval_traces(spans=spans, judge_outcomes=outcomes, sme_confusion=cm_neg_imb)[
+        "negj-app"
+    ]
     assert sq_neg_imb.calibration_status == "UNCALIBRATED"
     assert sq_neg_imb.calibrated_pass_rate is None
-    assert bq_neg_imb["calibration_status"] == "UNCALIBRATED"
-    assert bq_neg_imb["calibrated_pass_rate"] is None
 
     with pytest.raises(ValueError, match="uncalibrated after Wilson adjustment"):
         rogan_gladen_wilson_ci(0.75, 20, cm_neg)
-
     assert resolve_application_id(None, {"service.name": "self-reported-svc"}) == "unregistered_app"
 
 
 def test_outcome_requires_step1() -> None:
-    """Verified outcome requires trace Step-1 pass, explicit `succeeded`, fail-closed flag, and ANDed signals (A-4)."""
-    from tests.sql_helpers import (
-        ENTERPRISE_EVAL_RESULTS_BASE_INSERT,
-        _create_enterprise_sqlite_fixture,
-        _install_enterprise_views,
-        _new_sqlite_bq_conn,
-        insert_enterprise_sqlite_span,
-    )
-
+    """Verified outcome requires trace Step-1 pass, explicit `succeeded`, fail-closed flag, and ANDed signals (`A-4`)."""
     base = datetime(2026, 11, 21, 12, 0, 0, tzinfo=UTC)
     spans: list[OTelGenAISpanRecord] = []
 
@@ -570,7 +521,7 @@ def test_outcome_requires_step1() -> None:
         *,
         root_status: str = "OK",
         root_r0: bool = True,
-        close_attrs: dict[str, str],
+        close_attrs: dict[str, object],
     ) -> str:
         tid = f"trace-a4-{idx:02d}"
         spans.append(
@@ -608,7 +559,6 @@ def test_outcome_requires_step1() -> None:
         )
         return tid
 
-    # ERROR span in trace + succeeded/true close -> MUST NOT be verified
     tid_err = _add_outcome(
         1,
         "out-err-step1",
@@ -616,84 +566,76 @@ def test_outcome_requires_step1() -> None:
         root_r0=False,
         close_attrs={"outcome.status": "succeeded", "outcome.verified": "true"},
     )
-    # Missing outcome.status -> defaults to 'unknown', MUST NOT be verified
     _add_outcome(2, "out-missing-status", close_attrs={"outcome.verified": "true"})
-    # outcome.verified='false' + passing Step-2 judge -> judge pass MUST NOT override!
     tid_false_judged = _add_outcome(
         3,
         "out-false-judged",
         close_attrs={"outcome.status": "succeeded", "outcome.verified": "false"},
     )
-    # outcome.verified='0' -> fails closed (not treated as absent)
     _add_outcome(
         4, "out-flag-zero", close_attrs={"outcome.status": "succeeded", "outcome.verified": "0"}
     )
-    # outcome.verified='no' -> fails closed (not treated as absent)
     _add_outcome(
         5, "out-flag-no", close_attrs={"outcome.status": "succeeded", "outcome.verified": "no"}
     )
-    # Genuine clean trace + succeeded + verified='true' + judge pass -> verified!
     tid_clean = _add_outcome(
         6,
         "out-clean-pass",
         close_attrs={"outcome.status": "succeeded", "outcome.verified": "true"},
     )
 
-    conn = _new_sqlite_bq_conn()
-    _create_enterprise_sqlite_fixture(conn)
-    _install_enterprise_views(conn)
-    for sp in spans:
-        insert_enterprise_sqlite_span(conn, sp)
-    for ev_id, tid, oid in (
-        ("ev-a4-1", tid_false_judged, "out-false-judged"),
-        ("ev-a4-2", tid_err, "out-err-step1"),
-        ("ev-a4-3", tid_clean, "out-clean-pass"),
-    ):
-        conn.execute(
-            ENTERPRISE_EVAL_RESULTS_BASE_INSERT,
-            (
-                ev_id,
-                "run-a4",
-                tid,
-                oid,
-                "a4-app",
-                "groundedness_4pt_v1",
-                "gemini-3.8-flash",
-                "CANARY_5PCT",
-                1,
-                "ok",
-                4,
-                1,
-                500,
-                50,
-                0,
-                (base + timedelta(seconds=60)).isoformat(),
-            ),
+    with open_runner_for_spans(spans) as runner:
+        runner.load_rows(
+            "agent_eval.eval_results",
+            [
+                {
+                    "eval_id": ev_id,
+                    "eval_run_id": "run-a4",
+                    "trace_id": tid,
+                    "outcome_id": oid,
+                    "apphub_application_id": "a4-app",
+                    "rubric_id": "groundedness_4pt_v1",
+                    "judge_model": "gemini-3.8-flash",
+                    "sampling_stratum": "CANARY_5PCT",
+                    "rule0_pass": True,
+                    "ordinal_score": 4,
+                    "binary_pass": True,
+                    "judge_status": "SCORED",
+                    "judge_input_tokens": 500,
+                    "judge_output_tokens": 50,
+                    "judge_thinking_tokens": 0,
+                    "evaluated_at": (base + timedelta(seconds=60)).isoformat(),
+                }
+                for ev_id, tid, oid in (
+                    ("ev-a4-1", tid_false_judged, "out-false-judged"),
+                    ("ev-a4-2", tid_err, "out-err-step1"),
+                    ("ev-a4-3", tid_clean, "out-clean-pass"),
+                )
+            ],
+            append=True,
         )
+        bq_outcomes = {
+            str(r["outcome_id"]): (str(r["outcome_status"]), bool(r["is_verified"]))
+            for r in runner.query(
+                "SELECT outcome_id, outcome_status, is_verified FROM `agent_eval.v_outcomes`"
+            ).rows
+        }
+        bq_cpvo = runner.query(
+            "SELECT total_outcomes, verified_outcomes "
+            "FROM `agent_eval.v_enterprise_cost_per_verified_outcome` "
+            "WHERE apphub_application_id = 'a4-app'"
+        ).rows[0]
 
-    bq_outcomes = {
-        str(r["outcome_id"]): (str(r["outcome_status"]), int(r["is_verified"]))
-        for r in conn.execute(
-            "SELECT outcome_id, outcome_status, is_verified FROM v_outcomes"
-        ).fetchall()
-    }
-    bq_cpvo = conn.execute(
-        "SELECT total_outcomes, verified_outcomes FROM v_enterprise_cost_per_verified_outcome "
-        "WHERE apphub_application_id = 'a4-app'"
-    ).fetchone()
-    conn.close()
-
-    twin = evaluate_traces_in_sqlite(
+    twin = eval_traces(
         spans=spans,
         judge_outcomes={tid_false_judged: True, tid_err: True, tid_clean: True},
     )["a4-app"]
 
-    assert bq_outcomes["out-err-step1"] == ("succeeded", 0)
-    assert bq_outcomes["out-missing-status"] == ("unknown", 0)
-    assert bq_outcomes["out-false-judged"] == ("succeeded", 0)
-    assert bq_outcomes["out-flag-zero"] == ("succeeded", 0)
-    assert bq_outcomes["out-flag-no"] == ("succeeded", 0)
-    assert bq_outcomes["out-clean-pass"] == ("succeeded", 1)
-
-    assert int(bq_cpvo["total_outcomes"]) == twin.outcome_total_count == 6
-    assert int(bq_cpvo["verified_outcomes"]) == twin.outcome_verified_count == 1
+    assert bq_outcomes["out-err-step1"] == ("succeeded", False)
+    assert bq_outcomes["out-missing-status"] == ("unknown", False)
+    assert bq_outcomes["out-false-judged"] == ("succeeded", False)
+    assert bq_outcomes["out-flag-zero"] == ("succeeded", False)
+    assert bq_outcomes["out-flag-no"] == ("succeeded", False)
+    assert bq_outcomes["out-clean-pass"] == ("succeeded", True)
+    assert int(str(bq_cpvo["total_outcomes"])) == twin.outcome_total_count == 6
+    assert int(str(bq_cpvo["verified_outcomes"])) == twin.outcome_verified_count == 1

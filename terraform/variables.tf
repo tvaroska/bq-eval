@@ -248,9 +248,43 @@ variable "silver_shape3_format" {
 }
 
 variable "kms_key_name" {
-  description = "Optional Cloud KMS key resource name for CMEK encryption on Silver datasets and GCS bucket."
+  description = "Optional Cloud KMS key resource name for CMEK encryption on Silver datasets, WORM archive, and GCS bucket."
   type        = string
   default     = ""
+}
+
+variable "create_worm_archive_bucket" {
+  description = "Provision the dedicated PII-free Gold WORM snapshot archive bucket with GCS Retention Policy (S-24)."
+  type        = bool
+  default     = true
+}
+
+variable "worm_archive_bucket_name" {
+  description = "Override GCS bucket name for PII-free Gold WORM snapshots (defaults to <shared_bucket>-worm)."
+  type        = string
+  default     = ""
+}
+
+variable "worm_retention_seconds" {
+  description = "Retention period in seconds for the Gold WORM snapshot archive bucket (default: 365 days)."
+  type        = number
+  default     = 31536000
+  validation {
+    condition     = var.worm_retention_seconds >= 86400
+    error_message = "worm_retention_seconds must be at least 86400 seconds (1 day)."
+  }
+}
+
+variable "lock_worm_retention" {
+  description = "Opt-in irreversible GCS Object-Lock on the Gold WORM bucket (places a GCP project lien when true; default false)."
+  type        = bool
+  default     = false
+}
+
+variable "create_rtbf_kms_keyring" {
+  description = "Opt-in Cloud KMS key ring and subject DEK template for per-subject RTBF crypto-shredding (S-24)."
+  type        = bool
+  default     = false
 }
 
 variable "deletion_protection" {

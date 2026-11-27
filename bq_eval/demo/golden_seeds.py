@@ -37,6 +37,7 @@ class _SpanRow:
     tool_status: str | None = None
     rule0: bool = True
     traffic: FinOpsTrafficType = FinOpsTrafficType.PRODUCTION_INFERENCE
+    attrs: dict[str, str] | None = None
 
 
 _PROFILES: dict[str, _AppProfile] = {
@@ -113,7 +114,7 @@ def _to_span(profile: _AppProfile, row: _SpanRow) -> GoldenSpanTemplate:
         tool_call_status=row.tool_status,
         rule0_pass=row.rule0,
         finops_traffic_type=row.traffic,
-        attributes=profile.attrs,
+        attributes={**profile.attrs, **row.attrs} if row.attrs else profile.attrs,
     )
 
 
@@ -452,6 +453,7 @@ _TEMPLATE_SPECS: tuple[tuple[int, str, str, str, int, str, str, str, tuple[_Span
                     kind=GenAISpanKind.EXECUTE_TOOL,
                     tool="mcp__ams__fetch_household_page",
                     tool_status="SUCCESS",
+                    attrs={"gen_ai.tool.call.arguments": f'{{"page": {page}}}'},
                 )
                 for page in range(1, 10)
             ),

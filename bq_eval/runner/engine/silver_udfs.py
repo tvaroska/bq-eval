@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import math
@@ -34,12 +35,18 @@ DEFAULT_SILVER_SQL_PARAMS: Mapping[str, str] = {
     "PAYLOAD_BUCKET": "showcase-project-payloads",
     "SHAPE3_PREFIX": "",
     "SHAPE3_FORMAT": "JSON",
+    "DATASET_ID": "agent_eval",
+    "GOLD_LOOKBACK_HOURS": "720",
 }
 
 SILVER_MANIFEST_TABLE_MAP: Mapping[str, str] = {
     "app_registry": "silver_ref.app_registry",
     "tools": "silver_ref.tools",
     "skill_registry": "silver_ref.skill_registry",
+    "capacity_pools": "silver_ref.capacity_pools",
+    "capacity_allocations": "silver_ref.capacity_allocations",
+    "allowed_models": "silver_ref.allowed_models",
+    "burst_metrics_1m": "silver_open.burst_metrics_1m",
     "unit_entitlements": "silver_internal.unit_entitlements",
     "workflow_events_sor": "silver_internal.workflow_events_sor",
     "workflow_events_platform": "silver_internal.workflow_events_platform",
@@ -146,39 +153,38 @@ def _jcs_canonicalize_obj(value: object, depth: int = 0) -> str | None:
     return result
 
 
+@functools.lru_cache(maxsize=4096)
+def _cached_jcs_canonicalize(raw_json: str) -> str | None:
+    try:
+        if _has_lone_surrogate(raw_json) or len(raw_json.encode("utf-8")) > MAX_JCS_INPUT_BYTES:
+            return None
+        return _jcs_canonicalize_obj(json.loads(raw_json))
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def jcs_canonicalize_str(raw_json: object) -> str | None:
     """RFC 8785 JCS canonicalization with 65,532-byte UTF-8, depth, and surrogate guards (`ADR-041`)."""
     if raw_json is None or not isinstance(raw_json, str):
         return None
-    try:
-        if _has_lone_surrogate(raw_json) or len(raw_json.encode("utf-8")) > MAX_JCS_INPUT_BYTES:
-            return None
-        parsed = json.loads(raw_json)
-        return _jcs_canonicalize_obj(parsed)
-    except Exception:  # noqa: BLE001
-        return None
+    return _cached_jcs_canonicalize(raw_json)
+
+
+@functools.lru_cache(maxsize=4096)
+def _cached_jcs_sha256(raw_json: str) -> str | None:
+    canon = _cached_jcs_canonicalize(raw_json)
+    return None if canon is None else hashlib.sha256(canon.encode("utf-8")).hexdigest()
 
 
 def jcs_sha256_str(raw_json: object) -> str | None:
     """RFC 8785 JCS SHA-256 hex digest with 65,532-byte, depth, and surrogate guards (`ADR-041`)."""
-    try:
-        canon = jcs_canonicalize_str(raw_json)
-        if canon is None:
-            return None
-        return hashlib.sha256(canon.encode("utf-8")).hexdigest()
-    except Exception:  # noqa: BLE001
+    if raw_json is None or not isinstance(raw_json, str):
         return None
+    return _cached_jcs_sha256(raw_json)
 
 
-def jcs_tool_args_sha256_str(tool_name: object, raw_args: object) -> str | None:
-    """RFC 8785 JCS SHA-256 of `{\"tool_name\": ..., \"args\": ...}` (`ADR-041`)."""
-    if (
-        tool_name is None
-        or raw_args is None
-        or not isinstance(tool_name, str)
-        or not isinstance(raw_args, str)
-    ):
-        return None
+@functools.lru_cache(maxsize=4096)
+def _cached_jcs_tool_args_sha256(tool_name: str, raw_args: str) -> str | None:
     try:
         if (
             _has_lone_surrogate(tool_name)
@@ -186,16 +192,20 @@ def jcs_tool_args_sha256_str(tool_name: object, raw_args: object) -> str | None:
             or len(raw_args.encode("utf-8")) > MAX_JCS_INPUT_BYTES
         ):
             return None
-        parsed_args = json.loads(raw_args)
-        canon = _jcs_canonicalize_obj({"tool_name": tool_name, "args": parsed_args})
+        canon = _jcs_canonicalize_obj({"tool_name": tool_name, "args": json.loads(raw_args)})
         if canon is None:
             return None
         encoded = canon.encode("utf-8")
-        if len(encoded) > MAX_JCS_INPUT_BYTES:
-            return None
-        return hashlib.sha256(encoded).hexdigest()
+        return None if len(encoded) > MAX_JCS_INPUT_BYTES else hashlib.sha256(encoded).hexdigest()
     except Exception:  # noqa: BLE001
         return None
+
+
+def jcs_tool_args_sha256_str(tool_name: object, raw_args: object) -> str | None:
+    """RFC 8785 JCS SHA-256 of `{\"tool_name\": ..., \"args\": ...}` (`ADR-041`)."""
+    if not isinstance(tool_name, str) or not isinstance(raw_args, str):
+        return None
+    return _cached_jcs_tool_args_sha256(tool_name, raw_args)
 
 
 def make_json_query_fn(
@@ -204,9 +214,8 @@ def make_json_query_fn(
 ) -> Callable[[str | None, str], str | None]:
     """Build SQLite `BQ_JSON_QUERY(raw_json, path)` returning compact JSON or NULL."""
 
-    def _sqlite_json_query(raw_json: str | None, path: str) -> str | None:
-        if not raw_json:
-            return None
+    @functools.lru_cache(maxsize=4096)
+    def _cached_query(raw_json: str, path: str) -> str | None:
         try:
             data = json.loads(raw_json)
         except json.JSONDecodeError:
@@ -227,20 +236,27 @@ def make_json_query_fn(
             return _compact_json(data[flat_key])
         return None
 
+    def _sqlite_json_query(raw_json: str | None, path: str) -> str | None:
+        if not raw_json or not isinstance(raw_json, str) or not isinstance(path, str):
+            return None
+        return _cached_query(raw_json, path)
+
     return _sqlite_json_query
+
+
+@functools.lru_cache(maxsize=4096)
+def _cached_parse_json(stripped: str) -> str | None:
+    try:
+        return _compact_json(json.loads(stripped))
+    except json.JSONDecodeError:
+        return None
 
 
 def _sqlite_parse_json(raw: object) -> str | None:
     if raw is None or not isinstance(raw, str):
         return None
     stripped = raw.strip()
-    if not stripped:
-        return None
-    try:
-        parsed = json.loads(stripped)
-    except json.JSONDecodeError:
-        return None
-    return _compact_json(parsed)
+    return _cached_parse_json(stripped) if stripped else None
 
 
 def _sqlite_json_array(*args: object) -> str:
@@ -346,6 +362,21 @@ def _sqlite_json_array_agg_elem(raw: object) -> object:
     return raw
 
 
+def _sqlite_lpad(value: object, length: object, pad: object = " ") -> str | None:
+    if value is None or length is None or pad is None:
+        return None
+    text = str(value)
+    target_len = int(str(length))
+    if target_len <= 0:
+        return ""
+    if len(text) >= target_len:
+        return text[:target_len]
+    pad_str = str(pad) or " "
+    needed = target_len - len(text)
+    repeats = (needed // len(pad_str)) + 1
+    return (pad_str * repeats)[:needed] + text
+
+
 def _sqlite_rpad(value: object, length: object, pad: object = " ") -> str | None:
     if value is None or length is None or pad is None:
         return None
@@ -429,6 +460,8 @@ def register_silver_sqlite_udfs(
     conn.create_function("BQ_JCS_SHA256", 1, jcs_sha256_str)
     conn.create_function("BQ_JCS_TOOL_ARGS_SHA256", 2, jcs_tool_args_sha256_str)
     conn.create_function("BQ_SHA256_HEX", 1, _sqlite_sha256_hex)
+    conn.create_function("LPAD", 3, _sqlite_lpad)
+    conn.create_function("LPAD", 2, _sqlite_lpad)
     conn.create_function("RPAD", 3, _sqlite_rpad)
     conn.create_function("RPAD", 2, _sqlite_rpad)
     conn.create_aggregate("BQ_JSON_ARRAY_AGG", 4, _SQLiteJsonArrayAgg)  # type: ignore[arg-type]
@@ -496,49 +529,71 @@ def _rewrite_in_unnest(node: exp.In) -> exp.Expr | None:
     )
 
 
+def _extract_sha256_hex_expr(inner: exp.Expr) -> exp.Expr | None:
+    if isinstance(inner, (exp.SHA2, exp.SHA2Digest)) and inner.this is not None:
+        return exp.Anonymous(this="BQ_SHA256_HEX", expressions=[inner.this.copy()])
+    if isinstance(inner, exp.Anonymous) and inner.name.upper() == "SHA256" and inner.expressions:
+        return exp.Anonymous(this="BQ_SHA256_HEX", expressions=[inner.expressions[0].copy()])
+    return None
+
+
+def _rewrite_json_object_ast(node: exp.JSONObject) -> exp.Expr:
+    kv_args: list[exp.Expr] = []
+    for item in node.expressions:
+        if isinstance(item, exp.JSONKeyValue):
+            kv_args.extend([item.this.copy(), item.expression.copy()])
+        else:
+            kv_args.append(item.copy())
+    return exp.Anonymous(this="BQ_JSON_OBJECT", expressions=kv_args)
+
+
 def _rewrite_silver_anonymous(node: exp.Anonymous) -> exp.Expr | None:
     upper = node.name.upper()
-    if upper == "JSON_STRIP_NULLS" and node.expressions:
-        return exp.Anonymous(this="BQ_JSON_STRIP_NULLS", expressions=[node.expressions[0].copy()])
-    if upper == "PARSE_JSON" and node.expressions:
-        return exp.Anonymous(this="BQ_PARSE_JSON", expressions=[node.expressions[0].copy()])
-    if upper == "JSON_ARRAY":
-        return exp.Anonymous(this="BQ_JSON_ARRAY", expressions=[e.copy() for e in node.expressions])
-    if upper == "JSON_OBJECT":
-        return exp.Anonymous(
-            this="BQ_JSON_OBJECT", expressions=[e.copy() for e in node.expressions]
+    out: exp.Expr | None = None
+    single_arg_map = {
+        "JSON_STRIP_NULLS": "BQ_JSON_STRIP_NULLS",
+        "PARSE_JSON": "BQ_PARSE_JSON",
+    }
+    vararg_map = {
+        "JSON_ARRAY": "BQ_JSON_ARRAY",
+        "JSON_OBJECT": "BQ_JSON_OBJECT",
+    }
+    if upper in single_arg_map and node.expressions:
+        out = exp.Anonymous(this=single_arg_map[upper], expressions=[node.expressions[0].copy()])
+    elif upper in vararg_map:
+        out = exp.Anonymous(
+            this=vararg_map[upper], expressions=[e.copy() for e in node.expressions]
         )
-    if upper == "TO_JSON" and node.expressions:
+    elif upper == "TO_JSON" and node.expressions:
         agg_rewrite = _rewrite_to_json_array_agg(node.expressions[0])
-        return agg_rewrite if agg_rewrite is not None else node.expressions[0].copy()
-    return None
+        out = agg_rewrite if agg_rewrite is not None else node.expressions[0].copy()
+    elif upper == "TO_HEX" and node.expressions:
+        out = _extract_sha256_hex_expr(node.expressions[0])
+    return out
 
 
 def _rewrite_silver_json_ast(
     node: exp.Expr,
     json_path_fn: Callable[[exp.Expr], exp.Expr],
 ) -> exp.Expr | None:
+    out: exp.Expr | None = None
     if isinstance(node, exp.JSONFormat) and node.args.get("to_json") and node.this is not None:
         agg_rewrite = _rewrite_to_json_array_agg(node.this)
-        return agg_rewrite if agg_rewrite is not None else node.this.copy()
-    if isinstance(node, exp.JSONExtract) and node.expression is not None:
-        return exp.Anonymous(
+        out = agg_rewrite if agg_rewrite is not None else node.this.copy()
+    elif isinstance(node, exp.Hex) and node.this is not None:
+        out = _extract_sha256_hex_expr(node.this)
+    elif isinstance(node, exp.JSONExtract) and node.expression is not None:
+        out = exp.Anonymous(
             this="BQ_JSON_QUERY",
             expressions=[node.this.copy(), json_path_fn(node.expression)],
         )
-    if isinstance(node, exp.ParseJSON):
-        return exp.Anonymous(this="BQ_PARSE_JSON", expressions=[node.this.copy()])
-    if isinstance(node, exp.JSONArray):
-        return exp.Anonymous(this="BQ_JSON_ARRAY", expressions=[e.copy() for e in node.expressions])
-    if isinstance(node, exp.JSONObject):
-        kv_args: list[exp.Expr] = []
-        for item in node.expressions:
-            if isinstance(item, exp.JSONKeyValue):
-                kv_args.extend([item.this.copy(), item.expression.copy()])
-            else:
-                kv_args.append(item.copy())
-        return exp.Anonymous(this="BQ_JSON_OBJECT", expressions=kv_args)
-    return None
+    elif isinstance(node, exp.ParseJSON):
+        out = exp.Anonymous(this="BQ_PARSE_JSON", expressions=[node.this.copy()])
+    elif isinstance(node, exp.JSONArray):
+        out = exp.Anonymous(this="BQ_JSON_ARRAY", expressions=[e.copy() for e in node.expressions])
+    elif isinstance(node, exp.JSONObject):
+        out = _rewrite_json_object_ast(node)
+    return out
 
 
 def rewrite_silver_bq_expr(

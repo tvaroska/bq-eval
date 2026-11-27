@@ -214,56 +214,66 @@ CREATE OR REPLACE TABLE FUNCTION `${PROJECT_ID}.${SILVER_INTERNAL_DATASET}.event
     FROM (
       SELECT
         d.*,
-        ev.time AS ev_time,
-        ev.attributes AS ev_attributes,
-        ROW_NUMBER() OVER (PARTITION BY d.source_class, d.trace_id, d.span_id ORDER BY ev_idx ASC) AS gi_rn
+        ROW_NUMBER() OVER (PARTITION BY d.source_class, d.trace_id, d.span_id ORDER BY d.ev_idx ASC) AS gi_rn
       FROM (
         SELECT
-          source_class, trace_id, span_id, source_system, response_id, outcome_id, outcome_owner,
-          conversation_id, action_id, nudge_id, user_id, tenant_id, mcp_method_name, a2a_task_id, a2a_task_state, events,
-          ROW_NUMBER() OVER (PARTITION BY source_class, trace_id, span_id ORDER BY receive_time DESC, end_time DESC) AS span_rn
+          'application' AS source_class, s.trace_id, s.span_id,
+          JSON_VALUE(s.resource.attributes, '$."service.name"') AS source_system,
+          JSON_VALUE(s.attributes, '$."gen_ai.response.id"') AS response_id,
+          JSON_VALUE(s.attributes, '$."outcome.id"') AS outcome_id,
+          JSON_VALUE(s.attributes, '$."outcome.owner"') AS outcome_owner,
+          JSON_VALUE(s.attributes, '$."gen_ai.conversation.id"') AS conversation_id,
+          JSON_VALUE(s.attributes, '$."bq_eval.action_id"') AS action_id,
+          JSON_VALUE(s.attributes, '$."bq_eval.nudge_id"') AS nudge_id,
+          JSON_VALUE(s.attributes, '$."user.id"') AS user_id,
+          JSON_VALUE(s.attributes, '$."bq_eval.tenant_id"') AS tenant_id,
+          JSON_VALUE(s.attributes, '$."mcp.method.name"') AS mcp_method_name,
+          JSON_VALUE(s.attributes, '$."a2a.task.id"') AS a2a_task_id,
+          JSON_VALUE(s.attributes, '$."a2a.task.state"') AS a2a_task_state,
+          ev.time AS ev_time,
+          ev.attributes AS ev_attributes,
+          ev_idx
         FROM (
           SELECT
-            'application' AS source_class, s.trace_id, s.span_id, s.receive_time, s.end_time,
-            JSON_VALUE(s.resource.attributes, '$."service.name"') AS source_system,
-            JSON_VALUE(s.attributes, '$."gen_ai.response.id"') AS response_id,
-            JSON_VALUE(s.attributes, '$."outcome.id"') AS outcome_id,
-            JSON_VALUE(s.attributes, '$."outcome.owner"') AS outcome_owner,
-            JSON_VALUE(s.attributes, '$."gen_ai.conversation.id"') AS conversation_id,
-            JSON_VALUE(s.attributes, '$."bq_eval.action_id"') AS action_id,
-            JSON_VALUE(s.attributes, '$."bq_eval.nudge_id"') AS nudge_id,
-            JSON_VALUE(s.attributes, '$."user.id"') AS user_id,
-            JSON_VALUE(s.attributes, '$."bq_eval.tenant_id"') AS tenant_id,
-            JSON_VALUE(s.attributes, '$."mcp.method.name"') AS mcp_method_name,
-            JSON_VALUE(s.attributes, '$."a2a.task.id"') AS a2a_task_id,
-            JSON_VALUE(s.attributes, '$."a2a.task.state"') AS a2a_task_state,
-            s.events
-          FROM `${PROJECT_ID}.${TRACES_DATASET_ID}._AllSpans` AS s
-          WHERE s.start_time >= TIMESTAMP_SUB(from_time, INTERVAL ${READ_MARGIN_MINUTES} MINUTE)
-            AND s.start_time < TIMESTAMP_ADD(to_time, INTERVAL ${READ_MARGIN_MINUTES} MINUTE)
-          UNION ALL
+            trace_id, span_id, receive_time, end_time, attributes, resource, events,
+            ROW_NUMBER() OVER (PARTITION BY trace_id, span_id ORDER BY receive_time DESC, end_time DESC) AS span_rn
+          FROM `${PROJECT_ID}.${TRACES_DATASET_ID}._AllSpans`
+          WHERE start_time >= TIMESTAMP_SUB(from_time, INTERVAL ${READ_MARGIN_MINUTES} MINUTE)
+            AND start_time < TIMESTAMP_ADD(to_time, INTERVAL ${READ_MARGIN_MINUTES} MINUTE)
+        ) AS s
+        CROSS JOIN UNNEST(s.events) AS ev WITH OFFSET AS ev_idx
+        WHERE s.span_rn = 1 AND ev.name = 'guardrail.intervention'
+
+        UNION ALL
+
+        SELECT
+          'platform' AS source_class, s.trace_id, s.span_id,
+          JSON_VALUE(s.resource.attributes, '$."service.name"') AS source_system,
+          JSON_VALUE(s.attributes, '$."gen_ai.response.id"') AS response_id,
+          JSON_VALUE(s.attributes, '$."outcome.id"') AS outcome_id,
+          JSON_VALUE(s.attributes, '$."outcome.owner"') AS outcome_owner,
+          JSON_VALUE(s.attributes, '$."gen_ai.conversation.id"') AS conversation_id,
+          JSON_VALUE(s.attributes, '$."bq_eval.action_id"') AS action_id,
+          JSON_VALUE(s.attributes, '$."bq_eval.nudge_id"') AS nudge_id,
+          JSON_VALUE(s.attributes, '$."user.id"') AS user_id,
+          JSON_VALUE(s.attributes, '$."bq_eval.tenant_id"') AS tenant_id,
+          JSON_VALUE(s.attributes, '$."mcp.method.name"') AS mcp_method_name,
+          JSON_VALUE(s.attributes, '$."a2a.task.id"') AS a2a_task_id,
+          JSON_VALUE(s.attributes, '$."a2a.task.state"') AS a2a_task_state,
+          ev.time AS ev_time,
+          ev.attributes AS ev_attributes,
+          ev_idx
+        FROM (
           SELECT
-            'platform' AS source_class, s.trace_id, s.span_id, s.receive_time, s.end_time,
-            JSON_VALUE(s.resource.attributes, '$."service.name"') AS source_system,
-            JSON_VALUE(s.attributes, '$."gen_ai.response.id"') AS response_id,
-            JSON_VALUE(s.attributes, '$."outcome.id"') AS outcome_id,
-            JSON_VALUE(s.attributes, '$."outcome.owner"') AS outcome_owner,
-            JSON_VALUE(s.attributes, '$."gen_ai.conversation.id"') AS conversation_id,
-            JSON_VALUE(s.attributes, '$."bq_eval.action_id"') AS action_id,
-            JSON_VALUE(s.attributes, '$."bq_eval.nudge_id"') AS nudge_id,
-            JSON_VALUE(s.attributes, '$."user.id"') AS user_id,
-            JSON_VALUE(s.attributes, '$."bq_eval.tenant_id"') AS tenant_id,
-            JSON_VALUE(s.attributes, '$."mcp.method.name"') AS mcp_method_name,
-            JSON_VALUE(s.attributes, '$."a2a.task.id"') AS a2a_task_id,
-            JSON_VALUE(s.attributes, '$."a2a.task.state"') AS a2a_task_state,
-            s.events
-          FROM `${PROJECT_ID}.${PLATFORM_TRACES_DATASET_ID}.${PLATFORM_TRACES_TABLE_ID}` AS s
-          WHERE s.start_time >= TIMESTAMP_SUB(from_time, INTERVAL ${READ_MARGIN_MINUTES} MINUTE)
-            AND s.start_time < TIMESTAMP_ADD(to_time, INTERVAL ${READ_MARGIN_MINUTES} MINUTE)
-        )
+            trace_id, span_id, receive_time, end_time, attributes, resource, events,
+            ROW_NUMBER() OVER (PARTITION BY trace_id, span_id ORDER BY receive_time DESC, end_time DESC) AS span_rn
+          FROM `${PROJECT_ID}.${PLATFORM_TRACES_DATASET_ID}.${PLATFORM_TRACES_TABLE_ID}`
+          WHERE start_time >= TIMESTAMP_SUB(from_time, INTERVAL ${READ_MARGIN_MINUTES} MINUTE)
+            AND start_time < TIMESTAMP_ADD(to_time, INTERVAL ${READ_MARGIN_MINUTES} MINUTE)
+        ) AS s
+        CROSS JOIN UNNEST(s.events) AS ev WITH OFFSET AS ev_idx
+        WHERE s.span_rn = 1 AND ev.name = 'guardrail.intervention'
       ) AS d
-      CROSS JOIN UNNEST(d.events) AS ev WITH OFFSET AS ev_idx
-      WHERE d.span_rn = 1 AND ev.name = 'guardrail.intervention'
     ) AS g
     WHERE SAFE_CAST(g.ev_time AS TIMESTAMP) >= from_time
       AND SAFE_CAST(g.ev_time AS TIMESTAMP) < to_time

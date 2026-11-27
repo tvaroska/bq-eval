@@ -1,0 +1,19 @@
+[
+  {"name": "provider", "type": "STRING", "mode": "REQUIRED", "description": "Model provider identifier (google, anthropic, openai, self_hosted)."},
+  {"name": "model", "type": "STRING", "mode": "REQUIRED", "description": "Canonical model identifier governed by this rule."},
+  {"name": "region", "type": "STRING", "mode": "REQUIRED", "description": "Scoped serving region or '*' wildcard."},
+  {"name": "environment", "type": "STRING", "mode": "REQUIRED", "description": "Scoped deployment environment (prod, staging, eval, or '*')."},
+  {"name": "business_unit", "type": "STRING", "mode": "REQUIRED", "description": "Scoped business unit or '*' wildcard."},
+  {"name": "risk_tier", "type": "STRING", "mode": "REQUIRED", "description": "Scoped risk tier (RL-1 through RL-5) or '*' wildcard."},
+  {"name": "app_id", "type": "STRING", "mode": "REQUIRED", "description": "Scoped application identifier or '*' wildcard."},
+  {"name": "is_allowed", "type": "BOOL", "mode": "REQUIRED", "description": "TRUE when invocations matching this scope are permitted."},
+  {"name": "invokable_status", "type": "STRING", "mode": "REQUIRED", "description": "Operational routing status (active, drain, or circuit_broken)."},
+  {"name": "zdr_allowed", "type": "BOOL", "mode": "REQUIRED", "description": "TRUE when the endpoint satisfies Zero Data Retention for regulated judging and inference."},
+  {"name": "lifecycle_tier", "type": "STRING", "mode": "REQUIRED", "description": "Release stability track (long_term_ga, short_term_ga, or preview)."},
+  {"name": "eol_date", "type": "DATE", "mode": "NULLABLE", "description": "Published model end-of-life or deprecation cutoff date."},
+  {"name": "deprecation_notice_days", "type": "INT64", "mode": "NULLABLE", "description": "Contractual deprecation notice window in days."},
+  {"name": "migration_target_model", "type": "STRING", "mode": "NULLABLE", "description": "Recommended successor model identifier for lifecycle migration."},
+  {"name": "min_cache_tokens", "type": "INT64", "mode": "NULLABLE", "description": "Minimum prefix-cache token floor required for cached pricing."},
+  {"name": "effective_from", "type": "TIMESTAMP", "mode": "REQUIRED", "description": "SCD-2 inclusive UTC start timestamp for this governance rule."},
+  {"name": "effective_to", "type": "TIMESTAMP", "mode": "NULLABLE", "description": "SCD-2 exclusive UTC end timestamp (NULL while active)."}
+]

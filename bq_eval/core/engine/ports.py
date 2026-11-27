@@ -1,4 +1,4 @@
-"""Evaluation Backend Ports & Adapters (local `EvalBackend` and warehouse `WarehouseEvalBackend`)."""
+"""Evaluation Backend Ports & Adapters (offline `EvalBackend` and warehouse `WarehouseEvalBackend`)."""
 
 from __future__ import annotations
 
@@ -11,15 +11,24 @@ from bq_eval.core.contract.results import ConfusionMatrix, SQLTraceEvalSummary
 from bq_eval.core.engine.sql_eval import (
     _validate_sql_identifier,
     build_ai_generate_table_judge_sql,
-    evaluate_traces_in_sqlite,
 )
 
 QueryRunner = Callable[[str], Sequence[Mapping[str, object]]]
 
+_ALLOWED_CALIBRATION_STATUSES: frozenset[str] = frozenset(
+    {
+        "CALIBRATED",
+        "UNCALIBRATED",
+        "UNJUDGED",
+        "STALE_CALIBRATION",
+        "MISSING_SESSION_CONTEXT",
+    }
+)
+
 
 @runtime_checkable
 class EvalBackend(Protocol):
-    """Local in-memory span evaluation port implemented by `SQLiteEvalBackend`."""
+    """Local in-memory evaluation port implemented by `OfflineEvalBackend` (`bq_eval.runner`)."""
 
     def evaluate_traces(  # noqa: PLR0913
         self,
@@ -39,7 +48,14 @@ class EvalBackend(Protocol):
         sampling_strata: Mapping[str, str] | None = None,
         sla_latency_ms: float = 5000.0,
     ) -> dict[str, SQLTraceEvalSummary]:
-        """Evaluate traces locally and return per-application quality and FinOps summaries."""
+        """Evaluate traces through Silver + Gold SQL and return per-application summaries."""
+        ...
+
+    def evaluate_hourly_burndown_dicts(
+        self,
+        spans: Sequence[OTelGenAISpanRecord],
+    ) -> Sequence[Mapping[str, object]]:
+        """Evaluate Silver + Gold `v_capacity_hourly_burndown_export` rows locally."""
         ...
 
     def build_judge_sql(  # noqa: PLR0913
@@ -89,60 +105,6 @@ class WarehouseEvalBackend(Protocol):
     ) -> str:
         """Build the stratified Tier-2 judge SQL statement targeting this warehouse."""
         ...
-
-
-class SQLiteEvalBackend:
-    """Zero-credential local SQLite adapter implementing `EvalBackend`."""
-
-    def evaluate_traces(  # noqa: PLR0913
-        self,
-        spans: Sequence[OTelGenAISpanRecord],
-        *,
-        judge_outcomes: Mapping[str, bool] | None = None,
-        sme_confusion: ConfusionMatrix
-        | Mapping[str, ConfusionMatrix]
-        | Mapping[tuple[str, str], ConfusionMatrix]
-        | None = None,
-        rubric_id: str = "groundedness_4pt_v1",
-        judge_cost_per_call_usd: float = 0.0025,
-        sme_ordinal_pairs: Sequence[tuple[int, int]]
-        | Mapping[str, Sequence[tuple[int, int]]]
-        | Mapping[tuple[str, str], Sequence[tuple[int, int]]]
-        | None = None,
-        sampling_strata: Mapping[str, str] | None = None,
-        sla_latency_ms: float = 5000.0,
-    ) -> dict[str, SQLTraceEvalSummary]:
-        return evaluate_traces_in_sqlite(
-            spans=spans,
-            judge_outcomes=judge_outcomes,
-            sme_confusion=sme_confusion,
-            rubric_id=rubric_id,
-            judge_cost_per_call_usd=judge_cost_per_call_usd,
-            sme_ordinal_pairs=sme_ordinal_pairs,
-            sampling_strata=sampling_strata,
-            sla_latency_ms=sla_latency_ms,
-        )
-
-    def build_judge_sql(  # noqa: PLR0913
-        self,
-        *,
-        project_id: str,
-        dataset_id: str = "agent_eval",
-        rubric_id: str = "groundedness_4pt_v1",
-        canary_sample_pct: int = 5,
-        run_id: str | None = None,
-        judge_model: str | None = None,
-        include_rule0_failures: bool = False,
-    ) -> str:
-        return build_ai_generate_table_judge_sql(
-            project_id=project_id,
-            dataset_id=dataset_id,
-            rubric_id=rubric_id,
-            canary_sample_pct=canary_sample_pct,
-            run_id=run_id,
-            judge_model=judge_model,
-            include_rule0_failures=include_rule0_failures,
-        )
 
 
 def _optional_float(val: object) -> float | None:
@@ -197,7 +159,7 @@ def _strict_float(row: Mapping[str, object], key: str) -> float:
 
 def _mapping_to_summary(row: Mapping[str, object]) -> SQLTraceEvalSummary:
     status_raw = str(row["calibration_status"])
-    if status_raw not in {"CALIBRATED", "UNCALIBRATED", "UNJUDGED"}:
+    if status_raw not in _ALLOWED_CALIBRATION_STATUSES:
         raise ValueError(f"Invalid calibration_status {status_raw!r}")
     return SQLTraceEvalSummary.model_validate(
         {

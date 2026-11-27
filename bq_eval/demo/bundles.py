@@ -88,6 +88,8 @@ def build_showcase_dataset() -> tuple[
         )
         if i < 20:
             judge_outcomes[trace_id] = i not in (18, 19)
+        elif is_escalated:
+            judge_outcomes[trace_id] = True
         elif is_error_tail:
             judge_outcomes[trace_id] = False
 

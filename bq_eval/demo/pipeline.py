@@ -1,7 +1,8 @@
-"""Showcase SQLite twin replay, Markdown scorecard, and JSON formatter."""
+"""Showcase Silver + Gold offline replay, Markdown scorecard, and JSON formatter."""
 
 from __future__ import annotations
 
+import functools
 import json
 import math
 from pathlib import Path
@@ -11,7 +12,7 @@ from bq_eval.core.contract.otel import OTelGenAISpanRecord
 from bq_eval.core.contract.results import ConfusionMatrix, SQLTraceEvalSummary
 from bq_eval.core.engine.calibration import compute_gwet_ac2
 from bq_eval.core.engine.cost import compute_span_cost_usd
-from bq_eval.core.engine.ports import EvalBackend, SQLiteEvalBackend
+from bq_eval.core.engine.ports import EvalBackend
 from bq_eval.demo.bundles import (
     DEFAULT_M2_RECEIPT_PATH as DEFAULT_M2_RECEIPT_PATH,
 )
@@ -55,7 +56,8 @@ from bq_eval.finops.contract.results import (
     OffPeakSchedulePlan,
     ParetoEvalResult,
 )
-from bq_eval.finops.engine.capacity_export import hourly_burndown_rows
+from bq_eval.finops.engine.capacity_export import _mapping_to_hourly_row, hourly_burndown_rows
+from bq_eval.finops.engine.chargeback_three_pool import contiguous_utc_hours, parse_utc_hour
 from bq_eval.finops.engine.spend import (
     allocate_focus_hourly_chargeback,
     compute_eval_finops_roi,
@@ -63,6 +65,7 @@ from bq_eval.finops.engine.spend import (
     diagnose_prefix_cache_dilution,
     plan_off_peak_eval_schedule,
 )
+from bq_eval.runner.engine.eval_adapter import OfflineEvalBackend
 
 CorpusChoice = Literal["m2-live", "golden-4app", "retail-2app"]
 
@@ -188,18 +191,14 @@ def _derive_dynamic_pareto_candidates(
             elif explicit_fab:
                 fab_count += 1
 
-        rule0_rate = rule0_ok / n_traces
-        fab_rate = (fab_count / judged_r0) if judged_r0 > 0 else (fab_count / n_traces)
         summary = summaries.get(app_id)
-        cal_rate = (
-            summary.calibrated_pass_rate
-            if summary is not None and summary.calibrated_pass_rate is not None
-            else (
-                summary.raw_judge_pass_rate
-                if summary is not None and summary.raw_judge_pass_rate is not None
-                else rule0_rate
-            )
+        if summary is None or summary.calibrated_pass_rate is None:
+            continue
+        rule0_rate = (
+            summary.rule0_pass_rate if len(grouped) == len(summaries) else (rule0_ok / n_traces)
         )
+        fab_rate = (fab_count / judged_r0) if judged_r0 > 0 else (fab_count / n_traces)
+        cal_rate = summary.calibrated_pass_rate
         verified_est = max(1e-9, n_traces * max(0.01, rule0_rate) * max(0.01, cal_rate))
         cpvo_usd = spend_usd / verified_est
         latencies.sort()
@@ -223,20 +222,24 @@ def _compute_hourly_chargeback_and_schedule(
     summaries: dict[str, SQLTraceEvalSummary],
     hourly_rows: list[HourlyBurndownExportRow],
 ) -> tuple[list[FocusChargebackRow], OffPeakSchedulePlan]:
-    timestamps = sorted({r.timestamp for r in hourly_rows})
     app_ids = sorted(summaries)
-    if not timestamps:
-        timestamps = ["1970-01-01T00:00:00Z"]
+    raw_hours = [r.timestamp or r.usage_hour for r in hourly_rows]
+    if raw_hours:
+        parsed_hours = [parse_utc_hour(ts) for ts in raw_hours]
+        span_hours = int((max(parsed_hours) - min(parsed_hours)).total_seconds() // 3600) + 1
+        grid = contiguous_utc_hours(raw_hours, max_hours=max(168, span_hours))
+    else:
+        grid = contiguous_utc_hours(["1970-01-01T00:00:00Z"], max_hours=168)
 
-    ts_index = {ts: idx for idx, ts in enumerate(timestamps)}
-    hourly_by_app: dict[str, list[float]] = {app_id: [0.0] * len(timestamps) for app_id in app_ids}
+    hour_index = {dt: idx for idx, dt in enumerate(grid)}
+    hourly_by_app: dict[str, list[float]] = {app_id: [0.0] * len(grid) for app_id in app_ids}
     for row in hourly_rows:
         if row.apphub_application_id in hourly_by_app:
-            hourly_by_app[row.apphub_application_id][ts_index[row.timestamp]] += (
-                row.weighted_burndown_tokens
-            )
+            idx = hour_index.get(parse_utc_hour(row.timestamp or row.usage_hour))
+            if idx is not None:
+                hourly_by_app[row.apphub_application_id][idx] += row.weighted_burndown_tokens
 
-    hourly_reserved_pt = bundle.reserved_pt_capacity_tokens / len(timestamps)
+    hourly_reserved_pt = bundle.reserved_pt_capacity_tokens / len(grid)
     cost_centers = {
         app_id: bundle.app_cost_centers.get(app_id, "UNASSIGNED") for app_id in hourly_by_app
     }
@@ -248,9 +251,7 @@ def _compute_hourly_chargeback_and_schedule(
         payg_overflow_usd_per_1m_weighted=0.15,
     )
 
-    hourly_totals = [
-        sum(series[h] for series in hourly_by_app.values()) for h in range(len(timestamps))
-    ]
+    hourly_totals = [sum(series[h] for series in hourly_by_app.values()) for h in range(len(grid))]
     batch_eval_tokens = max(1.0, sum(hourly_totals) * 0.15)
     off_peak_plan = plan_off_peak_eval_schedule(
         hourly_production_burndown=hourly_totals,
@@ -269,7 +270,7 @@ def _evaluate_bundle(
 ) -> ShowcaseRunArtifacts:
     if not bundle.spans:
         raise ValueError(f"Scenario bundle {bundle.corpus_id!r} contains zero spans.")
-    active_backend: EvalBackend = backend or SQLiteEvalBackend()
+    active_backend: EvalBackend = backend or OfflineEvalBackend()
     sme_pairs_arg: dict[str, list[tuple[int, int]]] | None = (
         {app: list(pairs) for app, pairs in bundle.sme_ordinal_pairs_by_app.items()}
         if bundle.sme_ordinal_pairs_by_app
@@ -278,14 +279,26 @@ def _evaluate_bundle(
     sme_conf_arg: dict[str, ConfusionMatrix] | None = (
         dict(bundle.sme_confusion_by_app) if bundle.sme_confusion_by_app else None
     )
-    summaries = active_backend.evaluate_traces(
-        spans=bundle.spans,
-        judge_outcomes=bundle.judge_outcomes,
-        sme_confusion=sme_conf_arg,
-        sme_ordinal_pairs=sme_pairs_arg,
-        sampling_strata=bundle.sampling_strata or None,
-        rubric_id=bundle.rubric_id,
-    )
+    precomputed_hourly: list[HourlyBurndownExportRow] | None = None
+    if isinstance(active_backend, OfflineEvalBackend):
+        summaries, raw_hourly = active_backend.evaluate_traces_and_burndown(
+            spans=bundle.spans,
+            judge_outcomes=bundle.judge_outcomes,
+            sme_confusion=sme_conf_arg,
+            sme_ordinal_pairs=sme_pairs_arg,
+            sampling_strata=bundle.sampling_strata or None,
+            rubric_id=bundle.rubric_id,
+        )
+        precomputed_hourly = [_mapping_to_hourly_row(r) for r in raw_hourly]
+    else:
+        summaries = active_backend.evaluate_traces(
+            spans=bundle.spans,
+            judge_outcomes=bundle.judge_outcomes,
+            sme_confusion=sme_conf_arg,
+            sme_ordinal_pairs=sme_pairs_arg,
+            sampling_strata=bundle.sampling_strata or None,
+            rubric_id=bundle.rubric_id,
+        )
     if not summaries:
         raise ValueError(
             f"Scenario bundle {bundle.corpus_id!r} produced zero application summaries."
@@ -319,7 +332,11 @@ def _evaluate_bundle(
         target_cache_hit_ratio=0.75,
     )
 
-    hourly_rows = hourly_burndown_rows(active_backend, bundle.spans)
+    hourly_rows = (
+        precomputed_hourly
+        if precomputed_hourly is not None
+        else hourly_burndown_rows(active_backend, bundle.spans)
+    )
     focus_rows, off_peak_plan = _compute_hourly_chargeback_and_schedule(
         bundle, summaries, hourly_rows
     )
@@ -339,6 +356,23 @@ def _evaluate_bundle(
     )
 
 
+@functools.lru_cache(maxsize=3)
+def _cached_builtin_corpus(corpus: CorpusChoice) -> ShowcaseRunArtifacts:
+    default_backend = OfflineEvalBackend()
+    if corpus == "retail-2app":
+        return _evaluate_bundle(build_retail_2app_bundle(), backend=default_backend)
+    if corpus == "golden-4app":
+        return _evaluate_bundle(
+            build_golden_4app_bundle(), backend=default_backend, dynamic_finops=True
+        )
+    twin_summaries = _cached_builtin_corpus("retail-2app").summaries
+    return _evaluate_bundle(
+        load_m2_live_bundle(),
+        offline_twin_summaries=twin_summaries,
+        backend=default_backend,
+    )
+
+
 def run_showcase_pipeline(
     corpus: CorpusChoice = "m2-live",
     *,
@@ -346,27 +380,27 @@ def run_showcase_pipeline(
     backend: EvalBackend | None = None,
 ) -> ShowcaseRunArtifacts:
     """Execute the Tier 1-3 evaluation and FinOps pipeline over the selected corpus."""
-    active_backend: EvalBackend = backend or SQLiteEvalBackend()
     if scenario_file is not None:
+        active_backend: EvalBackend = backend or OfflineEvalBackend()
         custom_bundle = load_scenario_bundle(scenario_file)
         return _evaluate_bundle(custom_bundle, backend=active_backend, dynamic_finops=True)
 
+    if corpus not in {"m2-live", "golden-4app", "retail-2app"}:
+        raise ValueError(
+            f"Unsupported corpus '{corpus}'. Expected m2-live, golden-4app, or retail-2app."
+        )
+    if backend is None:
+        return _cached_builtin_corpus(corpus)
+
     if corpus == "retail-2app":
-        return _evaluate_bundle(build_retail_2app_bundle(), backend=active_backend)
+        return _evaluate_bundle(build_retail_2app_bundle(), backend=backend)
     if corpus == "golden-4app":
-        return _evaluate_bundle(
-            build_golden_4app_bundle(), backend=active_backend, dynamic_finops=True
-        )
-    if corpus == "m2-live":
-        twin_artifacts = _evaluate_bundle(build_retail_2app_bundle(), backend=active_backend)
-        live_bundle = load_m2_live_bundle()
-        return _evaluate_bundle(
-            live_bundle,
-            offline_twin_summaries=twin_artifacts.summaries,
-            backend=active_backend,
-        )
-    raise ValueError(
-        f"Unsupported corpus '{corpus}'. Expected m2-live, golden-4app, or retail-2app."
+        return _evaluate_bundle(build_golden_4app_bundle(), backend=backend, dynamic_finops=True)
+    twin_artifacts = _evaluate_bundle(build_retail_2app_bundle(), backend=backend)
+    return _evaluate_bundle(
+        load_m2_live_bundle(),
+        offline_twin_summaries=twin_artifacts.summaries,
+        backend=backend,
     )
 
 

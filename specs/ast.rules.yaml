@@ -227,7 +227,7 @@ metadata:
     - "from .. import cli"
     - "from ....cli import app"
   valid_examples:
-    - "from bq_eval.core.engine.sql_eval import evaluate_traces_in_sqlite"
+    - "from bq_eval.core.engine.sql_eval import build_ai_generate_table_judge_sql"
     - "from bq_eval.finops.engine.spend import compute_pareto_frontier"
     - "from bq_eval.runner.engine.loader import OfflineSqlRunner"
 rule:
@@ -288,7 +288,7 @@ metadata:
   valid_examples:
     - "from bq_eval.core.contract.otel import OTelGenAISpanRecord"
     - "from bq_eval.core.engine.cost import compute_span_cost_usd"
-    - "from .sqlite_views import SQLITE_VIEWS_DDL"
+    - "from .calibration import rogan_gladen_calibrate"
 rule:
   any:
     - kind: import_statement

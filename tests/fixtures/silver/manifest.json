@@ -101,6 +101,46 @@
       "row_count": 5,
       "sha256": "2bc134a858df9fc6dd857bfd9d7cd8e9b55fd8ff2d3cba4a4b9c19e702f0aa68",
       "covers": "Caller entitlement rows (principal_email, business_unit, tenant_id) covering per-BU Gold SAs, UC9 tenant isolation, and __unowned__ admin (ADR-044, ADR-047)"
+    },
+    {
+      "file": "synthetic_alllogs_gateway_requests.jsonl",
+      "provenance": "SYNTHETIC_UNTIL_RECORDED",
+      "target_table": "obs_logs._AllLogs",
+      "row_count": 5,
+      "sha256": "88eca0469f9cc8094ec7de3ed72a61dc05169f4adcf4f5e799e793fb8414da29",
+      "covers": "Gateway inference_request logs covering 1:N failover attempts, duplicate request_id dedup, 3P inferred_ambiguous vs dedicated inferred pool tiering, and unregistered caller (M19-0)"
+    },
+    {
+      "file": "synthetic_capacity_pools.jsonl",
+      "provenance": "SYNTHETIC_UNTIL_RECORDED",
+      "target_table": "capacity_pools",
+      "row_count": 4,
+      "sha256": "aa63f6fcdc200a588a0a82044f7f2afe98a3d85a24a42b25504a0670493a6722",
+      "covers": "SCD-2 capacity pools covering dedicated PT FIXED_TERM/AUTO_RENEW order_id, 3P shared PT, and PayGo spillover"
+    },
+    {
+      "file": "synthetic_capacity_allocations.jsonl",
+      "provenance": "SYNTHETIC_UNTIL_RECORDED",
+      "target_table": "capacity_allocations",
+      "row_count": 3,
+      "sha256": "8c718931887e4757cacdff616fbcfb8cea119d48e43de3f64ec88d39017f31d2",
+      "covers": "SCD-2 funded pool share allocations across applications and business units"
+    },
+    {
+      "file": "synthetic_allowed_models.jsonl",
+      "provenance": "SYNTHETIC_UNTIL_RECORDED",
+      "target_table": "allowed_models",
+      "row_count": 4,
+      "sha256": "f0c0b7801ef7d919756b69b35589c1c5aab8c988636351adfcbb7af86ae82320",
+      "covers": "SCD-2 model governance registry covering zdr_allowed, invokable_status, lifecycle_tier, eol_date, and min_cache_tokens"
+    },
+    {
+      "file": "synthetic_burst_metrics_1m.jsonl",
+      "provenance": "SYNTHETIC_UNTIL_RECORDED",
+      "target_table": "burst_metrics_1m",
+      "row_count": 2,
+      "sha256": "f4b4d371e3f4f9995dddd829ef9b2927417061f242b9e7c8dabad34faa886a27",
+      "covers": "Gateway-written 1-minute sub-second micro-burst counters (peak_1s_rps, peak_10s_tpm, throttle_429_count)"
     }
   ],
   "hash_vectors": {

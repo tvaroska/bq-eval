@@ -1,0 +1,12 @@
+[
+  {"name": "allocation_id", "type": "STRING", "mode": "REQUIRED", "description": "Unique SCD-2 capacity allocation record identifier."},
+  {"name": "pool_id", "type": "STRING", "mode": "REQUIRED", "description": "Target logical capacity pool identifier."},
+  {"name": "order_id", "type": "STRING", "mode": "NULLABLE", "description": "Optional commercial order_id pin when funded against a specific cohort."},
+  {"name": "runtime_pool_id", "type": "STRING", "mode": "REQUIRED", "description": "Merged FCFS runtime pool bucket identifier."},
+  {"name": "app_id", "type": "STRING", "mode": "NULLABLE", "description": "Funded application identifier in app_registry (NULL when funded at business-unit level)."},
+  {"name": "business_unit", "type": "STRING", "mode": "NULLABLE", "description": "Funded business unit identifier."},
+  {"name": "cost_center", "type": "STRING", "mode": "NULLABLE", "description": "FinOps chargeback cost center code."},
+  {"name": "funded_units", "type": "FLOAT64", "mode": "REQUIRED", "description": "Funded share of committed capacity units owned by this consumer."},
+  {"name": "effective_from", "type": "TIMESTAMP", "mode": "REQUIRED", "description": "SCD-2 inclusive UTC start timestamp for this allocation."},
+  {"name": "effective_to", "type": "TIMESTAMP", "mode": "NULLABLE", "description": "SCD-2 exclusive UTC end timestamp (NULL while active)."}
+]

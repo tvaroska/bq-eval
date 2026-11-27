@@ -12,7 +12,6 @@ from pathlib import Path
 
 from bq_eval.core.contract.otel import OTelGenAISpanRecord, TracePayloadRecord
 from bq_eval.core.engine.cost import compute_span_burndown_tokens
-from bq_eval.core.engine.sql_eval import evaluate_step1_traces_in_sqlite
 from bq_eval.demo.contract.results import (
     GoldenSpanTemplate,
     GoldenTraceTemplate,
@@ -20,6 +19,8 @@ from bq_eval.demo.contract.results import (
     TimeShiftLoadgenReport,
 )
 from bq_eval.demo.golden_seeds import build_golden_seed_templates
+from bq_eval.runner.engine.bronze_bridge import spans_to_bronze_bundle
+from bq_eval.runner.engine.eval_adapter import evaluate_step1_traces
 
 DEFAULT_SEED_DATASET_ID: str = "agent_eval_seed"
 _REPLICA_TAG_RE = re.compile(r"-r(\d+)-\d{8}$")
@@ -178,7 +179,7 @@ def evaluate_time_shifted_corpus(
     traces_by_id: dict[str, list[OTelGenAISpanRecord]] = {}
     for s in spans:
         traces_by_id.setdefault(s.trace_id, []).append(s)
-    sqlite_step1 = evaluate_step1_traces_in_sqlite(spans)
+    sqlite_step1 = evaluate_step1_traces(spans)
 
     app_groups: dict[tuple[str, str, str, str], list[dict[str, float | int | bool | None]]] = {}
     last_1h_count = 0
@@ -314,10 +315,21 @@ def export_time_shifted_jsonl(
     payloads: Sequence[TracePayloadRecord],
     output_dir: Path,
 ) -> tuple[Path, Path]:
-    """Write time-shifted `otel_spans.jsonl` and `trace_payloads.jsonl` (wire-aligned)."""
+    """Write Bronze-shaped `_AllSpans`, `app_registry`, `workflow_events`, and wire-aligned JSONL."""
     output_dir.mkdir(parents=True, exist_ok=True)
     spans_path = output_dir / "otel_spans.jsonl"
     payloads_path = output_dir / "trace_payloads.jsonl"
+    bronze_spans, _, app_rows, _ = spans_to_bronze_bundle(spans, payloads=payloads)
+
+    (output_dir / "obs_traces_all_spans.jsonl").write_text(
+        "".join(json.dumps(r) + "\n" for r in bronze_spans),
+        encoding="utf-8",
+    )
+    (output_dir / "app_registry.jsonl").write_text(
+        "".join(json.dumps(r) + "\n" for r in app_rows),
+        encoding="utf-8",
+    )
+    (output_dir / "workflow_events.jsonl").write_text("", encoding="utf-8")
 
     with spans_path.open("w", encoding="utf-8") as sf:
         for s in spans:

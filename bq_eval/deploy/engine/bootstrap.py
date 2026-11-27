@@ -1,8 +1,7 @@
-"""Zero-manual-edit SQL bootstrap renderer and offline schema validator."""
+"""Zero-manual-edit Silver + Gold SQL bootstrap renderer and offline validator (`ADR-048`, `ADR-049`)."""
 
 from __future__ import annotations
 
-import json
 import re
 from collections.abc import Sequence
 from pathlib import Path
@@ -13,17 +12,33 @@ from bq_eval.deploy.engine.silver_deploy import (
     SILVER_SQL_ORDER,
     render_silver_params,
     validate_silver_statements_offline,
-    validate_view_columns_ordered,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_SQL_DIR = resolve_packaged_data("sql")
+
+GOLD_SQL_ORDER: tuple[str, ...] = (
+    "core/ddl.sql",
+    "core/pricing_seed.sql",
+    "core/gold_cost_views.sql",
+    "core/gold_eval_gates.sql",
+    "core/step2_stateless_eval.sql",
+    "core/step3_saved_results.sql",
+    "core/step3_daily_quota_guard.sql",
+    "core/summary_views.sql",
+    "finops/capacity_views.sql",
+)
+
+_OPEN_ONLY_GOLD_FILES: frozenset[str] = frozenset(
+    {"core/gold_cost_views.sql", "finops/capacity_views.sql"}
+)
 
 _PROJECT_RE = re.compile(r"^[a-zA-Z0-9_-]{2,64}$")
 _DATASET_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]{0,127}$")
 _CONNECTION_RE = re.compile(r"^[a-zA-Z0-9_.-]{3,128}$")
 _BUCKET_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{1,220}[a-z0-9]$")
 _PREFIX_RE = re.compile(r"^[a-zA-Z0-9_./-]*$")
+_ENDPOINT_RE = re.compile(r"^[a-zA-Z0-9_./:-]{2,256}$")
 _UNRESOLVED_TOKEN_RE = re.compile(r"\$\{[A-Z0-9_]+\}|YOUR_GENAI_PAYLOAD_BUCKET")
 
 SKIP_DRY_RUN_PREFIXES: tuple[str, ...] = (
@@ -57,17 +72,6 @@ ALLOWED_BOOTSTRAP_PREFIXES: tuple[str, ...] = (
 
 _VIEW_NAME_RE = re.compile(
     r"(?is)^CREATE\s+(?:OR\s+REPLACE\s+)?VIEW\s+`?([a-zA-Z0-9_.-]+)`?\s+AS\b"
-)
-_FULL_CAPTURE_ONLY_OBJECTS: frozenset[str] = frozenset(
-    {
-        "completions",
-        "v_otel_allspans_only",
-        "v_otel_logs_payloads_only",
-        "otel_spans",
-        "trace_payloads",
-        "v_mode_c_hybrid_otel_spans",
-        "v_mode_c_hybrid_trace_payloads",
-    }
 )
 
 
@@ -172,11 +176,7 @@ def _read_identifier(sql: str, i: int) -> tuple[str, int]:
 
 
 def split_sql_statements_stdlib(sql: str) -> list[str]:
-    """Split a multi-statement BigQuery SQL script without external dependencies.
-
-    Preserves `BEGIN ... END;` stored-procedure bodies as single statements while respecting
-    single-quoted strings, backtick identifiers, and `--` / `/* ... */` comments.
-    """
+    """Split a multi-statement BigQuery SQL script without external dependencies."""
     stmts: list[str] = []
     n = len(sql)
     i = 0
@@ -235,19 +235,29 @@ def substitute_sql_parameters(  # noqa: PLR0913
     *,
     project_id: str,
     dataset_id: str = "agent_eval",
+    location: str = "US",
     connection_id: str = "us.vertex_ai_connection",
     payload_bucket: str | None = None,
     payload_prefix: str = "bq-eval/",
     traces_dataset_id: str = "obs_traces",
+    platform_traces_dataset_id: str = "silver_internal",
+    platform_traces_table_id: str = "platform_spans",
     logs_dataset_id: str = "obs_logs",
     seed_dataset_id: str = "agent_eval_seed",
-    aws_omni_connection_id: str | None = None,
-    aws_s3_bucket: str | None = None,
-    azure_omni_connection_id: str | None = None,
-    azure_storage_account: str | None = None,
-    azure_container: str | None = None,
+    silver_internal_dataset: str = "silver_internal",
+    silver_ref_dataset: str = "silver_ref",
+    silver_open_dataset: str = "silver_open",
+    silver_restricted_dataset: str = "silver_restricted",
+    read_margin_minutes: int = 60,
+    settle_minutes: int = 5,
+    outcome_lookback_days: int = 30,
+    gold_lookback_hours: int = 720,
+    shape3_prefix: str = "bq-eval/shape3/",
+    shape3_format: str = "JSON",
+    flash_judge_endpoint: str = "gemini-3.8-flash",
+    argon_judge_endpoint: str = "gemini-4-argon",
 ) -> str:
-    """Render parameterized BigQuery SQL with concrete project, dataset, connection, and bucket."""
+    """Render parameterized Silver + Gold BigQuery SQL with concrete datasets and connection."""
     valid_project = _validate_param(project_id, _PROJECT_RE, "project_id")
     valid_dataset = _validate_param(dataset_id, _DATASET_RE, "dataset_id")
     valid_conn = _validate_param(connection_id, _CONNECTION_RE, "connection_id")
@@ -256,33 +266,40 @@ def substitute_sql_parameters(  # noqa: PLR0913
     valid_traces = _validate_param(traces_dataset_id, _DATASET_RE, "traces_dataset_id")
     valid_logs = _validate_param(logs_dataset_id, _DATASET_RE, "logs_dataset_id")
     valid_seed = _validate_param(seed_dataset_id, _DATASET_RE, "seed_dataset_id")
+    valid_flash_ep = _validate_param(flash_judge_endpoint, _ENDPOINT_RE, "flash_judge_endpoint")
+    valid_argon_ep = _validate_param(argon_judge_endpoint, _ENDPOINT_RE, "argon_judge_endpoint")
+    if gold_lookback_hours <= 0:
+        raise ValueError(f"gold_lookback_hours must be positive, got {gold_lookback_hours}")
 
-    rendered = (
-        sql.replace("${PROJECT_ID}", valid_project)
-        .replace("${DATASET_ID}", valid_dataset)
-        .replace("${CONNECTION_ID}", valid_conn)
-        .replace("${PAYLOAD_BUCKET}", valid_bucket)
-        .replace("${PREFIX}", valid_prefix)
+    silver_params = render_silver_params(
+        project_id=valid_project,
+        location=location,
+        silver_internal_dataset=silver_internal_dataset,
+        silver_ref_dataset=silver_ref_dataset,
+        silver_open_dataset=silver_open_dataset,
+        silver_restricted_dataset=silver_restricted_dataset,
+        traces_dataset_id=valid_traces,
+        platform_traces_dataset_id=platform_traces_dataset_id,
+        platform_traces_table_id=platform_traces_table_id,
+        logs_dataset_id=valid_logs,
+        connection_id=valid_conn,
+        payload_bucket=valid_bucket,
+        shape3_prefix=shape3_prefix,
+        shape3_format=shape3_format,
+        read_margin_minutes=read_margin_minutes,
+        settle_minutes=settle_minutes,
+        outcome_lookback_days=outcome_lookback_days,
     )
-    if aws_omni_connection_id is not None:
-        valid_aws_conn = _validate_param(
-            aws_omni_connection_id, _CONNECTION_RE, "aws_omni_connection_id"
-        )
-        rendered = rendered.replace("${AWS_OMNI_CONNECTION_ID}", valid_aws_conn)
-    if aws_s3_bucket is not None:
-        valid_aws_bucket = _validate_param(aws_s3_bucket, _BUCKET_RE, "aws_s3_bucket")
-        rendered = rendered.replace("${AWS_S3_BUCKET}", valid_aws_bucket)
-    if azure_omni_connection_id is not None:
-        valid_az_conn = _validate_param(
-            azure_omni_connection_id, _CONNECTION_RE, "azure_omni_connection_id"
-        )
-        rendered = rendered.replace("${AZURE_OMNI_CONNECTION_ID}", valid_az_conn)
-    if azure_storage_account is not None:
-        valid_az_acct = _validate_param(azure_storage_account, _BUCKET_RE, "azure_storage_account")
-        rendered = rendered.replace("${AZURE_STORAGE_ACCOUNT}", valid_az_acct)
-    if azure_container is not None:
-        valid_az_ctr = _validate_param(azure_container, _BUCKET_RE, "azure_container")
-        rendered = rendered.replace("${AZURE_CONTAINER}", valid_az_ctr)
+    rendered = sql
+    for key, val in silver_params.items():
+        rendered = rendered.replace(f"${{{key}}}", val)
+    rendered = (
+        rendered.replace("${DATASET_ID}", valid_dataset)
+        .replace("${PREFIX}", valid_prefix)
+        .replace("${GOLD_LOOKBACK_HOURS}", str(gold_lookback_hours))
+        .replace("endpoint = 'gemini-3.8-flash'", f"endpoint = '{valid_flash_ep}'")
+        .replace("endpoint = 'gemini-4-argon'", f"endpoint = '{valid_argon_ep}'")
+    )
     rendered = rendered.replace("`agent_eval`", f"`{valid_project}.{valid_dataset}`")
     rendered = rendered.replace("`agent_eval_seed`", f"`{valid_project}.{valid_seed}`")
     rendered = rendered.replace("`agent_eval.", f"`{valid_project}.{valid_dataset}.")
@@ -290,101 +307,6 @@ def substitute_sql_parameters(  # noqa: PLR0913
     rendered = rendered.replace("`obs_traces.", f"`{valid_project}.{valid_traces}.")
     rendered = rendered.replace("`obs_logs.", f"`{valid_project}.{valid_logs}.")
     return rendered
-
-
-def _target_object_short_name(stmt: str) -> str:
-    match = re.match(
-        r"(?is)^CREATE\s+(?:OR\s+REPLACE\s+)?(?:EXTERNAL\s+)?(?:TABLE|VIEW|MODEL|PROCEDURE)\s+"
-        r"(?:IF\s+NOT\s+EXISTS\s+)?`?([a-zA-Z0-9_.-]+)`?",
-        stmt,
-    )
-    if match is None:
-        return ""
-    return match.group(1).rsplit(".", 1)[-1].lower()
-
-
-def _filter_light_mode_statements(
-    stmts: Sequence[str],
-) -> list[str]:
-    kept: list[str] = []
-    for stmt in stmts:
-        short = _target_object_short_name(stmt)
-        if short in _FULL_CAPTURE_ONLY_OBJECTS:
-            continue
-        if "_AllSpans" in stmt or "_AllLogs" in stmt:
-            continue
-        kept.append(stmt)
-    return kept
-
-
-def _build_mode_core_statements(
-    *,
-    mode: BootstrapMode,
-    valid_project: str,
-    valid_dataset: str,
-    loaded: dict[str, list[str]],
-) -> list[tuple[str, str]]:
-    ddl_stmts = loaded["core/ddl.sql"]
-    pricing_stmts = loaded["core/pricing_seed.sql"]
-    compat_stmts = loaded.get("core/otel_compat_views.sql", [])
-    bqaa_stmts = loaded.get("core/bqaa_adapter_views.sql", [])
-
-    if mode == "full":
-        out = [(f"core/ddl.sql#{i}", s) for i, s in enumerate(ddl_stmts, start=1)]
-        out.extend((f"core/pricing_seed.sql#{i}", s) for i, s in enumerate(pricing_stmts, start=1))
-        out.extend(
-            (f"core/otel_compat_views.sql#{i}", s) for i, s in enumerate(compat_stmts, start=1)
-        )
-        return out
-    if mode == "light":
-        out = [
-            (f"core/ddl.sql#{i}", s)
-            for i, s in enumerate(_filter_light_mode_statements(ddl_stmts), start=1)
-        ]
-        out.extend((f"core/pricing_seed.sql#{i}", s) for i, s in enumerate(pricing_stmts, start=1))
-        out.extend(
-            (f"core/bqaa_adapter_views.sql#{i}", s)
-            for i, s in enumerate(_filter_light_mode_statements(bqaa_stmts), start=1)
-        )
-        out.append(
-            (
-                "mode_a_binding#1",
-                f"CREATE OR REPLACE VIEW `{valid_project}.{valid_dataset}.otel_spans` AS\n"
-                f"SELECT * FROM `{valid_project}.{valid_dataset}.v_mode_a_otel_spans`",
-            )
-        )
-        out.append(
-            (
-                "mode_a_binding#2",
-                f"CREATE OR REPLACE VIEW `{valid_project}.{valid_dataset}.trace_payloads` AS\n"
-                f"SELECT * FROM `{valid_project}.{valid_dataset}.v_mode_a_trace_payloads`",
-            )
-        )
-        return out
-
-    out = [(f"core/ddl.sql#{i}", s) for i, s in enumerate(ddl_stmts, start=1)]
-    out.extend((f"core/pricing_seed.sql#{i}", s) for i, s in enumerate(pricing_stmts, start=1))
-    out.extend(
-        (f"core/otel_compat_views.sql#{i}", s)
-        for i, s in enumerate(compat_stmts, start=1)
-        if _target_object_short_name(s) not in {"otel_spans", "trace_payloads"}
-    )
-    out.extend((f"core/bqaa_adapter_views.sql#{i}", s) for i, s in enumerate(bqaa_stmts, start=1))
-    out.append(
-        (
-            "mode_c_binding#1",
-            f"CREATE OR REPLACE VIEW `{valid_project}.{valid_dataset}.otel_spans` AS\n"
-            f"SELECT * FROM `{valid_project}.{valid_dataset}.v_mode_c_hybrid_otel_spans`",
-        )
-    )
-    out.append(
-        (
-            "mode_c_binding#2",
-            f"CREATE OR REPLACE VIEW `{valid_project}.{valid_dataset}.trace_payloads` AS\n"
-            f"SELECT * FROM `{valid_project}.{valid_dataset}.v_mode_c_hybrid_trace_payloads`",
-        )
-    )
-    return out
 
 
 def _render_silver_sql_files(
@@ -403,7 +325,7 @@ def _render_silver_sql_files(
 
 def render_bootstrap_statements(  # noqa: PLR0913
     *,
-    mode: BootstrapMode,
+    mode: BootstrapMode = "gold",
     project_id: str,
     dataset_id: str = "agent_eval",
     location: str = "US",
@@ -421,100 +343,74 @@ def render_bootstrap_statements(  # noqa: PLR0913
     read_margin_minutes: int = 60,
     settle_minutes: int = 5,
     outcome_lookback_days: int = 30,
+    gold_lookback_hours: int = 720,
     shape3_prefix: str = "bq-eval/shape3/",
     shape3_format: str = "JSON",
-    include_omni: bool = False,
-    aws_omni_connection_id: str | None = None,
-    aws_s3_bucket: str | None = None,
-    azure_omni_connection_id: str | None = None,
-    azure_storage_account: str | None = None,
-    azure_container: str | None = None,
+    flash_judge_endpoint: str = "gemini-3.8-flash",
+    argon_judge_endpoint: str = "gemini-4-argon",
     sql_dir: Path | None = None,
 ) -> list[tuple[str, str]]:
-    """Build ordered `(label, sql_statement)` list for `light`, `full`, `hybrid`, or `silver` deploy."""
-    if mode not in ("light", "full", "hybrid", "silver"):
-        raise ValueError(
-            f"Unsupported bootstrap mode {mode!r}: expected light, full, hybrid, or silver."
-        )
+    """Build ordered `(label, sql_statement)` list for `silver` or `gold` deployment."""
+    if mode not in ("silver", "gold"):
+        raise ValueError(f"Unsupported bootstrap mode {mode!r}: expected silver or gold.")
 
     resolved_sql_dir = sql_dir if sql_dir is not None else resolve_packaged_data("sql")
     valid_project = _validate_param(project_id, _PROJECT_RE, "project_id")
+    valid_conn = _validate_param(connection_id, _CONNECTION_RE, "connection_id")
+    valid_bucket = _validate_param(payload_bucket or valid_project, _BUCKET_RE, "payload_bucket")
+    silver_params = render_silver_params(
+        project_id=valid_project,
+        location=location,
+        silver_internal_dataset=silver_internal_dataset,
+        silver_ref_dataset=silver_ref_dataset,
+        silver_open_dataset=silver_open_dataset,
+        silver_restricted_dataset=silver_restricted_dataset,
+        traces_dataset_id=traces_dataset_id,
+        platform_traces_dataset_id=platform_traces_dataset_id,
+        platform_traces_table_id=platform_traces_table_id,
+        logs_dataset_id=logs_dataset_id,
+        connection_id=valid_conn,
+        payload_bucket=valid_bucket,
+        shape3_prefix=shape3_prefix,
+        shape3_format=shape3_format,
+        read_margin_minutes=read_margin_minutes,
+        settle_minutes=settle_minutes,
+        outcome_lookback_days=outcome_lookback_days,
+    )
+    ordered = _render_silver_sql_files(resolved_sql_dir, silver_params)
     if mode == "silver":
-        valid_conn = _validate_param(connection_id, _CONNECTION_RE, "connection_id")
-        valid_bucket = _validate_param(
-            payload_bucket or valid_project, _BUCKET_RE, "payload_bucket"
-        )
-        silver_params = render_silver_params(
-            project_id=valid_project,
-            location=location,
-            silver_internal_dataset=silver_internal_dataset,
-            silver_ref_dataset=silver_ref_dataset,
-            silver_open_dataset=silver_open_dataset,
-            silver_restricted_dataset=silver_restricted_dataset,
-            traces_dataset_id=traces_dataset_id,
-            platform_traces_dataset_id=platform_traces_dataset_id,
-            platform_traces_table_id=platform_traces_table_id,
-            logs_dataset_id=logs_dataset_id,
-            connection_id=valid_conn,
-            payload_bucket=valid_bucket,
-            shape3_prefix=shape3_prefix,
-            shape3_format=shape3_format,
-            read_margin_minutes=read_margin_minutes,
-            settle_minutes=settle_minutes,
-            outcome_lookback_days=outcome_lookback_days,
-        )
-        return _render_silver_sql_files(resolved_sql_dir, silver_params)
+        return ordered
 
     valid_dataset = _validate_param(dataset_id, _DATASET_RE, "dataset_id")
-
-    def _load(filename: str) -> list[str]:
-        raw = (resolved_sql_dir / filename).read_text(encoding="utf-8")
+    for rel_name in GOLD_SQL_ORDER:
+        raw = (resolved_sql_dir / rel_name).read_text(encoding="utf-8")
         rendered = substitute_sql_parameters(
             raw,
             project_id=valid_project,
             dataset_id=valid_dataset,
-            connection_id=connection_id,
-            payload_bucket=payload_bucket,
+            location=location,
+            connection_id=valid_conn,
+            payload_bucket=valid_bucket,
             payload_prefix=payload_prefix,
             traces_dataset_id=traces_dataset_id,
+            platform_traces_dataset_id=platform_traces_dataset_id,
+            platform_traces_table_id=platform_traces_table_id,
             logs_dataset_id=logs_dataset_id,
-            aws_omni_connection_id=aws_omni_connection_id,
-            aws_s3_bucket=aws_s3_bucket,
-            azure_omni_connection_id=azure_omni_connection_id,
-            azure_storage_account=azure_storage_account,
-            azure_container=azure_container,
+            silver_internal_dataset=silver_internal_dataset,
+            silver_ref_dataset=silver_ref_dataset,
+            silver_open_dataset=silver_open_dataset,
+            silver_restricted_dataset=silver_restricted_dataset,
+            read_margin_minutes=read_margin_minutes,
+            settle_minutes=settle_minutes,
+            outcome_lookback_days=outcome_lookback_days,
+            gold_lookback_hours=gold_lookback_hours,
+            shape3_prefix=shape3_prefix,
+            shape3_format=shape3_format,
+            flash_judge_endpoint=flash_judge_endpoint,
+            argon_judge_endpoint=argon_judge_endpoint,
         )
-        return split_sql_statements_stdlib(rendered)
-
-    loaded_core: dict[str, list[str]] = {
-        "core/ddl.sql": _load("core/ddl.sql"),
-        "core/pricing_seed.sql": _load("core/pricing_seed.sql"),
-    }
-    if mode != "light":
-        loaded_core["core/otel_compat_views.sql"] = _load("core/otel_compat_views.sql")
-    if mode != "full":
-        loaded_core["core/bqaa_adapter_views.sql"] = _load("core/bqaa_adapter_views.sql")
-
-    ordered = _build_mode_core_statements(
-        mode=mode,
-        valid_project=valid_project,
-        valid_dataset=valid_dataset,
-        loaded=loaded_core,
-    )
-    common_files = [
-        "core/step1_trace_views.sql",
-        "core/step2_stateless_eval.sql",
-        "core/step3_saved_results.sql",
-        "core/step3_daily_quota_guard.sql",
-        "core/views.sql",
-        "core/summary_views.sql",
-        "finops/capacity_views.sql",
-    ]
-    if include_omni and (resolved_sql_dir / "finops" / "omni_spoke_views.sql").is_file():
-        common_files.append("finops/omni_spoke_views.sql")
-
-    for fname in common_files:
-        ordered.extend((f"{fname}#{idx}", stmt) for idx, stmt in enumerate(_load(fname), start=1))
+        for idx, stmt in enumerate(split_sql_statements_stdlib(rendered), start=1):
+            ordered.append((f"{rel_name}#{idx}", stmt))
     return ordered
 
 
@@ -563,59 +459,48 @@ def _detect_view_cycles(views: dict[str, str]) -> list[str]:
     return sorted(view_names - visited)
 
 
-def _validate_mode_bindings(  # noqa: PLR0913
+def _validate_gold_statements_offline(  # noqa: PLR0913
+    gold_stmts: Sequence[tuple[str, str]],
     *,
-    mode: BootstrapMode,
     project_id: str,
-    dataset_id: str,
-    stmts: Sequence[tuple[str, str]],
+    silver_internal_dataset: str,
+    silver_restricted_dataset: str,
+    traces_dataset_id: str,
+    logs_dataset_id: str,
     views: dict[str, str],
-    schema_cols: Sequence[str],
 ) -> list[str]:
     errors: list[str] = []
-    expected_otel = f"{project_id}.{dataset_id}.otel_spans"
-    expected_payload = f"{project_id}.{dataset_id}.trace_payloads"
-    if expected_otel not in views:
-        errors.append(f"Missing canonical view binding: {expected_otel}")
-    if expected_payload not in views:
-        errors.append(f"Missing canonical view binding: {expected_payload}")
-
-    expected_targets: dict[BootstrapMode, tuple[str, tuple[str, ...]]] = {
-        "light": ("v_mode_a_otel_spans", (f"{project_id}.{dataset_id}.v_bqaa_otel_spans",)),
-        "full": ("v_otel_allspans_only", (f"{project_id}.{dataset_id}.v_otel_allspans_only",)),
-        "hybrid": (
-            "v_mode_c_hybrid_otel_spans",
-            (
-                f"{project_id}.{dataset_id}.v_otel_allspans_only",
-                f"{project_id}.{dataset_id}.v_bqaa_otel_spans",
-            ),
-        ),
-    }
-    binding_ref, adapter_views = expected_targets[mode]
-    if mode == "light":
-        for label, stmt in stmts:
-            if "_AllSpans" in stmt or "_AllLogs" in stmt:
-                errors.append(f"{label}: light mode must not reference _AllSpans or _AllLogs")
-    if expected_otel in views and binding_ref not in views[expected_otel]:
-        errors.append(f"{mode} mode otel_spans must point to {binding_ref}")
-
-    for target_view in adapter_views:
-        if target_view not in views:
-            errors.append(f"Missing required span adapter view: {target_view}")
-            continue
-        errors.extend(
-            validate_view_columns_ordered(
-                views[target_view],
-                schema_cols,
-                view_name=target_view,
-            )
-        )
+    forbidden_open_refs = (
+        f"{project_id}.{silver_restricted_dataset}.",
+        f"{project_id}.{silver_internal_dataset}.",
+        f"{project_id}.{traces_dataset_id}.",
+        f"{project_id}.{logs_dataset_id}.",
+        "shape3_payloads",
+    )
+    for label, stmt in gold_stmts:
+        upper = stmt.upper()
+        if "CREATE OR REPLACE TABLE FUNCTION" in upper or "CREATE OR REPLACE FUNCTION" in upper:
+            body_bytes = len(stmt.encode("utf-8"))
+            if body_bytes > 32_768:
+                errors.append(
+                    f"{label}: BigQuery routine body {body_bytes} B exceeds 32,768 B limit"
+                )
+        rel_file = label.split("#", 1)[0]
+        if rel_file in _OPEN_ONLY_GOLD_FILES:
+            for forbidden in forbidden_open_refs:
+                if forbidden in stmt:
+                    errors.append(
+                        f"{label}: open-only Gold file must never reference {forbidden!r}"
+                    )
+    cycles = _detect_view_cycles(views)
+    if cycles:
+        errors.append(f"Cyclic view dependency detected: {cycles}")
     return errors
 
 
 def validate_bootstrap_offline(  # noqa: PLR0913
     *,
-    mode: BootstrapMode,
+    mode: BootstrapMode = "gold",
     project_id: str = "showcase-project",
     dataset_id: str = "agent_eval",
     location: str = "US",
@@ -633,17 +518,14 @@ def validate_bootstrap_offline(  # noqa: PLR0913
     read_margin_minutes: int = 60,
     settle_minutes: int = 5,
     outcome_lookback_days: int = 30,
+    gold_lookback_hours: int = 720,
     shape3_prefix: str = "bq-eval/shape3/",
     shape3_format: str = "JSON",
-    include_omni: bool = False,
-    aws_omni_connection_id: str | None = None,
-    aws_s3_bucket: str | None = None,
-    azure_omni_connection_id: str | None = None,
-    azure_storage_account: str | None = None,
-    azure_container: str | None = None,
+    flash_judge_endpoint: str = "gemini-3.8-flash",
+    argon_judge_endpoint: str = "gemini-4-argon",
     sql_dir: Path | None = None,
 ) -> tuple[BootstrapValidationReport, list[tuple[str, str]]]:
-    """Validate rendered bootstrap SQL offline (zero GCP credentials) across placeholders, schema & DAG."""
+    """Validate rendered `silver` or `gold` bootstrap SQL offline (zero GCP credentials)."""
     resolved_sql_dir = sql_dir if sql_dir is not None else resolve_packaged_data("sql")
     stmts = render_bootstrap_statements(
         mode=mode,
@@ -664,14 +546,11 @@ def validate_bootstrap_offline(  # noqa: PLR0913
         read_margin_minutes=read_margin_minutes,
         settle_minutes=settle_minutes,
         outcome_lookback_days=outcome_lookback_days,
+        gold_lookback_hours=gold_lookback_hours,
         shape3_prefix=shape3_prefix,
         shape3_format=shape3_format,
-        include_omni=include_omni,
-        aws_omni_connection_id=aws_omni_connection_id,
-        aws_s3_bucket=aws_s3_bucket,
-        azure_omni_connection_id=azure_omni_connection_id,
-        azure_storage_account=azure_storage_account,
-        azure_container=azure_container,
+        flash_judge_endpoint=flash_judge_endpoint,
+        argon_judge_endpoint=argon_judge_endpoint,
         sql_dir=resolved_sql_dir,
     )
     unresolved: set[str] = set()
@@ -696,53 +575,49 @@ def validate_bootstrap_offline(  # noqa: PLR0913
             views[vm.group(1)] = stmt
 
     bucket = payload_bucket or project_id
+    silver_stmts = [pair for pair in stmts if pair[0].startswith("silver/")]
+    silver_report = validate_silver_statements_offline(
+        sql_dir=resolved_sql_dir,
+        stmts=silver_stmts,
+        project_id=project_id,
+        silver_internal_dataset=silver_internal_dataset,
+        silver_open_dataset=silver_open_dataset,
+        silver_restricted_dataset=silver_restricted_dataset,
+        connection_id=connection_id,
+        payload_bucket=bucket,
+        shape3_prefix=shape3_prefix,
+        unresolved=unresolved,
+        errors=errors,
+        checked=checked,
+        skipped=skipped,
+    )
     if mode == "silver":
-        report = validate_silver_statements_offline(
-            sql_dir=resolved_sql_dir,
-            stmts=stmts,
+        return silver_report, stmts
+
+    gold_stmts = [pair for pair in stmts if not pair[0].startswith("silver/")]
+    gold_errors = list(silver_report.errors)
+    gold_errors.extend(
+        _validate_gold_statements_offline(
+            gold_stmts,
             project_id=project_id,
             silver_internal_dataset=silver_internal_dataset,
-            silver_open_dataset=silver_open_dataset,
             silver_restricted_dataset=silver_restricted_dataset,
-            connection_id=connection_id,
-            payload_bucket=bucket,
-            shape3_prefix=shape3_prefix,
-            unresolved=unresolved,
-            errors=errors,
-            checked=checked,
-            skipped=skipped,
-        )
-        return report, stmts
-
-    schema_path = resolved_sql_dir / "core" / "otel_spans_schema.json"
-    schema_cols = [str(col["name"]) for col in json.loads(schema_path.read_text(encoding="utf-8"))]
-
-    errors.extend(
-        _validate_mode_bindings(
-            mode=mode,
-            project_id=project_id,
-            dataset_id=dataset_id,
-            stmts=stmts,
+            traces_dataset_id=traces_dataset_id,
+            logs_dataset_id=logs_dataset_id,
             views=views,
-            schema_cols=schema_cols,
         )
     )
-    cycles = _detect_view_cycles(views)
-    if cycles:
-        errors.append(f"Cyclic view dependency detected: {cycles}")
-
-    prefix = normalize_payload_prefix(payload_prefix)
     report = BootstrapValidationReport(
-        mode=mode,
+        mode="gold",
         project_id=project_id,
         dataset_id=dataset_id,
         connection_id=connection_id,
-        payload_uri_pattern=f"gs://{bucket}/{prefix}*.jsonl",
+        payload_uri_pattern=silver_report.payload_uri_pattern,
         statement_count=len(stmts),
         checked_count=checked,
         skipped_count=skipped,
-        schema_column_count=len(schema_cols),
+        schema_column_count=silver_report.schema_column_count,
         unresolved_placeholders=tuple(sorted(unresolved)),
-        errors=tuple(errors),
+        errors=tuple(gold_errors),
     )
     return report, stmts

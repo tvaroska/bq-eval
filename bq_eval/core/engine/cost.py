@@ -1,4 +1,4 @@
-"""Per-span token burndown and USD cost, including the price step above 200K tokens."""
+"""Per-span token burndown and USD cost, including the price step above 200K total context."""
 
 from __future__ import annotations
 
@@ -23,11 +23,7 @@ def resolve_span_sku(
     if sku is not None:
         return sku
     has_tokens = (
-        span.input_tokens > 0
-        or span.output_tokens > 0
-        or span.thinking_tokens > 0
-        or span.cache_write_5m_tokens > 0
-        or span.cache_write_1h_tokens > 0
+        span.prompt_context_tokens > 0 or span.output_tokens > 0 or span.thinking_tokens > 0
     )
     if not has_tokens:
         return None
@@ -45,17 +41,28 @@ def resolve_span_sku(
     return resolved
 
 
+def meets_min_cache_floor(
+    span: OTelGenAISpanRecord,
+    sku: ModelPricingSKU | None = None,
+) -> bool:
+    """Return True when total prompt context meets or exceeds SKU `min_cache_tokens`."""
+    resolved = resolve_span_sku(span, sku)
+    if resolved is None:
+        return True
+    return span.prompt_context_tokens >= resolved.min_cache_tokens
+
+
 def is_span_long_context_cliff(
     span: OTelGenAISpanRecord,
     sku: ModelPricingSKU | None = None,
 ) -> bool:
-    """Return True iff `span.input_tokens` exceeds its resolved SKU's long-context cliff."""
+    """Return True iff total prompt context exceeds its resolved SKU's long-context cliff."""
     resolved = resolve_span_sku(span, sku)
     if resolved is None:
         return False
     return (
         resolved.long_context_threshold_tokens is not None
-        and span.input_tokens > resolved.long_context_threshold_tokens
+        and span.prompt_context_tokens > resolved.long_context_threshold_tokens
     )
 
 
@@ -71,6 +78,7 @@ def compute_span_burndown_tokens(
             cached_input_tokens=span.cached_input_tokens,
             output_tokens=span.output_tokens,
             thinking_tokens=span.thinking_tokens,
+            token_semantics=span.token_semantics,
             cache_write_5m_tokens=span.cache_write_5m_tokens,
             cache_write_1h_tokens=span.cache_write_1h_tokens,
         )
@@ -80,6 +88,7 @@ def compute_span_burndown_tokens(
         output_tokens=span.output_tokens,
         thinking_tokens=span.thinking_tokens,
         long_context_threshold=resolved.long_context_threshold_tokens,
+        token_semantics=span.token_semantics,
         cache_write_5m_tokens=span.cache_write_5m_tokens,
         cache_write_1h_tokens=span.cache_write_1h_tokens,
         uncached_weight=resolved.burndown_uncached_weight,
@@ -109,22 +118,14 @@ def compute_span_cost_usd(
     span: OTelGenAISpanRecord,
     sku: ModelPricingSKU | None = None,
 ) -> float:
-    """Single canonical 1P/3P span USD cost formula.
-
-    Separates SKU burndown weights from PayGo billing multipliers (`1.8x` Priority / `0.5x` Flex)
-    and prices 5m/1h ephemeral cache-write tokens on 3P models cleanly.
-    """
+    """Single canonical 1P/3P span USD cost formula keyed on `prompt_context_tokens`."""
     resolved = resolve_span_sku(span, sku)
     if resolved is None:
         return 0.0
 
     uncached_input = span.uncached_input_tokens
     output_and_thinking = span.output_tokens + span.thinking_tokens
-    is_cliff = (
-        resolved.long_context_threshold_tokens is not None
-        and span.input_tokens > resolved.long_context_threshold_tokens
-    )
-    if is_cliff:
+    if is_span_long_context_cliff(span, resolved):
         cw5_rate = resolved.long_context_input_usd_per_1m * resolved.burndown_cache_write_5m_weight
         cw1_rate = resolved.long_context_input_usd_per_1m * resolved.burndown_cache_write_1h_weight
         base_usd = (
